@@ -190,8 +190,8 @@ extension HLSVideoEngine {
         }
         // AE#641: this session's bridge already decoded nothing from this stream, and a second
         // bridge would be handed the same bytes.
-        let knownUndecodable = sourceAudioStreamIndex >= 0
-            && undecodableAudioStreamIndex == sourceAudioStreamIndex
+        let knownUndecodable = Self.isKnownUndecodable(
+            undecodableAudioStreamIndices, sourceAudioStreamIndex: sourceAudioStreamIndex)
         if knownUndecodable {
             EngineLog.emit(
                 "[HLSVideoEngine] AE#641 audio stream \(sourceAudioStreamIndex) decoded nothing earlier "
@@ -219,7 +219,8 @@ extension HLSVideoEngine {
                 codecTagOverride: vcfg.codecTagOverride,
                 doviConfig: vcfg.doviConfig,
                 colorOverride: vcfg.colorOverride,
-                extradataOverride: vcfg.extradataOverride
+                extradataOverride: vcfg.extradataOverride,
+                convertsAnnexBSamples: vcfg.convertsAnnexBSamples
             )
             let probeAudio = MP4SegmentMuxer.AudioConfig(
                 codecpar: cfg.codecpar,

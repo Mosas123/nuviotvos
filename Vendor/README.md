@@ -1,8 +1,8 @@
 # Vendored playback dependencies
 
-## AetherEngine (pin 7.22.2)
+## AetherEngine (pin 7.33.2)
 
-Local pin of [AetherEngine 7.22.2](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.22.2) with imports rewritten to the namespaced FFmpeg modules below.
+Local pin of [AetherEngine 7.33.2](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.33.2) with imports rewritten to the namespaced FFmpeg modules below.
 
 ## FFmpegBuild 3.4.0 (namespaced upstream)
 

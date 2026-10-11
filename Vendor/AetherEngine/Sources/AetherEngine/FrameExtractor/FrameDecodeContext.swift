@@ -26,6 +26,9 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// (main) title. Threaded into `Demuxer.open` so a still follows the currently-selected disc title
     /// instead of always decoding the default one (AE#105).
     private let selectTitleID: Int?
+    /// Owned only during a controlled one-shot extraction. The ordinary URL and
+    /// custom-reader paths retain their existing ownership rules.
+    private var boundedReader: IOReader?
 
     private var demuxer: Demuxer?
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -35,6 +38,7 @@ final class FrameDecodeContext: @unchecked Sendable {
     private var swsContext: UnsafeMutablePointer<SwsContext>?
     private var videoStreamIndex: Int32 = -1
     private var timeBase = AVRational(num: 1, den: 90000)
+    private var presentationStartSeconds: Double?
     /// Source SAR (sample aspect ratio) read from the stream at open. Anamorphic
     /// sources (NTSC/PAL DVD, anamorphic Blu-ray) store non-square pixels; without
     /// this the thumbnail draws square-pixel and looks stretched. Defaults 1:1.
@@ -80,6 +84,14 @@ final class FrameDecodeContext: @unchecked Sendable {
             return false
         }
         return false
+    }
+
+    /// Whether this open may ask VideoToolbox. A no-base-layer Dolby Vision title stays on software
+    /// (audit BIT-102): VideoToolbox hands 10-bit 4:2:0 over as P010, `DolbyVisionStillConverter` accepts
+    /// only `yuv420p10le`, and the IPT-PQ-C2 planes then went through the BT.2020 tone map, which is the
+    /// green / magenta cast #103 fixed.
+    static func stillUsesHardware(allows: Bool, disabled: Bool, dvNoBaseLayer: Bool) -> Bool {
+        allows && !disabled && !dvNoBaseLayer
     }
 
     /// Thread budget for the disposable still/thumbnail decoder. Capped well below the
@@ -139,10 +151,10 @@ final class FrameDecodeContext: @unchecked Sendable {
 
     /// Open demuxer + decoder if not already open. Throws on failure, leaving the
     /// context fully closed (no partial state to leak).
-    func ensureOpen() throws {
+    func ensureOpen(control: ProbeControl? = nil) throws {
         guard !isOpen else { return }
         do {
-            try openInternal()
+            try openInternal(control: control)
             isOpen = true
         } catch {
             close()
@@ -165,6 +177,8 @@ final class FrameDecodeContext: @unchecked Sendable {
         }
         demuxer?.close()
         demuxer = nil
+        boundedReader?.close()
+        boundedReader = nil
         videoStreamIndex = -1
         isHDR = false
         isDolbyVisionNoBaseLayer = false
@@ -172,9 +186,38 @@ final class FrameDecodeContext: @unchecked Sendable {
         isOpen = false
     }
 
-    private func openInternal() throws {
+    private func openInternal(control: ProbeControl?) throws {
         let demuxer = Demuxer()
-        if let reader = reader {
+        demuxer.probeControl = control
+        if let control {
+            let source: IOReader
+            if let reader {
+                source = reader
+            } else if url.isFileURL {
+                guard let file = FileIOReader(url: url) else { throw DemuxerError.openFailed(code: -1) }
+                source = file
+                boundedReader = file
+            } else if ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                let http = ProbeHTTPReader(url: url, headers: httpHeaders, control: control,
+                                           boundedWindowBytes: 64 * 1024)
+                source = http
+                boundedReader = http
+            } else {
+                throw ProbeError.unsupportedURL
+            }
+            // Count from before demux open through seek and decode. The 64 KiB
+            // HTTP window bounds bytes fetched ahead of the input-byte limit.
+            // Register the cancellation handler BEFORE the HTTP open; a stalled
+            // response header must be interruptible by the same deadline.
+            let counted = ProbeIOReader(reader: source, control: control)
+            try control.check()
+            if let http = source as? ProbeHTTPReader { try http.open() }
+            try control.check()
+            try demuxer.open(reader: counted,
+                             formatHint: formatHint, profile: .stillExtraction,
+                             selectTitleID: selectTitleID)
+            try control.check()
+        } else if let reader = reader {
             try demuxer.open(reader: reader, formatHint: formatHint, profile: .stillExtraction)
         } else {
             try demuxer.open(url: url, extraHeaders: httpHeaders, profile: .stillExtraction, selectTitleID: selectTitleID)
@@ -187,6 +230,8 @@ final class FrameDecodeContext: @unchecked Sendable {
         }
         videoStreamIndex = videoIdx
         timeBase = stream.pointee.time_base
+        presentationStartSeconds = stream.pointee.start_time == Int64.min || timeBase.den <= 0
+            ? nil : Double(stream.pointee.start_time) * Double(timeBase.num) / Double(timeBase.den)
 
         demuxer.discardAllStreamsExcept([videoIdx])
 
@@ -212,7 +257,8 @@ final class FrameDecodeContext: @unchecked Sendable {
             throw FrameDecodeError.unsupportedCodec
         }
         var openedWithHardware = false
-        if allowsHardwareDecode, !hardwareDecodeDisabled {
+        if Self.stillUsesHardware(allows: allowsHardwareDecode, disabled: hardwareDecodeDisabled,
+                                  dvNoBaseLayer: isDolbyVisionNoBaseLayer) {
             let deviceResult = av_hwdevice_ctx_create(
                 &hardwareDeviceContext, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, nil, nil, 0)
             if deviceResult >= 0, hardwareDeviceContext != nil {
@@ -370,8 +416,13 @@ final class FrameDecodeContext: @unchecked Sendable {
         mode: FrameMode,
         targetWidth: Int,
         maxSize: CGSize?,
+afterFirstFrame offsetSeconds: Double? = nil,
+        relativeToFirstFrame: Bool = false,
         isCancelled: () -> Bool,
-        relativeToFirstFrame: Bool = false
+        residentTarget: Double? = nil,
+        reportResidentTime: ((Double, Bool) -> Void)? = nil,
+        residentDeadline: ContinuousClock.Instant? = nil,
+        reportDecodedTime: ((Double?) -> Void)? = nil
     ) -> CGImage? {
         guard isOpen, let ctx = codecContext, let demuxer else { return nil }
 
@@ -401,13 +452,25 @@ final class FrameDecodeContext: @unchecked Sendable {
                 category: .swPlayback)
         }
 
-        // Isolated fMP4 segments can retain absolute tfdt or restart at zero.
-        // Decode from their first frame and measure an offset on that same axis.
-        demuxer.seek(to: relativeToFirstFrame ? 0 : seekSeconds)
+// A resident reader contains one segment. The request already carries
+        // the raw target restored from its byte epoch, independent of tfdt zero.
+        if let residentTarget, mode == .snapshot {
+            guard let start = presentationStartSeconds, abs(residentTarget - start) <= 12 else { return nil }
+        }
+        demuxer.seek(to: (residentTarget == nil && !relativeToFirstFrame) ? seekSeconds : 0)
 
-        guard timeBase.num > 0, timeBase.den > 0 else { return nil }
-        let targetPTS = (seekSeconds * Double(timeBase.den)) / Double(timeBase.num)
-        var firstFramePTS: Int64?
+        // A resident frame is compared on its source PTS axis, including any nonzero segment origin.
+        // A target the stream's own time base cannot hold is no position in it (audit BIT-105).
+        let targetSeconds = residentTarget ?? seekSeconds
+        guard var targetPTS = Demuxer.ticks(forSeconds: targetSeconds, timeBase: timeBase) else { return nil }
+        var offsetTicks: Int64?
+        let effectiveOffset = offsetSeconds ?? (relativeToFirstFrame ? seconds : nil)
+        if let effectiveOffset {
+            guard let ticks = Demuxer.ticks(forSeconds: max(0, effectiveOffset), timeBase: timeBase) else { return nil }
+            offsetTicks = ticks
+        }
+        let deadline = residentDeadline ?? ContinuousClock.now.advanced(by: .milliseconds(750))
+        var packetCount = 0
 
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         guard frame != nil else { return nil }
@@ -480,6 +543,7 @@ final class FrameDecodeContext: @unchecked Sendable {
         var draining = false
         while true {
             if isCancelled() { return nil }
+            if residentTarget != nil, (ContinuousClock.now >= deadline || packetCount >= 900) { return nil }
 
             if !draining {
                 let packetOrNil: UnsafeMutablePointer<AVPacket>?
@@ -493,6 +557,7 @@ final class FrameDecodeContext: @unchecked Sendable {
                     draining = true
                     continue
                 }
+                packetCount += 1
                 if packet.pointee.stream_index != videoStreamIndex {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
@@ -525,12 +590,14 @@ final class FrameDecodeContext: @unchecked Sendable {
                 // Skip frames before targetPTS for frame-accuracy. No-PTS frames
                 // (AV_NOPTS_VALUE == Int64.min) are accepted, so PTS-less streams
                 // degrade to the first frame after the seek.
-                if mode == .snapshot, f.pointee.pts != Int64.min {
-                    if firstFramePTS == nil { firstFramePTS = f.pointee.pts }
-                    let origin = relativeToFirstFrame ? Double(firstFramePTS!) : 0
-                    if Double(f.pointee.pts) - origin < targetPTS {
-                        continue
-                    }
+                if let ticks = offsetTicks, f.pointee.pts != Int64.min {
+                    targetPTS = f.pointee.pts + ticks
+                    offsetTicks = nil
+                }
+                if mode == .snapshot,
+                   f.pointee.pts != Int64.min,
+                   f.pointee.pts < targetPTS {
+                    continue
                 }
 
                 if isCancelled() { return nil }
@@ -545,9 +612,24 @@ final class FrameDecodeContext: @unchecked Sendable {
                         mode: mode,
                         targetWidth: targetWidth,
                         maxSize: maxSize,
+afterFirstFrame: offsetSeconds,
+                        relativeToFirstFrame: relativeToFirstFrame,
                         isCancelled: isCancelled,
-                        relativeToFirstFrame: relativeToFirstFrame)
+                        residentTarget: residentTarget,
+                        reportResidentTime: reportResidentTime,
+                        residentDeadline: deadline,
+                        reportDecodedTime: reportDecodedTime)
                 }
+                if let residentTarget {
+                    guard f.pointee.pts != Int64.min else { return nil }
+                    let raw = Double(f.pointee.pts) * Double(timeBase.num) / Double(timeBase.den)
+                    guard raw.isFinite else { return nil }
+                    reportResidentTime?(raw, mode == .snapshot && raw >= residentTarget &&
+                        presentationStartSeconds.map { residentTarget >= $0 } == true)
+                }
+                let decodedPTS = f.pointee.pts == Int64.min ? nil
+                    : Optional(Double(f.pointee.pts) * Double(timeBase.num) / Double(timeBase.den))
+                reportDecodedTime?(decodedPTS.flatMap { $0.isFinite ? $0 : nil })
                 return image
             }
         }

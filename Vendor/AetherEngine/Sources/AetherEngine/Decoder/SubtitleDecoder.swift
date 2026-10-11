@@ -136,7 +136,7 @@ enum SubtitleDecoder {
         // Bridge cancellation explicitly via CancelFlag so the decode loop + AVIO reader abort promptly.
         let token = CancelFlag()
         return try await withTaskCancellationHandler {
-            try await Task.detached(priority: .userInitiated) {
+            try await BlockingWork.detached(priority: .userInitiated) {
                 try decodeFileSync(
                     url: effectiveURL, httpHeaders: [:],
                     preserveASSMarkup: preserveASSMarkup, requested: requested, cancel: token
@@ -500,7 +500,13 @@ enum SubtitleDecoder {
                 break
             }
 
-            decodersByStream[pkt.pointee.stream_index]?.decode(packet: pkt)
+            if let decoder = decodersByStream[pkt.pointee.stream_index] {
+                // Audit FEA-101 / SUB-105: this loop reads libavformat directly, past Demuxer's bound.
+                if let stream = fmt.pointee.streams[Int(pkt.pointee.stream_index)] {
+                    SourceTimestampBounds.sanitize(pkt, timeBase: stream.pointee.time_base)
+                }
+                decoder.decode(packet: pkt)
+            }
 
             av_packet_unref(pkt)
             trackedPacketFree(&pktPtr)

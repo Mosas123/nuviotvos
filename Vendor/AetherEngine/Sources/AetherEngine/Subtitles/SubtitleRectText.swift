@@ -14,25 +14,61 @@ extension SubtitleTextRun {
 /// Plain-text extraction from FFmpeg subtitle rects, shared by `SubtitleDecoder` (sidecar) and `EmbeddedSubtitleDecoder` (in-container) so ASS parsing fixes live in one place.
 enum SubtitleRectText {
 
+/// Audit SUB-101: the most text of one cue any pass below looks at.
+    static let maxCueBytes = 64 * 1024
+
+    /// `text` cut to `maxCueBytes` at a scalar boundary; the same string, untouched, when it fits.
+    static func capped(_ text: String) -> String {
+        guard text.utf8.count > maxCueBytes else { return text }
+        var end = text.unicodeScalars.startIndex
+        var used = 0
+        for scalar in text.unicodeScalars {
+            let next = used + UTF8.width(scalar)
+            if next > maxCueBytes { break }
+            used = next
+            end = text.unicodeScalars.index(after: end)
+        }
+        return String(text[..<end])
+    }
+
     /// Plain text for a rect: parse ASS first so vector drawings cannot leak
     /// through a decoder-provided `text` fallback as visible coordinates.
     static func plainText(for rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
         if let assPtr = rect.pointee.ass {
-            let assLine = String(cString: assPtr)
+            let assLine = boundedString(cString: assPtr)
             if !assLine.isEmpty { return plainText(fromASSEventLine: assLine) }
         }
         if let textPtr = rect.pointee.text {
-            let s = String(cString: textPtr)
+            let s = boundedString(cString: textPtr)
             let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { return trimmed }
         }
         return nil
     }
 
-    /// Plain text from a raw ASS event line (`ReadOrder,Layer,Style,...,Text`),
-    /// using the same drawing-mode and escape handling as styled cues.
+    private static func boundedString(cString pointer: UnsafePointer<CChar>) -> String {
+        let length = strnlen(pointer, maxCueBytes)
+        return String(decoding: UnsafeRawBufferPointer(start: pointer, count: length), as: UTF8.self)
+    }
+
+    /// Plain text from a raw ASS event line (`ReadOrder,Layer,Style,...,Text`), for surfaces that need
+    /// plain text out of markup-preserving cues (the WebVTT rendition over tap-harvested stores,
+    /// Sodalite#32). Guarded on the first field being the integer ReadOrder so a plain, comma-heavy
+    /// line is never misparsed as an event; non-event lines just get tag/escape cleaning.
     static func plainText(fromASSEventLine line: String) -> String? {
-        styledRuns(fromASSEventLine: line)?.runs.map(\.text).joined()
+        var l = capped(line)
+        if l.hasPrefix("Dialogue: ") {
+            l.removeFirst("Dialogue: ".count)
+        }
+        // ASS dialogue: 9 comma-separated fields; body is the 9th and may contain commas.
+        let parts = l.split(separator: ",", maxSplits: 8, omittingEmptySubsequences: false)
+        if parts.count == 9, Int(parts[0]) != nil {
+            guard let runs = styledRuns(fromASSEventLine: l)?.runs else { return nil }
+            let text = runs.map(\.text).joined()
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return cleanASSBody(l)
     }
 
     /// Raw ASS event line exactly as libavcodec hands it over (`ReadOrder,Layer,Style,...,Text`, tags + escapes intact), for the `preserveASSMarkup` path; nil when the rect carries no ASS payload (bitmap or plain-text-only rects).
@@ -45,17 +81,42 @@ enum SubtitleRectText {
     /// Strip ASS escapes (`\\N` newline, `\\h` hard space) and
     /// `{...}` override tags; nil when nothing displayable remains.
     static func cleanASSBody(_ raw: String) -> String? {
-        var s = raw
+        var s = capped(raw)
         s = s.replacingOccurrences(of: "\\N", with: "\n")
         s = s.replacingOccurrences(of: "\\n", with: "\n")
         s = s.replacingOccurrences(of: "\\h", with: " ")
-        s = s.replacingOccurrences(
-            of: "\\{[^}]*\\}",
-            with: "",
-            options: .regularExpression
-        )
+        s = strippingOverrideBlocks(s)
         let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Drop every `{...}` span: from a `{` to the first `}` after it, so `{a{b}c}` leaves `c}`. A `{`
+    /// with no `}` behind it keeps itself and the rest verbatim.
+    ///
+    /// Audit SUB-101: this was `\\{[^}]*\\}` through `NSRegularExpression`, which rescans to the end
+    /// of the text at every unclosed `{` (20k braces took 2.6 s, doubling cost 4x). One forward pass
+    /// instead: once a `{` finds no `}`, no later one can either. Scanned as UTF-8, so the braces
+    /// match exactly where the regex's UTF-16 units did.
+    static func strippingOverrideBlocks(_ text: String) -> String {
+        guard text.utf8.contains(0x7B) else { return text }
+        let bytes = Array(text.utf8)
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var index = 0
+        while index < bytes.count {
+            let byte = bytes[index]
+            guard byte == 0x7B else {
+                out.append(byte)
+                index += 1
+                continue
+            }
+            guard let close = bytes[(index + 1)...].firstIndex(of: 0x7D) else {
+                out.append(contentsOf: bytes[index...])
+                break
+            }
+            index = close + 1
+        }
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// Default ASS play resolution (`ASS_DEFAULT_PLAYRESX/Y`, libavcodec/ass.h). Every event line
@@ -79,7 +140,9 @@ enum SubtitleRectText {
             }
             return nil
         }
-        guard let x = value("PlayResX"), let y = value("PlayResY"), x > 0, y > 0 else { return nil }
+        // `Double(_:)` accepts `inf` and `nan` (audit SUB-112).
+        guard let x = value("PlayResX"), let y = value("PlayResY"), x > 0, y > 0,
+              x.isFinite, y.isFinite else { return nil }
         return CGSize(width: x, height: y)
     }
 
@@ -119,7 +182,7 @@ enum SubtitleRectText {
     static func styledRuns(fromASSEventLine line: String,
                            playRes: CGSize = SubtitleRectText.defaultASSPlayRes)
         -> (runs: [SubtitleTextRun], placement: SubtitleTextPlacement?, firstTextRow: Int)? {
-        var body = line
+        var body = capped(line)
         if body.hasPrefix("Dialogue: ") { body.removeFirst("Dialogue: ".count) }
         let parts = body.split(separator: ",", maxSplits: 8, omittingEmptySubsequences: false)
         let text: String = (parts.count == 9 && Int(parts[0]) != nil) ? String(parts[8]) : body
@@ -248,14 +311,18 @@ enum SubtitleRectText {
             Double($0.trimmingCharacters(in: .whitespaces))
         }
         guard parts.count == 2, let x = parts[0], let y = parts[1] else { return nil }
-        return CGPoint(x: x / playRes.width, y: y / playRes.height)
+        // Audit SUB-112: a NaN or infinite tag (`Double(_:)` accepts both) breaks the [0, 1]
+        // contract, and a host laying out with it raises; the cue falls back to its alignment.
+        let normalized = CGPoint(x: x / playRes.width, y: y / playRes.height)
+        guard normalized.x.isFinite, normalized.y.isFinite else { return nil }
+        return normalized
     }
 
     /// Trim whitespace and newlines across the edges of a run sequence, so a styled cue matches
     /// what the plain path produces. libzvbi teletext ass can prefix a row-positioning newline that
     /// would otherwise render as a blank line ONLY on styled cues (#107). Interior blank lines are
     /// NOT folded here: that is teletext-specific and lives in `teletextBody`.
-    private static func edgeTrimmed(_ runs: [SubtitleTextRun]) -> [SubtitleTextRun]? {
+    static func edgeTrimmed(_ runs: [SubtitleTextRun]) -> [SubtitleTextRun]? {
         var cleaned = runs.filter { !$0.text.isEmpty }
         // Edge-trim leading/trailing whitespace and newlines across the run sequence so a coloured
         // cue matches the plain path (teletextBody flattens + trims the .text case). libzvbi
@@ -265,11 +332,11 @@ enum SubtitleRectText {
         // Predicate matches the plain path's `.whitespacesAndNewlines` (Unicode Zs plus tab plus
         // the newline characters). A literal-space/tab/newline test let U+00A0 survive on a styled
         // cue that an unstyled one trimmed, so the two paths disagreed on the same payload.
-        while let first = cleaned.first {
-            let d = String(first.text.drop(while: \.isWhitespace))
-            if d.isEmpty { cleaned.removeFirst(); continue }
-            cleaned[0] = first.withText(d)
-            break
+        // Audit SUB-110: one `removeFirst(k)`, not one shift of the whole array per blank run.
+        let leadingBlank = cleaned.firstIndex { !$0.text.allSatisfy(\.isWhitespace) } ?? cleaned.count
+        cleaned.removeFirst(leadingBlank)
+        if let first = cleaned.first {
+            cleaned[0] = first.withText(String(first.text.drop(while: \.isWhitespace)))
         }
         while let last = cleaned.last {
             var s = last.text
