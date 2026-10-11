@@ -1220,6 +1220,950 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertEqual(candidate?.progressKey, rewatchedEpisode8.progressKey)
     }
 
+    func testPlaybackCompletionCountsPersistDeduplicateAndSurviveManualAndRemoteMarks() {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let profileId = "watch-counts-\(UUID().uuidString)"
+        let previousWatchedProfileId = WatchedStore.activeProfileId
+        let previousProgressProfileId = WatchProgressLedger.activeProfileId
+        let previousContinueWatchingProfileId = ContinueWatchingStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        ContinueWatchingStore.setActiveProfile(profileId)
+        WatchProgressLedger.setActiveProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            ContinueWatchingStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousWatchedProfileId)
+            WatchProgressLedger.setActiveProfile(previousProgressProfileId)
+            ContinueWatchingStore.setActiveProfile(previousContinueWatchingProfileId)
+            restoreRemoteSettings()
+        }
+
+        let meta = NuvioMeta(id: "tt-watch-count-\(UUID().uuidString)", name: "Counted movie", type: "movie")
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(meta, completionID: "play-1"))
+        XCTAssertEqual(WatchedStore.watchCount(meta: meta), 1)
+        let afterFirst = WatchedStore.items().first { $0.meta.id == meta.id }
+
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(meta, completionID: "play-1"))
+        XCTAssertEqual(WatchedStore.watchCount(meta: meta), 1)
+        XCTAssertEqual(
+            WatchedStore.items().first { $0.meta.id == meta.id }?.watchedAt,
+            afterFirst?.watchedAt,
+            "A repeated completion id is a no-op"
+        )
+
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(meta, completionID: "play-2"))
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(meta, completionID: "play-3"))
+        XCTAssertEqual(WatchedStore.watchCount(meta: meta), 3)
+        XCTAssertTrue(WatchedStore.markWatched(meta), "A manual mark should remain durable")
+        XCTAssertEqual(WatchedStore.watchCount(meta: meta), 3, "Manual marking does not increment playback count")
+
+        let source = TraktWatchProgressSource.nuvioSync.rawValue
+        let stored = try! XCTUnwrap(WatchedStore.items().first { $0.meta.id == meta.id })
+        XCTAssertEqual(stored.watchCountsBySource[source], 3)
+        XCTAssertEqual(stored.lastCountedPlaybackIDsBySource[source], "play-3")
+
+        WatchedStore.invalidateCache()
+        XCTAssertEqual(WatchedStore.watchCount(meta: meta), 3, "The count survives decoding the persisted store")
+
+        let countlessRemoteRefresh = WatchedStoreItem(
+            meta: meta,
+            watchedAt: Date().addingTimeInterval(30),
+            sources: [source]
+        )
+        let syncStartedAt = Date().addingTimeInterval(60)
+        XCTAssertTrue(WatchedStore.reconcileNuvioSnapshot(
+            [countlessRemoteRefresh],
+            syncStartedAt: syncStartedAt,
+            profileId: profileId
+        ))
+        XCTAssertTrue(WatchedStore.reconcileNuvioSnapshot(
+            [countlessRemoteRefresh],
+            syncStartedAt: syncStartedAt,
+            profileId: profileId
+        ))
+        XCTAssertEqual(WatchedStore.watchCount(meta: meta), 3, "Count-less remote refreshes do not reset or inflate local counts")
+        XCTAssertEqual(
+            WatchedStore.items().first { $0.meta.id == meta.id }?.lastCountedPlaybackIDsBySource[source],
+            "play-3"
+        )
+
+        let seriesMeta = NuvioMeta(
+            id: "tt-watch-count-episode-\(UUID().uuidString)",
+            name: "Counted episode",
+            type: "series"
+        )
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            seriesMeta,
+            season: 1,
+            episode: 1,
+            completionID: "episode-play-1"
+        ))
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: seriesMeta, season: 1, episode: 1), 1)
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            seriesMeta,
+            season: 1,
+            episode: 1,
+            completionID: "episode-play-2"
+        ))
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: seriesMeta, season: 1, episode: 1), 2)
+    }
+
+    func testWatchedSourceRemovalDropsOnlyThatSourcesCountAndCompletionID() {
+        let profileId = "watch-count-source-removal-\(UUID().uuidString)"
+        defer { WatchedStore.eraseProfile(profileId) }
+
+        let meta = NuvioMeta(id: "tt-source-count-\(UUID().uuidString)", name: "Shared movie", type: "movie")
+        let now = Date()
+        let localSource = TraktWatchProgressSource.nuvioSync.rawValue
+        let remoteSource = TraktWatchProgressSource.trakt.rawValue
+        let item = WatchedStoreItem(
+            meta: meta,
+            watchedAt: now,
+            sources: [localSource, remoteSource],
+            watchCountsBySource: [localSource: 3, remoteSource: 4],
+            lastCountedPlaybackIDsBySource: [localSource: "local-play-3", remoteSource: "trakt-play-4"]
+        )
+        WatchedStore.replaceAll([item], profileId: profileId)
+
+        XCTAssertTrue(WatchedStore.reconcileNuvioSnapshot(
+            [],
+            syncStartedAt: now.addingTimeInterval(30),
+            profileId: profileId
+        ))
+
+        let remaining = try! XCTUnwrap(WatchedStore.items(profileId: profileId).first)
+        XCTAssertEqual(remaining.sources, [remoteSource])
+        XCTAssertEqual(remaining.watchCountsBySource, [remoteSource: 4])
+        XCTAssertEqual(remaining.lastCountedPlaybackIDsBySource, [remoteSource: "trakt-play-4"])
+        let snapshot = WatchedSnapshot(items: [remaining], source: .nuvioSync, additionalVisibleSources: [.trakt])
+        XCTAssertEqual(snapshot.watchCount(meta: meta), 4, "Connected Trakt is the fallback after the local source is removed")
+    }
+
+    @MainActor
+    func testWatchedCountOnlyChangePostsStoreNotification() async {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let profileId = "watch-count-notification-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            restoreRemoteSettings()
+        }
+
+        let meta = NuvioMeta(id: "tt-count-notification-\(UUID().uuidString)", name: "Notify count", type: "movie")
+        let watchedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let source = TraktWatchProgressSource.nuvioSync.rawValue
+        let initialWrite = expectation(description: "initial watched row is published")
+        let changed = expectation(description: "count-only store change is published")
+        let observer = NotificationCenter.default.addObserver(
+            forName: WatchedStore.changedNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            if WatchedStore.watchCount(meta: meta) == 1 {
+                initialWrite.fulfill()
+            } else if WatchedStore.watchCount(meta: meta) == 2 {
+                changed.fulfill()
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        WatchedStore.replaceAll([
+            WatchedStoreItem(
+                meta: meta,
+                watchedAt: watchedAt,
+                sources: [source],
+                watchCountsBySource: [source: 1]
+            )
+        ])
+        await fulfillment(of: [initialWrite], timeout: 1.0)
+
+        WatchedStore.replaceAll([
+            WatchedStoreItem(
+                meta: meta,
+                watchedAt: watchedAt,
+                sources: [source],
+                watchCountsBySource: [source: 2]
+            )
+        ])
+        await fulfillment(of: [changed], timeout: 1.0)
+        XCTAssertEqual(WatchedStore.watchCount(meta: meta), 2)
+    }
+
+    func testWatchedCountSnapshotUsesProviderAttributionAndLegacyDefault() {
+        let movie = NuvioMeta(id: "tt-count-movie", name: "Count Movie", type: "movie")
+        let fallbackMovie = NuvioMeta(id: "tt-count-trakt-only", name: "Trakt Only", type: "movie")
+        let legacyMovie = NuvioMeta(id: "tt-count-legacy", name: "Legacy", type: "movie")
+        let series = NuvioMeta(id: "tt-count-series", name: "Count Series", type: "series", year: 2024)
+        let watchedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let nuvio = TraktWatchProgressSource.nuvioSync.rawValue
+        let trakt = TraktWatchProgressSource.trakt.rawValue
+
+        let rawCatalogMovie = NuvioMeta(id: "addon:raw-count-movie", name: "Resolved Count Movie", type: "movie")
+        let resolvedCatalogMovie = NuvioMeta(id: "tt-resolved-count-movie", name: "Resolved Count Movie", type: "movie")
+        let snapshot = WatchedSnapshot(
+            items: [
+                WatchedStoreItem(
+                    meta: movie,
+                    watchedAt: watchedAt,
+                    sources: [nuvio],
+                    watchCountsBySource: [nuvio: 2]
+                ),
+                WatchedStoreItem(
+                    meta: movie,
+                    watchedAt: watchedAt,
+                    sources: [trakt],
+                    watchCountsBySource: [trakt: 4]
+                ),
+                WatchedStoreItem(
+                    meta: fallbackMovie,
+                    watchedAt: watchedAt,
+                    sources: [trakt],
+                    watchCountsBySource: [trakt: 5]
+                ),
+                WatchedStoreItem(meta: legacyMovie, watchedAt: watchedAt, sources: [nuvio]),
+                WatchedStoreItem(
+                    meta: series,
+                    watchedAt: watchedAt,
+                    season: 1,
+                    episode: 1,
+                    sources: [nuvio],
+                    watchCountsBySource: [nuvio: 3]
+                ),
+                WatchedStoreItem(
+                    meta: series,
+                    watchedAt: watchedAt,
+                    season: 1,
+                    episode: 1,
+                    sources: [trakt],
+                    watchCountsBySource: [trakt: 4]
+                ),
+                WatchedStoreItem(
+                    meta: series,
+                    watchedAt: watchedAt,
+                    season: 1,
+                    episode: 2,
+                    sources: [trakt],
+                    watchCountsBySource: [trakt: 5]
+                ),
+                WatchedStoreItem(
+                    meta: resolvedCatalogMovie,
+                    watchedAt: watchedAt,
+                    sources: [nuvio],
+                    watchCountsBySource: [nuvio: 2]
+                ),
+                WatchedStoreItem(
+                    meta: rawCatalogMovie,
+                    watchedAt: watchedAt,
+                    sources: [trakt],
+                    watchCountsBySource: [trakt: 5]
+                )
+            ],
+            source: .nuvioSync,
+            additionalVisibleSources: [.trakt]
+        )
+
+        XCTAssertEqual(snapshot.watchCount(meta: movie), 2, "The selected provider's count takes precedence over Trakt")
+        XCTAssertEqual(snapshot.watchCount(meta: fallbackMovie), 5, "Connected Trakt supplies a missing selected-provider count")
+        XCTAssertEqual(snapshot.watchCount(meta: legacyMovie), 1, "A legacy watched mark means one play")
+        XCTAssertEqual(snapshot.episodeWatchCount(meta: series, season: 1, episode: 1), 3)
+        XCTAssertEqual(snapshot.episodeWatchCount(meta: series, season: 1, episode: 2), 5)
+        XCTAssertEqual(snapshot.watchCount(meta: rawCatalogMovie), 5)
+        XCTAssertEqual(
+            snapshot.watchCount(meta: rawCatalogMovie, additionalMeta: resolvedCatalogMovie),
+            2,
+            "Combining raw and resolved identities lets the active provider take precedence"
+        )
+    }
+
+    func testCatalogWatchCountUsesHighestCompleteAiredRegularSeason() {
+        let storedSeries = NuvioMeta(id: "tt-counted-series", name: "Counted Show", type: "series", year: 2024)
+        let localCatalogSeries = NuvioMeta(
+            id: "addon:counted-show",
+            name: "Counted Show",
+            type: "series",
+            year: 2024,
+            videos: [
+                NuvioVideo(id: "s1e1", title: "S1E1", season: 1, episode: 1, released: "2000-01-01"),
+                NuvioVideo(id: "s1e2", title: "S1E2", season: 1, episode: 2, released: "2000-01-01"),
+                NuvioVideo(id: "s2e1", title: "S2E1", season: 2, episode: 1, released: "2000-01-01"),
+                NuvioVideo(id: "s2e2", title: "S2E2", season: 2, episode: 2, released: "2000-01-01"),
+                NuvioVideo(id: "s3e1", title: "S3E1", season: 3, episode: 1, released: "2000-01-01"),
+                NuvioVideo(id: "s3e2", title: "S3E2", season: 3, episode: 2, released: "2000-01-01"),
+                NuvioVideo(id: "s4e1", title: "S4E1", season: 4, episode: 1, released: "2999-01-01"),
+                NuvioVideo(id: "special", title: "Special", season: 0, episode: 1, released: "2000-01-01")
+            ]
+        )
+        let wrongYearSeries = NuvioMeta(
+            id: "addon:counted-show-2025",
+            name: "Counted Show",
+            type: "series",
+            year: 2025,
+            videos: localCatalogSeries.videos
+        )
+        let source = TraktWatchProgressSource.nuvioSync.rawValue
+        let watchedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let items = [
+            WatchedStoreItem(meta: storedSeries, watchedAt: watchedAt, season: 1, episode: 1, sources: [source], watchCountsBySource: [source: 4]),
+            WatchedStoreItem(meta: storedSeries, watchedAt: watchedAt, season: 1, episode: 2, sources: [source], watchCountsBySource: [source: 3]),
+            WatchedStoreItem(meta: storedSeries, watchedAt: watchedAt, season: 2, episode: 1, sources: [source], watchCountsBySource: [source: 2]),
+            WatchedStoreItem(meta: storedSeries, watchedAt: watchedAt, season: 2, episode: 2, sources: [source], watchCountsBySource: [source: 2]),
+            WatchedStoreItem(meta: storedSeries, watchedAt: watchedAt, season: 3, episode: 1, sources: [source], watchCountsBySource: [source: 6]),
+            WatchedStoreItem(meta: storedSeries, watchedAt: watchedAt, season: 4, episode: 1, sources: [source], watchCountsBySource: [source: 9]),
+            WatchedStoreItem(meta: storedSeries, watchedAt: watchedAt, season: 0, episode: 1, sources: [source], watchCountsBySource: [source: 9])
+        ]
+        let snapshot = WatchedSnapshot(items: items, source: .nuvioSync)
+
+        XCTAssertEqual(snapshot.catalogEpisodeWatchCounts(meta: localCatalogSeries)["1:1"], 4)
+        XCTAssertEqual(snapshot.catalogEpisodeWatchCounts(meta: localCatalogSeries)["1:2"], 3)
+        XCTAssertEqual(snapshot.catalogWatchCount(meta: localCatalogSeries), 3)
+        XCTAssertEqual(snapshot.catalogEpisodeWatchCounts(meta: wrongYearSeries), [:])
+        XCTAssertEqual(snapshot.catalogWatchCount(meta: wrongYearSeries), 0)
+
+        let markedSeries = NuvioMeta(id: "tt-count-whole-title", name: "Marked", type: "series", year: 2024)
+        let titleMarkerSnapshot = WatchedSnapshot(
+            items: [WatchedStoreItem(meta: markedSeries, watchedAt: watchedAt, sources: [source])],
+            source: .nuvioSync
+        )
+        XCTAssertEqual(titleMarkerSnapshot.catalogWatchCount(meta: markedSeries), 1)
+    }
+
+    func testWatchedStoreItemLegacyDecodeAndCounterRoundTrip() throws {
+        let meta = NuvioMeta(id: "tt-count-codable", name: "Count Codable", type: "movie")
+        let decoder = JSONDecoder()
+        let watchedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let legacyItem = WatchedStoreItem(
+            meta: meta,
+            watchedAt: watchedAt,
+            sources: [TraktWatchProgressSource.nuvioSync.rawValue]
+        )
+        var legacyPayload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyItem)) as? [String: Any]
+        )
+        legacyPayload.removeValue(forKey: "watchCountsBySource")
+        legacyPayload.removeValue(forKey: "lastCountedPlaybackIDsBySource")
+        legacyPayload.removeValue(forKey: "pendingPlaybackCompletions")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyPayload)
+        let decodedLegacy = try decoder.decode(WatchedStoreItem.self, from: legacyData)
+        XCTAssertEqual(decodedLegacy.watchCountsBySource, [:])
+        XCTAssertEqual(decodedLegacy.lastCountedPlaybackIDsBySource, [:])
+        XCTAssertEqual(decodedLegacy.pendingPlaybackCompletions, [])
+
+        let countedItem = WatchedStoreItem(
+            meta: meta,
+            watchedAt: watchedAt,
+            sources: [TraktWatchProgressSource.nuvioSync.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.nuvioSync.rawValue: 3],
+            lastCountedPlaybackIDsBySource: [TraktWatchProgressSource.nuvioSync.rawValue: "play-3"]
+        )
+        let roundTripped = try decoder.decode(WatchedStoreItem.self, from: JSONEncoder().encode(countedItem))
+        XCTAssertEqual(roundTripped.watchCountsBySource, countedItem.watchCountsBySource)
+        XCTAssertEqual(roundTripped.lastCountedPlaybackIDsBySource, countedItem.lastCountedPlaybackIDsBySource)
+
+        let legacyMutation = WatchedStore.PendingTraktMutation(
+            id: "legacy-reset",
+            meta: meta,
+            season: nil,
+            episode: nil,
+            isWatched: false,
+            changedAt: watchedAt
+        )
+        var legacyMutationPayload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyMutation)) as? [String: Any]
+        )
+        legacyMutationPayload.removeValue(forKey: "provider")
+        legacyMutationPayload.removeValue(forKey: "accountID")
+        legacyMutationPayload.removeValue(forKey: "requiresExactAcknowledgment")
+        let decodedMutation = try decoder.decode(
+            WatchedStore.PendingProviderMutation.self,
+            from: JSONSerialization.data(withJSONObject: legacyMutationPayload)
+        )
+        XCTAssertEqual(decodedMutation.provider, TraktWatchProgressSource.trakt.rawValue)
+        XCTAssertFalse(decodedMutation.requiresExactAcknowledgment)
+    }
+
+    func testPlaybackCompletionOutboxPersistsRepeatedEventsByProviderAndProfile() throws {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let profileId = "completion-outbox-\(UUID().uuidString)"
+        let otherProfileId = "completion-outbox-other-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.eraseProfile(otherProfileId)
+        WatchedStore.setActiveProfile(profileId)
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.eraseProfile(otherProfileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            restoreRemoteSettings()
+        }
+
+        let meta = NuvioMeta(
+            id: "tt-outbox-\(UUID().uuidString)",
+            name: "Outbox movie",
+            description: "Catalog copy",
+            posterUrl: "https://example.invalid/poster.jpg",
+            imdbId: "tt1234567",
+            tmdbId: 123,
+            type: "movie",
+            year: 2024
+        )
+        let accounts = [
+            TraktWatchProgressSource.wetrakr.rawValue: "we-account-a",
+            TraktWatchProgressSource.trakt.rawValue: "trakt-account-a"
+        ]
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: "completion-1",
+            source: .wetrakr,
+            completionAccounts: accounts
+        ))
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: "completion-2",
+            source: .wetrakr,
+            completionAccounts: accounts
+        ))
+
+        let wetrakrEvents = WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileId)
+        let traktEvents = WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profileId)
+        XCTAssertEqual(wetrakrEvents.map(\.completionID), ["completion-1", "completion-2"])
+        XCTAssertEqual(traktEvents.map(\.completionID), ["completion-1", "completion-2"])
+        XCTAssertEqual(wetrakrEvents.map(\.accountID), ["we-account-a", "we-account-a"])
+        XCTAssertEqual(traktEvents.map(\.accountID), ["trakt-account-a", "trakt-account-a"])
+        XCTAssertEqual(wetrakrEvents[0].meta.name, meta.name)
+        XCTAssertEqual(wetrakrEvents[0].meta.year, meta.year)
+        XCTAssertNil(wetrakrEvents[0].meta.description)
+        XCTAssertNil(wetrakrEvents[0].meta.posterUrl)
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: otherProfileId), [])
+
+        WatchedStore.markWatched(meta)
+        WatchedStore.invalidateCache()
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileId), wetrakrEvents)
+
+        XCTAssertFalse(WatchedStore.acknowledgePlaybackCompletion(
+            completionID: "completion-1",
+            provider: .wetrakr,
+            accountID: "different-account",
+            profileId: profileId
+        ))
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileId), wetrakrEvents)
+        XCTAssertTrue(WatchedStore.acknowledgePlaybackCompletion(
+            completionID: "completion-1",
+            provider: .wetrakr,
+            accountID: "we-account-a",
+            profileId: profileId
+        ))
+        XCTAssertEqual(
+            WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileId).map(\.completionID),
+            ["completion-2"]
+        )
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profileId), traktEvents)
+        XCTAssertTrue(WatchedStore.acknowledgePlaybackCompletion(
+            completionID: "completion-1",
+            provider: .trakt,
+            accountID: "trakt-account-a",
+            profileId: profileId
+        ))
+        XCTAssertEqual(
+            WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profileId).map(\.completionID),
+            ["completion-2"]
+        )
+    }
+
+    func testPlaybackCompletionOutboxFailureDoesNotConsumeIDOrDuplicateQueuedEvents() {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let profileId = "completion-outbox-failure-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defer {
+            WatchedStore.failNextPersistenceForTesting = false
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            restoreRemoteSettings()
+        }
+
+        let meta = NuvioMeta(id: "tt-outbox-failure-\(UUID().uuidString)", name: "Atomic event", type: "movie")
+        let accounts = [TraktWatchProgressSource.trakt.rawValue: "trakt-account"]
+        WatchedStore.failNextPersistenceForTesting = true
+        XCTAssertFalse(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: "retry-me",
+            source: .trakt,
+            completionAccounts: accounts
+        ))
+        XCTAssertEqual(WatchedStore.items(profileId: profileId), [])
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profileId), [])
+
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: "retry-me",
+            source: .trakt,
+            completionAccounts: accounts
+        ))
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: "retry-me",
+            source: .trakt,
+            completionAccounts: accounts
+        ))
+        XCTAssertEqual(WatchedStore.items(profileId: profileId).first?.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 1)
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profileId).map(\.completionID), ["retry-me"])
+    }
+
+    func testUnwatchWithUnknownAccountPreservesUnboundAndOtherProviderOutboxAndQueuesReset() {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let defaults = ProfileSettings.current
+        let sourceKey = SettingsKey.traktWatchProgressSource
+        let previousSourceValue = defaults.object(forKey: sourceKey)
+        let profileId = "completion-outbox-unwatch-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defaults.set(TraktWatchProgressSource.wetrakr.rawValue, forKey: sourceKey)
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            if let previousSourceValue {
+                defaults.set(previousSourceValue, forKey: sourceKey)
+            } else {
+                defaults.removeObject(forKey: sourceKey)
+            }
+            restoreRemoteSettings()
+        }
+
+        let meta = NuvioMeta(id: "tt-outbox-unwatch-\(UUID().uuidString)", name: "Unwatch episode", type: "series")
+        let targetAccounts = [
+            TraktWatchProgressSource.wetrakr.rawValue: "we-account",
+            TraktWatchProgressSource.trakt.rawValue: "old-trakt-account"
+        ]
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            season: 1,
+            episode: 2,
+            completionID: "old-play",
+            source: .wetrakr,
+            completionAccounts: targetAccounts
+        ))
+        XCTAssertTrue(WatchedStore.removeEpisode(meta: meta, season: 1, episode: 2))
+        XCTAssertEqual(
+            WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileId).map(\.completionID),
+            ["old-play"],
+            "A reset with no verified account must leave the account-bound completion untouched"
+        )
+        XCTAssertEqual(
+            WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profileId).map(\.completionID),
+            ["old-play"],
+            "An unwatch without a connected Trakt mirror preserves its unrelated queued event"
+        )
+        XCTAssertTrue(WatchedStore.items(profileId: profileId).first?.sources.isEmpty == true)
+        XCTAssertFalse(WatchedStore.visibleItems().contains { $0.meta.id == meta.id })
+        let pendingReset = try! XCTUnwrap(WatchedStore.pendingProviderMutations(provider: .wetrakr, profileId: profileId).first)
+        XCTAssertFalse(pendingReset.isWatched)
+        XCTAssertNil(pendingReset.accountID, "The isolated profile has no verified WeTrakr account binding")
+
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            season: 1,
+            episode: 2,
+            completionID: "fresh-play",
+            source: .wetrakr,
+            completionAccounts: [TraktWatchProgressSource.wetrakr.rawValue: ""]
+        ))
+        XCTAssertEqual(WatchedStore.pendingProviderMutations(provider: .wetrakr, profileId: profileId).map(\.isWatched), [false])
+        let freshEvents = WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileId)
+        XCTAssertEqual(freshEvents.map(\.completionID), ["old-play", "fresh-play"])
+        XCTAssertLessThanOrEqual(pendingReset.changedAt, try! XCTUnwrap(freshEvents.last).watchedAt)
+        XCTAssertEqual(WatchedStore.items(profileId: profileId).first?.watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue], 1)
+        XCTAssertTrue(WatchedStore.visibleItems().contains { $0.meta.id == meta.id })
+    }
+
+    func testUnwatchFilteringMatchesProviderAndCapturedAccount() {
+        let meta = NuvioMeta(id: "tt-outbox-account-filter-\(UUID().uuidString)", name: "Account filter", type: "series")
+        let timestamp = Date()
+        let oldAccountEvent = WatchedPlaybackCompletionUpload(
+            completionID: "account-a-play",
+            provider: .wetrakr,
+            accountID: "account-a",
+            meta: meta,
+            season: 1,
+            episode: 1,
+            watchedAt: timestamp
+        )
+        let resetAccountEvent = WatchedPlaybackCompletionUpload(
+            completionID: "account-b-play",
+            provider: .wetrakr,
+            accountID: "account-b",
+            meta: meta,
+            season: 1,
+            episode: 1,
+            watchedAt: timestamp.addingTimeInterval(1)
+        )
+        let otherProviderEvent = WatchedPlaybackCompletionUpload(
+            completionID: "trakt-play",
+            provider: .trakt,
+            accountID: "trakt-account",
+            meta: meta,
+            season: 1,
+            episode: 1,
+            watchedAt: timestamp.addingTimeInterval(2)
+        )
+        let item = WatchedStoreItem(
+            meta: meta,
+            watchedAt: timestamp.addingTimeInterval(2),
+            season: 1,
+            episode: 1,
+            sources: [TraktWatchProgressSource.wetrakr.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.wetrakr.rawValue: 2],
+            pendingPlaybackCompletions: [oldAccountEvent, resetAccountEvent, otherProviderEvent]
+        )
+
+        let rows = WatchedStore.removingWatchedRows(
+            [item],
+            resetBindings: [
+                WatchedStore.PlaybackProviderAccountBinding(
+                    provider: TraktWatchProgressSource.wetrakr.rawValue,
+                    accountID: "account-b"
+                )
+            ],
+            matching: { _ in true }
+        )
+        let retained = try! XCTUnwrap(rows.first)
+        XCTAssertTrue(retained.sources.isEmpty)
+        XCTAssertEqual(retained.watchCountsBySource, [:])
+        XCTAssertEqual(retained.pendingPlaybackCompletions, [oldAccountEvent, otherProviderEvent])
+        XCTAssertFalse(retained.isVisible(under: .wetrakr))
+    }
+
+    func testWatchedReconciliationPreservesQueuedEventsAndProviderMutations() {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let defaults = ProfileSettings.current
+        let keys = [
+            "nuvio.tv.trakt.auth.accessToken",
+            "nuvio.tv.trakt.auth.refreshToken",
+            "nuvio.tv.trakt.auth.userSlug",
+            "nuvio.tv.trakt.auth.credentialClientID",
+            SettingsKey.traktConnected,
+            SettingsKey.traktWatchProgressSource
+        ]
+        let priorValues = keys.map { ($0, defaults.object(forKey: $0)) }
+        let profileId = "completion-outbox-reconcile-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defaults.set("test-access", forKey: keys[0])
+        defaults.set("test-refresh", forKey: keys[1])
+        defaults.set("test-account", forKey: keys[2])
+        defaults.set(TraktConfig.clientID(in: defaults), forKey: keys[3])
+        defaults.set(true, forKey: keys[4])
+        defaults.set(TraktWatchProgressSource.nuvioSync.rawValue, forKey: keys[5])
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            for (key, value) in priorValues {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+            restoreRemoteSettings()
+        }
+
+        let meta = NuvioMeta(id: "tt-outbox-reconcile-\(UUID().uuidString)", name: "Reconciled", type: "movie")
+        XCTAssertTrue(WatchedStore.markWatched(meta))
+        defaults.set(TraktWatchProgressSource.wetrakr.rawValue, forKey: keys[5])
+        XCTAssertTrue(WatchedStore.markWatched(meta))
+        XCTAssertFalse(WatchedStore.pendingProviderMutations(provider: .trakt, profileId: profileId).isEmpty)
+        XCTAssertFalse(WatchedStore.pendingProviderMutations(provider: .wetrakr, profileId: profileId).isEmpty)
+
+        let remote = WatchedStoreItem(meta: meta, watchedAt: Date().addingTimeInterval(1), sources: [TraktWatchProgressSource.trakt.rawValue])
+        XCTAssertTrue(WatchedStore.reconcileTraktSnapshot([remote], syncStartedAt: Date().addingTimeInterval(2)))
+        XCTAssertFalse(WatchedStore.pendingProviderMutations(provider: .trakt, profileId: profileId).isEmpty)
+        XCTAssertFalse(WatchedStore.pendingProviderMutations(provider: .wetrakr, profileId: profileId).isEmpty)
+
+        let eventMeta = NuvioMeta(id: "tt-nuvio-absence-\(UUID().uuidString)", name: "Offline event", type: "movie")
+        let event = WatchedPlaybackCompletionUpload(
+            completionID: "offline-event",
+            provider: .trakt,
+            accountID: "captured-trakt",
+            meta: eventMeta,
+            season: nil,
+            episode: nil,
+            watchedAt: Date()
+        )
+        let eventItem = WatchedStoreItem(
+            meta: eventMeta,
+            watchedAt: event.watchedAt,
+            sources: [TraktWatchProgressSource.nuvioSync.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.nuvioSync.rawValue: 2],
+            pendingPlaybackCompletions: [event]
+        )
+        WatchedStore.replaceAll([eventItem], profileId: profileId)
+        let countlessRemote = WatchedStoreItem(
+            meta: eventMeta,
+            watchedAt: event.watchedAt.addingTimeInterval(1),
+            sources: [TraktWatchProgressSource.trakt.rawValue]
+        )
+        XCTAssertTrue(WatchedStore.mergeRemote([countlessRemote], profileId: profileId))
+        XCTAssertTrue(WatchedStore.reconcileNuvioSnapshot([], syncStartedAt: Date().addingTimeInterval(1), profileId: profileId))
+        let retained = try! XCTUnwrap(WatchedStore.items(profileId: profileId).first { $0.meta.id == eventMeta.id })
+        XCTAssertEqual(retained.pendingPlaybackCompletions, [event])
+        XCTAssertEqual(retained.watchCountsBySource[TraktWatchProgressSource.nuvioSync.rawValue], 2)
+    }
+
+    func testTraktAndWeTrakrSnapshotsReplaceOnlyTheirOwnAuthoritativeCounts() {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let profileId = "authoritative-watch-counts-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            restoreRemoteSettings()
+        }
+
+        let now = Date()
+        let traktMeta = NuvioMeta(id: "tt-authoritative-trakt-\(UUID().uuidString)", name: "Trakt count", type: "movie")
+        let localTrakt = WatchedStoreItem(
+            meta: traktMeta,
+            watchedAt: now.addingTimeInterval(-120),
+            sources: [TraktWatchProgressSource.trakt.rawValue, TraktWatchProgressSource.nuvioSync.rawValue],
+            watchCountsBySource: [
+                TraktWatchProgressSource.trakt.rawValue: 5,
+                TraktWatchProgressSource.nuvioSync.rawValue: 2
+            ]
+        )
+        WatchedStore.replaceAll([localTrakt])
+        let traktSnapshot = WatchedStoreItem(
+            meta: traktMeta,
+            watchedAt: now.addingTimeInterval(-60),
+            sources: [TraktWatchProgressSource.trakt.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.trakt.rawValue: 2]
+        )
+        XCTAssertTrue(WatchedStore.reconcileTraktSnapshot(
+            [traktSnapshot],
+            syncStartedAt: now,
+            currentAccountID: "trakt-account"
+        ))
+        var storedTrakt = try! XCTUnwrap(WatchedStore.items().first { $0.meta.id == traktMeta.id })
+        XCTAssertEqual(storedTrakt.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 2)
+        XCTAssertEqual(storedTrakt.watchCountsBySource[TraktWatchProgressSource.nuvioSync.rawValue], 2)
+
+        let traktDeduplicatedSnapshot = WatchedStoreItem(
+            meta: traktMeta,
+            watchedAt: now.addingTimeInterval(1),
+            sources: [TraktWatchProgressSource.trakt.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.trakt.rawValue: 1]
+        )
+        XCTAssertTrue(WatchedStore.reconcileTraktSnapshot(
+            [traktDeduplicatedSnapshot],
+            syncStartedAt: now.addingTimeInterval(2),
+            currentAccountID: "trakt-account"
+        ))
+        storedTrakt = try! XCTUnwrap(WatchedStore.items().first { $0.meta.id == traktMeta.id })
+        XCTAssertEqual(storedTrakt.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 1)
+
+        let weMeta = NuvioMeta(id: "tt-authoritative-we-\(UUID().uuidString)", name: "We count", type: "movie")
+        WatchedStore.replaceAll([
+            storedTrakt,
+            WatchedStoreItem(
+                meta: weMeta,
+                watchedAt: now.addingTimeInterval(-120),
+                sources: [TraktWatchProgressSource.wetrakr.rawValue, TraktWatchProgressSource.trakt.rawValue],
+                watchCountsBySource: [
+                    TraktWatchProgressSource.wetrakr.rawValue: 4,
+                    TraktWatchProgressSource.trakt.rawValue: 3
+                ]
+            )
+        ])
+        let weSnapshot = WatchedStoreItem(
+            meta: weMeta,
+            watchedAt: now.addingTimeInterval(-60),
+            sources: [TraktWatchProgressSource.wetrakr.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.wetrakr.rawValue: 1]
+        )
+        XCTAssertTrue(WatchedStore.reconcileWeTrakrSnapshot(
+            [weSnapshot],
+            previousRemoteItems: [],
+            syncStartedAt: now,
+            currentAccountID: "we-account"
+        ))
+        let storedWe = try! XCTUnwrap(WatchedStore.items().first { $0.meta.id == weMeta.id })
+        XCTAssertEqual(storedWe.watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue], 1)
+        XCTAssertEqual(storedWe.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 3)
+
+        let newerLocal = WatchedStoreItem(
+            meta: weMeta,
+            watchedAt: now.addingTimeInterval(60),
+            sources: [TraktWatchProgressSource.wetrakr.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.wetrakr.rawValue: 6]
+        )
+        WatchedStore.replaceAll([storedTrakt, newerLocal])
+        XCTAssertTrue(WatchedStore.reconcileWeTrakrSnapshot(
+            [weSnapshot],
+            previousRemoteItems: [],
+            syncStartedAt: now,
+            currentAccountID: "we-account"
+        ))
+        XCTAssertEqual(
+            WatchedStore.items().first { $0.meta.id == weMeta.id }?.watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue],
+            6,
+            "A local count written after the pull began wins over the older provider snapshot"
+        )
+    }
+
+    func testCurrentAccountAbsenceRemovesItsBadgeButKeepsOlderAccountEventsHidden() {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let profileId = "account-scoped-absence-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            restoreRemoteSettings()
+        }
+
+        let now = Date()
+        let traktMeta = NuvioMeta(id: "tt-old-trakt-account-\(UUID().uuidString)", name: "Old Trakt", type: "movie")
+        let weMeta = NuvioMeta(id: "tt-old-we-account-\(UUID().uuidString)", name: "Old WeTrakr", type: "movie")
+        let oldTraktEvent = WatchedPlaybackCompletionUpload(
+            completionID: "trakt-account-a-play",
+            provider: .trakt,
+            accountID: "trakt-account-a",
+            meta: traktMeta,
+            season: nil,
+            episode: nil,
+            watchedAt: now.addingTimeInterval(-60)
+        )
+        let oldWeEvent = WatchedPlaybackCompletionUpload(
+            completionID: "we-account-a-play",
+            provider: .wetrakr,
+            accountID: "we-account-a",
+            meta: weMeta,
+            season: nil,
+            episode: nil,
+            watchedAt: now.addingTimeInterval(-60)
+        )
+        let traktItem = WatchedStoreItem(
+            meta: traktMeta,
+            watchedAt: now.addingTimeInterval(-120),
+            sources: [TraktWatchProgressSource.trakt.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.trakt.rawValue: 5],
+            lastCountedPlaybackIDsBySource: [TraktWatchProgressSource.trakt.rawValue: "trakt-account-a-play"],
+            pendingPlaybackCompletions: [oldTraktEvent]
+        )
+        let weItem = WatchedStoreItem(
+            meta: weMeta,
+            watchedAt: now.addingTimeInterval(-120),
+            sources: [TraktWatchProgressSource.wetrakr.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.wetrakr.rawValue: 4],
+            lastCountedPlaybackIDsBySource: [TraktWatchProgressSource.wetrakr.rawValue: "we-account-a-play"],
+            pendingPlaybackCompletions: [oldWeEvent]
+        )
+        WatchedStore.replaceAll([traktItem, weItem])
+
+        XCTAssertTrue(WatchedStore.reconcileTraktSnapshot(
+            [],
+            syncStartedAt: now,
+            currentAccountID: "trakt-account-b"
+        ))
+        XCTAssertTrue(WatchedStore.reconcileWeTrakrSnapshot(
+            [],
+            previousRemoteItems: [weItem],
+            syncStartedAt: now,
+            currentAccountID: "we-account-b"
+        ))
+
+        let storedTrakt = try! XCTUnwrap(WatchedStore.items().first { $0.meta.id == traktMeta.id })
+        XCTAssertTrue(storedTrakt.sources.isEmpty)
+        XCTAssertNil(storedTrakt.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue])
+        XCTAssertNil(storedTrakt.lastCountedPlaybackIDsBySource[TraktWatchProgressSource.trakt.rawValue])
+        XCTAssertEqual(storedTrakt.pendingPlaybackCompletions, [oldTraktEvent])
+
+        let storedWe = try! XCTUnwrap(WatchedStore.items().first { $0.meta.id == weMeta.id })
+        XCTAssertTrue(storedWe.sources.isEmpty)
+        XCTAssertNil(storedWe.watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue])
+        XCTAssertNil(storedWe.lastCountedPlaybackIDsBySource[TraktWatchProgressSource.wetrakr.rawValue])
+        XCTAssertEqual(storedWe.pendingPlaybackCompletions, [oldWeEvent])
+        XCTAssertFalse(WatchedStore.visibleItems().contains { $0.meta.id == traktMeta.id || $0.meta.id == weMeta.id })
+    }
+
+    func testStaleHigherTraktSnapshotCannotReplacePendingCurrentAccountCount() {
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let profileId = "account-scoped-count-\(UUID().uuidString)"
+        let previousProfileId = WatchedStore.activeProfileId
+        WatchedStore.eraseProfile(profileId)
+        WatchedStore.setActiveProfile(profileId)
+        defer {
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousProfileId)
+            restoreRemoteSettings()
+        }
+
+        let now = Date()
+        let meta = NuvioMeta(id: "tt-reset-then-play-\(UUID().uuidString)", name: "Reset then play", type: "movie")
+        let localCompletion = WatchedPlaybackCompletionUpload(
+            completionID: "account-b-fresh-play",
+            provider: .trakt,
+            accountID: "trakt-account-b",
+            meta: meta,
+            season: nil,
+            episode: nil,
+            watchedAt: now.addingTimeInterval(30)
+        )
+        WatchedStore.replaceAll([
+            WatchedStoreItem(
+                meta: meta,
+                watchedAt: localCompletion.watchedAt,
+                sources: [TraktWatchProgressSource.trakt.rawValue],
+                watchCountsBySource: [TraktWatchProgressSource.trakt.rawValue: 1],
+                lastCountedPlaybackIDsBySource: [TraktWatchProgressSource.trakt.rawValue: localCompletion.completionID],
+                pendingPlaybackCompletions: [localCompletion]
+            )
+        ])
+        let staleSnapshot = WatchedStoreItem(
+            meta: meta,
+            watchedAt: now.addingTimeInterval(-30),
+            sources: [TraktWatchProgressSource.trakt.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.trakt.rawValue: 5]
+        )
+
+        XCTAssertTrue(WatchedStore.reconcileTraktSnapshot(
+            [staleSnapshot],
+            syncStartedAt: now,
+            currentAccountID: "trakt-account-b"
+        ))
+        let stored = try! XCTUnwrap(WatchedStore.items().first { $0.meta.id == meta.id })
+        XCTAssertEqual(stored.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 1)
+        XCTAssertEqual(stored.pendingPlaybackCompletions, [localCompletion])
+    }
+
+    func testTraktWatchedMovieAndEpisodePlayCountsImportPerSource() throws {
+        let decoder = JSONDecoder()
+        let movieData = Data(
+            #"{"last_watched_at":"2024-01-02T00:00:00Z","plays":3,"movie":{"title":"Count Movie","year":2020,"ids":{"imdb":"tt-trakt-count-movie"}}}"#.utf8
+        )
+        let movieDTO = try decoder.decode(TraktWatchedMovieDTO.self, from: movieData)
+        let movie = try XCTUnwrap(TraktHistoryService.watchedMovie(movieDTO))
+        XCTAssertEqual(movie.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 3)
+
+        let legacyMovieData = Data(
+            #"{"last_watched_at":"2024-01-02T00:00:00Z","movie":{"title":"Legacy Movie","ids":{"imdb":"tt-trakt-legacy-movie"}}}"#.utf8
+        )
+        let legacyMovieDTO = try decoder.decode(TraktWatchedMovieDTO.self, from: legacyMovieData)
+        let legacyMovie = try XCTUnwrap(TraktHistoryService.watchedMovie(legacyMovieDTO))
+        XCTAssertEqual(legacyMovie.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 1)
+
+        let showData = Data(
+            #"{"last_watched_at":"2024-01-02T00:00:00Z","show":{"title":"Count Show","year":2020,"ids":{"imdb":"tt-trakt-count-show"}},"seasons":[{"number":1,"episodes":[{"number":2,"plays":4,"last_watched_at":"2024-01-02T00:00:00Z"}]}]}"#.utf8
+        )
+        let showDTO = try decoder.decode(TraktWatchedShowDTO.self, from: showData)
+        let watchedEpisodes = try XCTUnwrap(TraktHistoryService.watchedEpisodes(showDTO))
+        XCTAssertEqual(watchedEpisodes.first?.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 4)
+    }
+
     func testOlderWatchedMarkDoesNotTurnNewerPartialRewatchIntoSeed() {
         let contentId = "tt-cw-rewatch-seed-\(UUID().uuidString)"
         let profileId = "cw-rewatch-seed-\(UUID().uuidString)"

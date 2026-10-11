@@ -1087,10 +1087,37 @@ final class StreamsDiscoveryTests: XCTestCase {
         XCTAssertEqual(hashOnly, result?.hash)
 
         // File under 64KB should return nil
-        let smallFileURL = tempDir.appendingPathComponent("test_small_\\(UUID().uuidString).bin")
+        let smallFileURL = tempDir.appendingPathComponent("test_small_\(UUID().uuidString).bin")
         defer { try? FileManager.default.removeItem(at: smallFileURL) }
         try Data(count: 1024).write(to: smallFileURL)
         XCTAssertNil(OpenSubtitlesHasher.computeHash(for: smallFileURL))
     }
+
+    func testCachedOnlyFilterPreservesDirectPenguStreams() {
+        let penguStream = NuvioStream(
+            url: "https://penguplay.com/stremio/stream/series/tt1234567%3A1%3A1.json?token=secret123",
+            name: "1080p WEB-DL",
+            description: "PenguPlay Direct",
+            addonName: "PenguPlay"
+        )
+        let uncachedTorrentio = NuvioStream(
+            url: "https://cdn.example/u.mkv",
+            name: "1080p WEB-DL",
+            description: "12 GB",
+            addonName: "Torrentio"
+        )
+
+        let playable = SmartPlaybackSelector.playableStreams(
+            from: [penguStream, uncachedTorrentio],
+            includeDebrid: false,
+            cachedOnly: true
+        )
+
+        XCTAssertTrue(playable.contains(where: { $0.id == penguStream.id }))
+        XCTAssertFalse(playable.contains(where: { $0.id == uncachedTorrentio.id }))
+        XCTAssertTrue(penguStream.isLikelyCached)
+        XCTAssertFalse(uncachedTorrentio.isLikelyCached)
+    }
 }
+
 

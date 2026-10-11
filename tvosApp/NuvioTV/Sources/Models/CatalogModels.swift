@@ -896,6 +896,23 @@ enum CatalogWatchedPolicy {
         }
         return true
     }
+
+    /// Highest repeat count among seasons whose regular aired episodes are all
+    /// watched that many times. Missing episode counts contribute zero; specials
+    /// and unaired episodes are excluded by `airedRegularEpisodes`.
+    static func completedSeasonWatchCount(
+        videos: [NuvioVideo]?,
+        episodeCounts: [String: Int]
+    ) -> Int {
+        let episodesBySeason = Dictionary(grouping: airedRegularEpisodes(videos), by: \.season)
+        return episodesBySeason.map { season, episodes in
+            let episodeNumbers = Set(episodes.map(\.episode))
+            guard !episodeNumbers.isEmpty else { return 0 }
+            return episodeNumbers.map { episode in
+                max(0, episodeCounts["\(season):\(episode)"] ?? 0)
+            }.min() ?? 0
+        }.max() ?? 0
+    }
 }
 
 /// Aggregate watched progress for the Details episode section. The denominator
@@ -1244,9 +1261,46 @@ struct NuvioStream: Identifiable, Codable {
         isDebridResolvable
     }
 
-    /// True when the stream is known or strongly labeled as debrid-cached.
+    /// Returns true if the stream is from a direct streaming provider (such as Pengu / PenguPlay)
+    /// that serves direct HTTP streams rather than torrent/debrid-cached torrents.
+    var isDirectProviderStream: Bool {
+        guard let direct = directURL, !direct.isEmpty, !isDebridResolvable else {
+            return false
+        }
+        let lowerAddon = (addonName ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let lowerUrl = direct.lowercased()
+
+        // Explicit direct providers like Pengu / PenguPlay
+        if lowerAddon.contains("pengu") || lowerUrl.contains("pengu") {
+            return true
+        }
+
+        // Known torrent / debrid scraper addons where non-cached direct links represent
+        // uncached downloads rather than direct media streams.
+        let torrentAggregatorNeedles = [
+            "torrentio", "mediafusion", "comet", "annatar",
+            "knightcrawler", "jackettio", "jackett", "orion", "debridio"
+        ]
+        if torrentAggregatorNeedles.contains(where: { lowerAddon.contains($0) }) {
+            return false
+        }
+
+        // If the URL points to a known debrid service unrestriction or download endpoint:
+        let debridServiceNeedles = ["real-debrid", "torbox", "premiumize", "alldebrid", "debrid-link"]
+        if debridServiceNeedles.contains(where: { lowerUrl.contains($0) }) {
+            return false
+        }
+
+        return true
+    }
+
+    /// True when the stream is known or strongly labeled as debrid-cached, or originates
+    /// from a direct HTTP provider (such as Pengu) that provides direct playable links.
     var isLikelyCached: Bool {
-        StreamQualityTags.parse(stream: self).isCached
+        if isDirectProviderStream {
+            return true
+        }
+        return StreamQualityTags.parse(stream: self).isCached
     }
 
     /// Returns a copy tagged with the source add-on's logo. Used to attach the
@@ -5166,6 +5220,50 @@ enum CollectionsStore {
     }
 }
 
+struct WatchedPlaybackCompletionUpload: Codable, Equatable, Sendable, Identifiable {
+    let completionID: String
+    /// Raw `TraktWatchProgressSource` provider value.
+    let provider: String
+    /// Stable provider account identity captured when playback completed. Never a token.
+    let accountID: String?
+    /// Compact immutable identity/title snapshot used for retries after catalog enrichment.
+    let meta: NuvioMeta
+    let season: Int?
+    let episode: Int?
+    let watchedAt: Date
+
+    var id: String { "\(provider):\(completionID)" }
+
+    init(
+        completionID: String,
+        provider: TraktWatchProgressSource,
+        accountID: String?,
+        meta: NuvioMeta,
+        season: Int?,
+        episode: Int?,
+        watchedAt: Date
+    ) {
+        self.completionID = completionID
+        self.provider = provider.rawValue
+        self.accountID = accountID
+        self.meta = Self.compactMetaSnapshot(meta)
+        self.season = season
+        self.episode = episode
+        self.watchedAt = watchedAt
+    }
+
+    private static func compactMetaSnapshot(_ meta: NuvioMeta) -> NuvioMeta {
+        NuvioMeta(
+            id: meta.id,
+            name: meta.name,
+            imdbId: meta.imdbId,
+            tmdbId: meta.tmdbId,
+            type: meta.canonicalType,
+            year: meta.year
+        )
+    }
+}
+
 struct WatchedStoreItem: Identifiable, Codable, Equatable, Sendable {
     var id: String {
         if let season, let episode {
@@ -5192,9 +5290,18 @@ struct WatchedStoreItem: Identifiable, Codable, Equatable, Sendable {
     /// before this existed, which ``migrateSourcesIfNeeded()`` backfills and
     /// which stay visible everywhere until it does.
     var sources: Set<String>
+    /// Provider-local completion counts. Older watched rows have no count
+    /// payload and are interpreted as one watch for each attributed source.
+    var watchCountsBySource: [String: Int]
+    /// Idempotency key for the latest playback completion counted per provider.
+    var lastCountedPlaybackIDsBySource: [String: String]
+    /// Durable provider upload events. Kept with the watched row so each event
+    /// and its local count are committed by the same atomic watched-file write.
+    var pendingPlaybackCompletions: [WatchedPlaybackCompletionUpload]
 
     enum CodingKeys: String, CodingKey {
-        case meta, watchedAt, season, episode, sources
+        case meta, watchedAt, season, episode, sources, watchCountsBySource, lastCountedPlaybackIDsBySource
+        case pendingPlaybackCompletions
     }
 
     init(
@@ -5202,13 +5309,19 @@ struct WatchedStoreItem: Identifiable, Codable, Equatable, Sendable {
         watchedAt: Date,
         season: Int? = nil,
         episode: Int? = nil,
-        sources: Set<String> = []
+        sources: Set<String> = [],
+        watchCountsBySource: [String: Int] = [:],
+        lastCountedPlaybackIDsBySource: [String: String] = [:],
+        pendingPlaybackCompletions: [WatchedPlaybackCompletionUpload] = []
     ) {
         self.meta = meta
         self.watchedAt = watchedAt
         self.season = season
         self.episode = episode
         self.sources = sources
+        self.watchCountsBySource = watchCountsBySource
+        self.lastCountedPlaybackIDsBySource = lastCountedPlaybackIDsBySource
+        self.pendingPlaybackCompletions = pendingPlaybackCompletions
     }
 
     init(from decoder: Decoder) throws {
@@ -5218,12 +5331,22 @@ struct WatchedStoreItem: Identifiable, Codable, Equatable, Sendable {
         season = try container.decodeIfPresent(Int.self, forKey: .season)
         episode = try container.decodeIfPresent(Int.self, forKey: .episode)
         sources = try container.decodeIfPresent(Set<String>.self, forKey: .sources) ?? []
+        watchCountsBySource = try container.decodeIfPresent([String: Int].self, forKey: .watchCountsBySource) ?? [:]
+        lastCountedPlaybackIDsBySource = try container.decodeIfPresent(
+            [String: String].self,
+            forKey: .lastCountedPlaybackIDsBySource
+        ) ?? [:]
+        pendingPlaybackCompletions = try container.decodeIfPresent(
+            [WatchedPlaybackCompletionUpload].self,
+            forKey: .pendingPlaybackCompletions
+        ) ?? []
     }
 
     /// Visible when the active source confirmed it, or when nothing has attributed
     /// it yet — an unattributed row is not evidence that the source *lacks* it.
     func isVisible(under source: TraktWatchProgressSource) -> Bool {
-        sources.isEmpty || sources.contains { $0.caseInsensitiveCompare(source.rawValue) == .orderedSame }
+        guard !(sources.isEmpty && !pendingPlaybackCompletions.isEmpty) else { return false }
+        return sources.isEmpty || sources.contains { $0.caseInsensitiveCompare(source.rawValue) == .orderedSame }
     }
 
     func adding(source: TraktWatchProgressSource) -> WatchedStoreItem {
@@ -5232,8 +5355,23 @@ struct WatchedStoreItem: Identifiable, Codable, Equatable, Sendable {
             watchedAt: watchedAt,
             season: season,
             episode: episode,
-            sources: sources.union([source.rawValue])
+            sources: sources.union([source.rawValue]),
+            watchCountsBySource: watchCountsBySource,
+            lastCountedPlaybackIDsBySource: lastCountedPlaybackIDsBySource,
+            pendingPlaybackCompletions: pendingPlaybackCompletions
         )
+    }
+
+    func removing(source: TraktWatchProgressSource) -> WatchedStoreItem {
+        var copy = self
+        copy.sources = Set(copy.sources.filter { $0.caseInsensitiveCompare(source.rawValue) != .orderedSame })
+        copy.watchCountsBySource = copy.watchCountsBySource.filter {
+            $0.key.caseInsensitiveCompare(source.rawValue) != .orderedSame
+        }
+        copy.lastCountedPlaybackIDsBySource = copy.lastCountedPlaybackIDsBySource.filter {
+            $0.key.caseInsensitiveCompare(source.rawValue) != .orderedSame
+        }
+        return copy
     }
 }
 
@@ -5669,8 +5807,17 @@ enum HomeCatalogPayloadStore {
 /// Precalculates hash sets and dictionaries so UI elements (like `WatchedCheckmarkBadge`)
 /// can query watched status in O(1) time with 0 JSON decodes and 0 disk I/O.
 struct WatchedSnapshot {
+    private typealias CountsBySource = [String: Int]
+    private typealias CountsByEpisode = [String: CountsBySource]
+
+    private struct SeriesTitleCountEntry {
+        let year: Int?
+        var countsByEpisode: CountsByEpisode
+    }
+
     let source: TraktWatchProgressSource
     let visibleItems: [WatchedStoreItem]
+    private let additionalVisibleSources: Set<TraktWatchProgressSource>
 
     /// Keyed by "\(type)|\(identityKey)" so series and movies with overlapping IDs cannot collide.
     let wholeTitleIdentityKeysByType: [String: Set<String>]
@@ -5696,6 +5843,13 @@ struct WatchedSnapshot {
     let wholeTitleWatchedDatesByIdentityKey: [String: Date]
     /// Whole title watch timestamps keyed by lowercased metaId: [metaId.lowercased(): Date]
     let wholeTitleWatchedDatesByMetaId: [String: Date]
+    /// Provider-local whole-title counts keyed by the same title identities.
+    private let wholeTitleCountsByIdentityKey: [String: CountsBySource]
+    private let wholeTitleCountsByMetaId: [String: CountsBySource]
+    /// Provider-local episode counts indexed by identity, meta id, and title/year.
+    private let episodeCountsByIdentityKey: [String: CountsByEpisode]
+    private let episodeCountsByMetaId: [String: CountsByEpisode]
+    private let episodeCountsBySeriesTitle: [String: [SeriesTitleCountEntry]]
 
     init(
         items: [WatchedStoreItem],
@@ -5703,6 +5857,7 @@ struct WatchedSnapshot {
         additionalVisibleSources: Set<TraktWatchProgressSource> = []
     ) {
         self.source = source
+        self.additionalVisibleSources = additionalVisibleSources
         let visible = items.filter { item in
             item.isVisible(under: source)
                 || additionalVisibleSources.contains { item.isVisible(under: $0) }
@@ -5722,15 +5877,22 @@ struct WatchedSnapshot {
         var epDatesByMetaId: [String: [String: Date]] = [:]
         var wholeTitleDatesByIdentity: [String: Date] = [:]
         var wholeTitleDatesByMetaId: [String: Date] = [:]
+        var wholeTitleCountsByIdentity: [String: CountsBySource] = [:]
+        var wholeTitleCountsByMetaId: [String: CountsBySource] = [:]
+        var epCountsByIdentity: [String: CountsByEpisode] = [:]
+        var epCountsByMetaId: [String: CountsByEpisode] = [:]
+        var epCountsBySeriesTitle: [String: [SeriesTitleCountEntry]] = [:]
 
         for item in visible {
             let isEpisode = item.season != nil && item.episode != nil
             let type = isEpisode ? "series" : WatchedStore.normalizedType(item.meta.canonicalType)
+            let sourceCounts = Self.countsBySource(for: item, activeSource: source)
 
             if !isEpisode {
                 let contentKeys = WatchedStore.contentIdentityKeys(for: item.meta)
                 for key in contentKeys {
                     let typeKey = "\(type)|\(key)"
+                    Self.mergeCounts(sourceCounts, into: &wholeTitleCountsByIdentity[typeKey, default: [:]])
                     wholeTitleKeysByType[type, default: []].insert(typeKey)
                     if let existing = wholeTitleDatesByIdentity[typeKey] {
                         if item.watchedAt > existing {
@@ -5744,6 +5906,10 @@ struct WatchedSnapshot {
 
                 let lowerId = item.meta.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 if !lowerId.isEmpty {
+                    Self.mergeCounts(
+                        sourceCounts,
+                        into: &wholeTitleCountsByMetaId["\(type)|\(lowerId)", default: [:]]
+                    )
                     metaIdsByType[type, default: []].insert(lowerId)
                     if let existing = wholeTitleDatesByMetaId[lowerId] {
                         if item.watchedAt > existing {
@@ -5764,6 +5930,11 @@ struct WatchedSnapshot {
                 let epKey = "\(season):\(episode)"
                 let lowerId = item.meta.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 if !lowerId.isEmpty {
+                    Self.mergeEpisodeCounts(
+                        sourceCounts,
+                        for: epKey,
+                        into: &epCountsByMetaId["\(type)|\(lowerId)", default: [:]]
+                    )
                     epByMetaId[lowerId, default: []].insert(epKey)
                     if let existing = epDatesByMetaId[lowerId]?[epKey] {
                         if item.watchedAt > existing {
@@ -5777,6 +5948,11 @@ struct WatchedSnapshot {
                 let contentKeys = WatchedStore.contentIdentityKeys(for: item.meta)
                 for key in contentKeys {
                     let typeKey = "\(type)|\(key)"
+                    Self.mergeEpisodeCounts(
+                        sourceCounts,
+                        for: epKey,
+                        into: &epCountsByIdentity[typeKey, default: [:]]
+                    )
                     epByIdentity[typeKey, default: []].insert(epKey)
                     if let existing = epDatesByIdentity[typeKey]?[epKey] {
                         if item.watchedAt > existing {
@@ -5801,6 +5977,22 @@ struct WatchedSnapshot {
                         } else {
                             epBySeriesTitle[normTitle] = [(year: year, keys: [epKey])]
                         }
+
+                        if var countEntries = epCountsBySeriesTitle[normTitle],
+                           let idx = countEntries.firstIndex(where: { $0.year == year }) {
+                            Self.mergeEpisodeCounts(
+                                sourceCounts,
+                                for: epKey,
+                                into: &countEntries[idx].countsByEpisode
+                            )
+                            epCountsBySeriesTitle[normTitle] = countEntries
+                        } else {
+                            var countsByEpisode: CountsByEpisode = [:]
+                            Self.mergeEpisodeCounts(sourceCounts, for: epKey, into: &countsByEpisode)
+                            epCountsBySeriesTitle[normTitle, default: []].append(
+                                SeriesTitleCountEntry(year: year, countsByEpisode: countsByEpisode)
+                            )
+                        }
                     }
                 }
             }
@@ -5818,6 +6010,142 @@ struct WatchedSnapshot {
         self.episodeWatchedDatesByMetaId = epDatesByMetaId
         self.wholeTitleWatchedDatesByIdentityKey = wholeTitleDatesByIdentity
         self.wholeTitleWatchedDatesByMetaId = wholeTitleDatesByMetaId
+        self.wholeTitleCountsByIdentityKey = wholeTitleCountsByIdentity
+        self.wholeTitleCountsByMetaId = wholeTitleCountsByMetaId
+        self.episodeCountsByIdentityKey = epCountsByIdentity
+        self.episodeCountsByMetaId = epCountsByMetaId
+        self.episodeCountsBySeriesTitle = epCountsBySeriesTitle
+    }
+
+    private static func countsBySource(
+        for item: WatchedStoreItem,
+        activeSource: TraktWatchProgressSource
+    ) -> CountsBySource {
+        let storedCounts = item.watchCountsBySource.reduce(into: CountsBySource()) { result, entry in
+            let key = entry.key.lowercased()
+            result[key] = max(result[key] ?? 0, max(1, entry.value))
+        }
+
+        if item.sources.isEmpty {
+            var result = storedCounts
+            if result.isEmpty {
+                result[activeSource.rawValue.lowercased()] = 1
+            }
+            return result
+        }
+
+        var attributedCounts: CountsBySource = [:]
+        for attributedSource in item.sources {
+            let key = attributedSource.lowercased()
+            attributedCounts[key] = max(1, storedCounts[key] ?? 0)
+        }
+        return attributedCounts
+    }
+
+    private static func mergeCounts(_ incoming: CountsBySource, into target: inout CountsBySource) {
+        for (sourceKey, count) in incoming {
+            target[sourceKey] = max(target[sourceKey] ?? 0, count)
+        }
+    }
+
+    private static func mergeEpisodeCounts(
+        _ incoming: CountsBySource,
+        for episodeKey: String,
+        into target: inout CountsByEpisode
+    ) {
+        var counts = target[episodeKey] ?? [:]
+        mergeCounts(incoming, into: &counts)
+        target[episodeKey] = counts
+    }
+
+    private func selectedCount(from counts: CountsBySource) -> Int {
+        let activeKey = source.rawValue.lowercased()
+        if let count = counts[activeKey] { return count }
+        guard additionalVisibleSources.contains(.trakt) else { return 0 }
+        return counts[TraktWatchProgressSource.trakt.rawValue.lowercased()] ?? 0
+    }
+
+    /// Provider-local count for a whole-title watched mark. Episode-only rows
+    /// are intentionally excluded; `catalogWatchCount(meta:)` handles TV.
+    func watchCount(meta: NuvioMeta, additionalMeta: NuvioMeta? = nil) -> Int {
+        let type = WatchedStore.normalizedType(meta.canonicalType)
+        var identityKeys = WatchedStore.contentIdentityKeys(for: meta)
+        if let additionalMeta {
+            identityKeys.formUnion(WatchedStore.contentIdentityKeys(for: additionalMeta))
+        }
+        var counts: CountsBySource = [:]
+        for key in identityKeys {
+            Self.mergeCounts(
+                wholeTitleCountsByIdentityKey["\(type)|\(key)"] ?? [:],
+                into: &counts
+            )
+        }
+        var metas = [meta]
+        if let additionalMeta { metas.append(additionalMeta) }
+        for candidate in metas {
+            let lowerId = candidate.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            Self.mergeCounts(wholeTitleCountsByMetaId["\(type)|\(lowerId)"] ?? [:], into: &counts)
+        }
+        return selectedCount(from: counts)
+    }
+
+    func episodeWatchCount(meta: NuvioMeta, season: Int, episode: Int) -> Int {
+        let type = WatchedStore.normalizedType(meta.canonicalType)
+        let episodeKey = "\(season):\(episode)"
+        var counts: CountsBySource = [:]
+        for key in WatchedStore.contentIdentityKeys(for: meta) {
+            Self.mergeCounts(
+                episodeCountsByIdentityKey["\(type)|\(key)"]?[episodeKey] ?? [:],
+                into: &counts
+            )
+        }
+        let lowerId = meta.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        Self.mergeCounts(episodeCountsByMetaId["\(type)|\(lowerId)"]?[episodeKey] ?? [:], into: &counts)
+        return selectedCount(from: counts)
+    }
+
+    /// Watch counts for episodes matched by stable ids or the existing
+    /// normalized series-title/year fallback used by catalog watched badges.
+    func catalogEpisodeWatchCounts(meta: NuvioMeta) -> [String: Int] {
+        let type = WatchedStore.normalizedType(meta.canonicalType)
+        var countsByEpisode: CountsByEpisode = [:]
+        for key in WatchedStore.contentIdentityKeys(for: meta) {
+            guard let matched = episodeCountsByIdentityKey["\(type)|\(key)"] else { continue }
+            for (episodeKey, counts) in matched {
+                Self.mergeEpisodeCounts(counts, for: episodeKey, into: &countsByEpisode)
+            }
+        }
+
+        if type == "series" {
+            let normalizedTitle = WatchedStore.normalizedCatalogTitle(meta.name)
+            for entry in episodeCountsBySeriesTitle[normalizedTitle] ?? [] {
+                if let targetYear = meta.year, let entryYear = entry.year, targetYear != entryYear {
+                    continue
+                }
+                for (episodeKey, counts) in entry.countsByEpisode {
+                    Self.mergeEpisodeCounts(counts, for: episodeKey, into: &countsByEpisode)
+                }
+            }
+        }
+
+        return countsByEpisode.reduce(into: [String: Int]()) { result, entry in
+            let count = selectedCount(from: entry.value)
+            if count > 0 { result[entry.key] = count }
+        }
+    }
+
+    /// The catalog badge uses the highest fully watched regular season. A
+    /// title-level marker remains a one-watch fallback for compact/legacy rows.
+    func catalogWatchCount(meta: NuvioMeta) -> Int {
+        guard WatchedStore.normalizedType(meta.canonicalType) == "series" else {
+            return watchCount(meta: meta)
+        }
+        let completedSeasonCount = CatalogWatchedPolicy.completedSeasonWatchCount(
+            videos: meta.videos,
+            episodeCounts: catalogEpisodeWatchCounts(meta: meta)
+        )
+        if completedSeasonCount > 0 { return completedSeasonCount }
+        return watchCount(meta: meta) > 0 ? 1 : 0
     }
 
     func contains(metaId: String, type: String) -> Bool {
@@ -6038,6 +6366,11 @@ struct WatchedSnapshot {
 enum WatchedStore {
     static let changedNotification = Notification.Name("nuvio.tv.watched.changed")
 
+    struct PlaybackProviderAccountBinding: Hashable, Sendable {
+        let provider: String
+        let accountID: String
+    }
+
     private static let baseKey = "nuvio.tv.watched.items"
     private static let storageDirectoryName = "WatchedStore"
     private(set) static var activeProfileId: String?
@@ -6045,6 +6378,8 @@ enum WatchedStore {
     /// Last durable-storage result, for diagnostics on physical devices where
     /// Application Support writes can fail while Simulator succeeds.
     static private(set) var persistenceDiagnostic = "not attempted"
+    /// Deterministic storage-failure seam for atomic watched/outbox regression tests.
+    static var failNextPersistenceForTesting = false
 
     private static let cacheLock = NSRecursiveLock()
     private static var cachedItems: [WatchedStoreItem]?
@@ -6214,6 +6549,59 @@ enum WatchedStore {
         return itemsLocked(profileId: profileId)
     }
 
+    /// Returns queued completion events for one provider and profile in stable
+    /// upload order. Account filtering is intentionally left to the provider
+    /// worker, which has the current authenticated account identity.
+    static func pendingPlaybackCompletions(
+        provider: TraktWatchProgressSource,
+        profileId: String? = activeProfileId
+    ) -> [WatchedPlaybackCompletionUpload] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return itemsLocked(profileId: profileId)
+            .flatMap(\.pendingPlaybackCompletions)
+            .filter { $0.provider.caseInsensitiveCompare(provider.rawValue) == .orderedSame }
+            .sorted {
+                if $0.watchedAt != $1.watchedAt { return $0.watchedAt < $1.watchedAt }
+                return $0.id < $1.id
+            }
+    }
+
+    /// Acknowledges exactly one event for exactly one provider account and
+    /// profile. A retry after a successful acknowledgement is an idempotent
+    /// success; a different account's event is untouched.
+    @discardableResult
+    static func acknowledgePlaybackCompletion(
+        completionID: String,
+        provider: TraktWatchProgressSource,
+        accountID: String?,
+        profileId: String? = activeProfileId
+    ) -> Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let current = itemsLocked(profileId: profileId)
+        var didRemove = false
+        var foundProviderEvent = false
+        let updated = current.compactMap { item -> WatchedStoreItem? in
+            var copy = item
+            let remaining = copy.pendingPlaybackCompletions.filter { event in
+                let matchesProviderEvent = event.completionID == completionID
+                    && event.provider.caseInsensitiveCompare(provider.rawValue) == .orderedSame
+                if matchesProviderEvent { foundProviderEvent = true }
+                let matches = matchesProviderEvent && event.accountID == accountID
+                if matches { didRemove = true }
+                return !matches
+            }
+            copy.pendingPlaybackCompletions = remaining
+            if copy.sources.isEmpty, copy.pendingPlaybackCompletions.isEmpty {
+                return nil
+            }
+            return copy
+        }
+        guard didRemove else { return !foundProviderEvent }
+        return persistLocked(updated, profileId: profileId)
+    }
+
     private static func itemsLocked(profileId: String?) -> [WatchedStoreItem] {
         let key = storageKey(for: profileId)
         if cachedKey == key, let cachedItems {
@@ -6345,6 +6733,22 @@ enum WatchedStore {
         currentSnapshot().watchedAt(meta: meta)
     }
 
+    static func watchCount(meta: NuvioMeta) -> Int {
+        currentSnapshot().watchCount(meta: meta)
+    }
+
+    static func episodeWatchCount(meta: NuvioMeta, season: Int, episode: Int) -> Int {
+        currentSnapshot().episodeWatchCount(meta: meta, season: season, episode: episode)
+    }
+
+    static func catalogEpisodeWatchCounts(meta: NuvioMeta) -> [String: Int] {
+        currentSnapshot().catalogEpisodeWatchCounts(meta: meta)
+    }
+
+    static func catalogWatchCount(meta: NuvioMeta) -> Int {
+        currentSnapshot().catalogWatchCount(meta: meta)
+    }
+
     /// "season:episode" keys of every watched episode of a series, for the
     /// Details episode strip.
     static func watchedEpisodeKeys(metaId: String) -> Set<String> {
@@ -6411,7 +6815,7 @@ enum WatchedStore {
         // whole-series action is allowed to mark. A missing guide is retained
         // as a title-only fallback for compact catalog cards.
         if meta.videos != nil, episodesBySeason.isEmpty { return false }
-        let snapshot = meta.persistenceSnapshot
+        let current = items()
         let watchedAt = Date()
         let source = TraktSettingsStore.watchProgressSource(in: ProfileSettings.current)
         let episodeItems = episodesBySeason
@@ -6419,12 +6823,13 @@ enum WatchedStore {
             .sorted()
             .flatMap { season in
                 (episodesBySeason[season] ?? []).sorted().map { episode in
-                    WatchedStoreItem(
-                        meta: snapshot,
+                    manualMark(
+                        meta: meta,
                         watchedAt: watchedAt,
                         season: season,
                         episode: episode,
-                        sources: [source.rawValue]
+                        source: source,
+                        currentItems: current
                     )
                 }
             }
@@ -6432,12 +6837,15 @@ enum WatchedStore {
             guard let season = item.season, let episode = item.episode else { return nil }
             return String(season) + ":" + String(episode)
         })
-        let titleItem = WatchedStoreItem(
-            meta: snapshot,
+        let titleItem = manualMark(
+            meta: meta,
             watchedAt: watchedAt,
-            sources: [source.rawValue]
+            season: nil,
+            episode: nil,
+            source: source,
+            currentItems: current
         )
-        let updated = [titleItem] + episodeItems + items().filter { item in
+        let updated = [titleItem] + episodeItems + current.filter { item in
             guard sameContent(item.meta, meta) else { return true }
             guard let season = item.season, let episode = item.episode else {
                 return false
@@ -6472,12 +6880,11 @@ enum WatchedStore {
         let removedTitle = currentItems.first {
             sameContent($0.meta, meta) && $0.season == nil && $0.episode == nil
         }
-        let updated = currentItems.filter { item in
-            guard sameContent(item.meta, meta) else { return true }
-            guard let season = item.season, let episode = item.episode else {
-                return false
-            }
-            return !episodeKeys.contains(String(season) + ":" + String(episode))
+        let resetBindings = unwatchResetProviderBindings(in: ProfileSettings.current, profileId: activeProfileId)
+        let updated = removingWatchedRows(currentItems, resetBindings: resetBindings) { item in
+            guard sameContent(item.meta, meta) else { return false }
+            guard let season = item.season, let episode = item.episode else { return true }
+            return episodeKeys.contains(String(season) + ":" + String(episode))
         }
         guard persist(updated) else { return false }
 
@@ -6527,15 +6934,7 @@ enum WatchedStore {
                         profileId: profileId
                     )
                 }
-                Task {
-                    _ = await TraktHistoryService.setWatched(
-                        meta,
-                        season: season,
-                        episodes: episodes,
-                        isWatched: isWatched,
-                        store: store
-                    )
-                }
+                schedulePendingProviderFlush(.trakt, store: store, profileId: profileId)
             }
             if RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: store) {
                 Task {
@@ -6560,24 +6959,18 @@ enum WatchedStore {
                     )
                 }
             }
-            if RemoteTrackingState.shouldSyncWatchedHistory(to: .wetrakr, in: store) {
-                Task { @MainActor in
-                    if isWatched {
-                        _ = await WeTrakrProgressService.markWatched(
-                            meta: meta,
-                            season: season,
-                            episodes: episodes,
-                            store: store
-                        )
-                    } else {
-                        _ = await WeTrakrProgressService.markUnwatched(
-                            meta: meta,
-                            season: season,
-                            episodes: episodes,
-                            store: store
-                        )
-                    }
+            if TraktSettingsStore.watchProgressSource(in: store) == .wetrakr {
+                for episode in episodes {
+                    _ = enqueueSelectedWeTrakrMutation(
+                        meta: meta,
+                        season: season,
+                        episode: episode,
+                        isWatched: isWatched,
+                        store: store,
+                        profileId: profileId
+                    )
                 }
+                schedulePendingProviderFlush(.wetrakr, store: store, profileId: profileId)
             }
         }
     }
@@ -6612,24 +7005,36 @@ enum WatchedStore {
         let episodeNumbers = Set(episodes)
         guard !episodeNumbers.isEmpty else { return false }
 
+        let current = items()
         let snapshot = meta.persistenceSnapshot
         let watchedAt = Date()
         let source = TraktSettingsStore.watchProgressSource(in: ProfileSettings.current)
-        let untouched = items().filter { item in
+        let untouched = current.filter { item in
             guard sameContent(item.meta, meta), item.season == season,
                   let episode = item.episode else { return true }
             return !episodeNumbers.contains(episode)
         }
         let written = episodeNumbers.sorted().map { episode in
-            WatchedStoreItem(
-                meta: snapshot,
+            manualMark(
+                meta: meta,
                 watchedAt: watchedAt,
                 season: season,
                 episode: episode,
-                sources: [source.rawValue]
+                source: source,
+                currentItems: current
             )
         }
-        guard persist(isWatched ? written + untouched : untouched) else { return false }
+        let resetBindings = isWatched
+            ? []
+            : unwatchResetProviderBindings(in: ProfileSettings.current, profileId: activeProfileId)
+        let updated = isWatched
+            ? written + untouched
+            : removingWatchedRows(current, resetBindings: resetBindings) { item in
+                guard sameContent(item.meta, meta), item.season == season,
+                      let episode = item.episode else { return false }
+                return episodeNumbers.contains(episode)
+            }
+        guard persist(updated) else { return false }
 
         for episode in episodeNumbers.sorted() {
             if isWatched {
@@ -6661,17 +7066,10 @@ enum WatchedStore {
                     profileId: profileId
                 )
             }
-            Task {
-                _ = await TraktHistoryService.setWatched(
-                    meta,
-                    season: season,
-                    episodes: episodeNumbers.sorted(),
-                    isWatched: isWatched,
-                    store: traktStore
-                )
-            }
+            schedulePendingProviderFlush(.trakt, store: traktStore, profileId: profileId)
         }
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: traktStore) {
+        if source == .simkl,
+           RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: traktStore) {
             Task {
                 _ = await SimklHistoryService.setWatched(
                     meta,
@@ -6682,7 +7080,8 @@ enum WatchedStore {
                 )
             }
         }
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
+        if source == .mdblist,
+           RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
             Task { @MainActor in
                 _ = await MdbListProgressService.setWatched(
                     meta,
@@ -6694,22 +7093,18 @@ enum WatchedStore {
                 )
             }
         }
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .wetrakr, in: traktStore) {
-            Task { @MainActor in
-                if isWatched {
-                    _ = await WeTrakrProgressService.markSeasonWatched(
-                        meta: meta,
-                        season: season,
-                        store: traktStore
-                    )
-                } else {
-                    _ = await WeTrakrProgressService.markSeasonUnwatched(
-                        meta: meta,
-                        season: season,
-                        store: traktStore
-                    )
-                }
+        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr {
+            for episode in episodeNumbers.sorted() {
+                _ = enqueueSelectedWeTrakrMutation(
+                    meta: meta,
+                    season: season,
+                    episode: episode,
+                    isWatched: isWatched,
+                    store: traktStore,
+                    profileId: activeProfileId
+                )
             }
+            schedulePendingProviderFlush(.wetrakr, store: traktStore, profileId: activeProfileId)
         }
         // Season actions write episode rows (the same rows playback uses), so
         // reconcile the local aggregate marker as well. This makes the
@@ -6763,18 +7158,19 @@ enum WatchedStore {
             episodesBySeason[season] = Set(1...episode)
         }
 
-        let snapshot = meta.persistenceSnapshot
+        let current = items()
         let watchedAt = Date()
         let source = TraktSettingsStore.watchProgressSource(in: ProfileSettings.current)
 
         let written = episodesBySeason.keys.sorted().flatMap { s in
             (episodesBySeason[s] ?? []).sorted().map { ep in
-                WatchedStoreItem(
-                    meta: snapshot,
+                manualMark(
+                    meta: meta,
                     watchedAt: watchedAt,
                     season: s,
                     episode: ep,
-                    sources: [source.rawValue]
+                    source: source,
+                    currentItems: current
                 )
             }
         }
@@ -6786,7 +7182,7 @@ enum WatchedStore {
             return "\(s):\(ep)"
         })
 
-        let untouched = items().filter { item in
+        let untouched = current.filter { item in
             guard sameContent(item.meta, meta),
                   let s = item.season,
                   let ep = item.episode else { return true }
@@ -6847,10 +7243,13 @@ enum WatchedStore {
         let updated: [WatchedStoreItem]
         if allAiredEpisodesWatched {
             let source = TraktSettingsStore.watchProgressSource(in: ProfileSettings.current)
-            let marker = WatchedStoreItem(
-                meta: meta.persistenceSnapshot,
+            let marker = manualMark(
+                meta: meta,
                 watchedAt: Date(),
-                sources: [source.rawValue]
+                season: nil,
+                episode: nil,
+                source: source,
+                currentItems: current
             )
             updated = [marker] + current.filter { !matchesSeries($0) }
             clearTombstone(meta: meta, season: nil, episode: nil)
@@ -6860,19 +7259,294 @@ enum WatchedStore {
         _ = persist(updated)
     }
 
+    private static func manualMark(
+        meta: NuvioMeta,
+        watchedAt: Date,
+        season: Int?,
+        episode: Int?,
+        source: TraktWatchProgressSource,
+        currentItems: [WatchedStoreItem]
+    ) -> WatchedStoreItem {
+        let matching = currentItems.filter {
+            sameContent($0.meta, meta) && $0.season == season && $0.episode == episode
+        }
+        var sources: Set<String> = [source.rawValue]
+        var countsBySource: [String: Int] = [:]
+        var lastIDsBySource: [String: String] = [:]
+        var lastIDDates: [String: Date] = [:]
+        var pendingCompletions: [WatchedPlaybackCompletionUpload] = []
+        for item in matching {
+            sources.formUnion(item.sources)
+            for (provider, count) in item.watchCountsBySource {
+                countsBySource[provider] = max(countsBySource[provider] ?? 0, count)
+            }
+            for (provider, completionID) in item.lastCountedPlaybackIDsBySource {
+                if item.watchedAt >= (lastIDDates[provider] ?? .distantPast) {
+                    lastIDDates[provider] = item.watchedAt
+                    lastIDsBySource[provider] = completionID
+                }
+            }
+            pendingCompletions = mergedPlaybackCompletions(
+                pendingCompletions + item.pendingPlaybackCompletions
+            )
+        }
+        return WatchedStoreItem(
+            meta: meta.persistenceSnapshot,
+            watchedAt: watchedAt,
+            season: season,
+            episode: episode,
+            sources: sources,
+            watchCountsBySource: countsBySource,
+            lastCountedPlaybackIDsBySource: lastIDsBySource,
+            pendingPlaybackCompletions: pendingCompletions
+        )
+    }
+
+    private static func mergedPlaybackCompletions(
+        _ events: [WatchedPlaybackCompletionUpload]
+    ) -> [WatchedPlaybackCompletionUpload] {
+        var byID: [String: WatchedPlaybackCompletionUpload] = [:]
+        for event in events where byID[event.id] == nil {
+            byID[event.id] = event
+        }
+        return byID.values.sorted {
+            if $0.watchedAt != $1.watchedAt { return $0.watchedAt < $1.watchedAt }
+            return $0.id < $1.id
+        }
+    }
+
+    @discardableResult
+    static func recordPlaybackCompletion(
+        _ meta: NuvioMeta,
+        season: Int? = nil,
+        episode: Int? = nil,
+        completionID: String,
+        source capturedSource: TraktWatchProgressSource? = nil,
+        completionAccounts: [String: String]? = nil
+    ) -> Bool {
+        let completionID = completionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !completionID.isEmpty else { return false }
+
+        let settings = ProfileSettings.current
+        let source = capturedSource ?? TraktSettingsStore.watchProgressSource(in: settings)
+        let sourceKey = source.rawValue
+        let profileId = activeProfileId
+        let completionTargets = playbackCompletionTargets(
+            selectedSource: source,
+            settings: settings,
+            profileId: profileId,
+            capturedAccounts: completionAccounts
+        )
+        cacheLock.lock()
+        let current = itemsLocked(profileId: profileId)
+        let matching = current.filter {
+            sameContent($0.meta, meta) && $0.season == season && $0.episode == episode
+        }
+        let existing = mergedByIdentity(matching).first
+        if let alreadyCountedID = existing?.lastCountedPlaybackIDsBySource.first(where: {
+            $0.key.caseInsensitiveCompare(sourceKey) == .orderedSame
+        })?.value, alreadyCountedID == completionID {
+            cacheLock.unlock()
+            return true
+        }
+
+        var countsBySource = existing?.watchCountsBySource ?? [:]
+        let priorCount: Int
+        if let storedCount = countsBySource.first(where: {
+            $0.key.caseInsensitiveCompare(sourceKey) == .orderedSame
+        })?.value {
+            priorCount = max(1, storedCount)
+        } else if existing?.pendingPlaybackCompletions.isEmpty == false {
+            priorCount = 0
+        } else if (existing?.sources.isEmpty == true && existing?.watchCountsBySource.isEmpty == true)
+            || existing?.sources.contains(where: {
+                $0.caseInsensitiveCompare(sourceKey) == .orderedSame
+            }) == true {
+            priorCount = 1
+        } else {
+            priorCount = 0
+        }
+        countsBySource[sourceKey] = priorCount + 1
+
+        var lastIDsBySource = existing?.lastCountedPlaybackIDsBySource ?? [:]
+        lastIDsBySource[sourceKey] = completionID
+        let watchedAt = Date()
+        var pendingCompletions = existing?.pendingPlaybackCompletions ?? []
+        for target in completionTargets {
+            let event = WatchedPlaybackCompletionUpload(
+                completionID: completionID,
+                provider: target.provider,
+                accountID: target.accountID,
+                meta: meta,
+                season: season,
+                episode: episode,
+                watchedAt: watchedAt
+            )
+            guard !pendingCompletions.contains(where: { $0.id == event.id }) else { continue }
+            pendingCompletions.append(event)
+        }
+        let item = WatchedStoreItem(
+            meta: meta.persistenceSnapshot,
+            watchedAt: watchedAt,
+            season: season,
+            episode: episode,
+            sources: (existing?.sources ?? []).union([sourceKey]),
+            watchCountsBySource: countsBySource,
+            lastCountedPlaybackIDsBySource: lastIDsBySource,
+            pendingPlaybackCompletions: pendingCompletions
+        )
+        let updated = [item] + current.filter {
+            !(sameContent($0.meta, meta) && $0.season == season && $0.episode == episode)
+        }
+        let saved = persistLocked(updated, profileId: profileId)
+        cacheLock.unlock()
+        guard saved else { return false }
+        finishPersistedWatchedMark(item, meta: meta, source: source, profileId: profileId)
+        return true
+    }
+
+    private static func playbackCompletionTargets(
+        selectedSource: TraktWatchProgressSource,
+        settings: UserDefaults,
+        profileId: String?,
+        capturedAccounts: [String: String]?
+    ) -> [(provider: TraktWatchProgressSource, accountID: String?)] {
+        var targets: [(provider: TraktWatchProgressSource, accountID: String?)] = []
+        func capturedAccount(_ provider: TraktWatchProgressSource) -> String? {
+            guard let value = capturedAccounts?.first(where: {
+                $0.key.caseInsensitiveCompare(provider.rawValue) == .orderedSame
+            })?.value, !value.isEmpty else { return nil }
+            return value
+        }
+
+        if let capturedAccounts {
+            switch selectedSource {
+            case .trakt:
+                targets.append((.trakt, capturedAccount(.trakt)))
+            case .wetrakr:
+                targets.append((.wetrakr, capturedAccount(.wetrakr)))
+            default:
+                break
+            }
+            if selectedSource != .trakt,
+               capturedAccounts.keys.contains(where: {
+                   $0.caseInsensitiveCompare(TraktWatchProgressSource.trakt.rawValue) == .orderedSame
+               }) {
+                targets.append((.trakt, capturedAccount(.trakt)))
+            }
+        } else {
+            if selectedSource == .trakt {
+                targets.append((.trakt, TraktHistoryService.completionAccountID(in: settings, profileId: profileId)))
+            } else if selectedSource == .wetrakr {
+                targets.append((.wetrakr, currentWeTrakrCompletionAccountID(in: settings, profileId: profileId)))
+            }
+            if selectedSource != .trakt,
+               RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: settings) {
+                targets.append((.trakt, TraktHistoryService.completionAccountID(in: settings, profileId: profileId)))
+            }
+        }
+        return targets
+    }
+
+    /// Metadata sent by the two outbox providers is immutable and identity-only.
+    static func playbackCompletionMetaSnapshot(_ meta: NuvioMeta) -> NuvioMeta {
+        NuvioMeta(
+            id: meta.id,
+            name: meta.name,
+            imdbId: meta.imdbId,
+            tmdbId: meta.tmdbId,
+            type: meta.canonicalType,
+            year: meta.year
+        )
+    }
+
+    private static func currentWeTrakrCompletionAccountID(
+        in settings: UserDefaults,
+        profileId: String?
+    ) -> String? {
+        guard ProfileSettings.isActiveStore(settings),
+              let state = WeTrakrRuntimeSession.authenticatedState(store: settings, profileScope: profileId),
+              let rawAccountID = state.accountID else { return nil }
+        let accountID = rawAccountID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return accountID.isEmpty ? nil : accountID
+    }
+
+    private static func finishPersistedWatchedMark(
+        _ item: WatchedStoreItem,
+        meta: NuvioMeta,
+        source: TraktWatchProgressSource,
+        profileId: String?
+    ) {
+        clearTombstone(meta: meta, season: item.season, episode: item.episode)
+        if meta.isSeries {
+            ContinueWatchingDismissStore.clear(contentId: meta.id)
+        }
+
+        ContinueWatchingStore.markLedgerWatched(meta: meta, season: item.season, episode: item.episode)
+        ContinueWatchingStore.removeWatched([item])
+        let markedAt = item.watchedAt
+        Task { @MainActor in
+            TraktProgressService.forgetLocalPlayback(
+                meta: meta,
+                season: item.season,
+                episode: item.episode,
+                recordedNoLaterThan: markedAt,
+                notify: true
+            )
+        }
+        let traktStore = ProfileSettings.store(for: profileId)
+        if source != .trakt && source != .wetrakr,
+           item.pendingPlaybackCompletions.contains(where: {
+               $0.provider == TraktWatchProgressSource.trakt.rawValue && $0.accountID != nil
+           }) {
+            Task {
+                _ = await TraktHistoryService.flushPendingPlaybackCompletions(
+                    store: traktStore,
+                    profileId: profileId
+                )
+            }
+        }
+        if RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: traktStore) {
+            Task {
+                _ = await SimklHistoryService.setWatched(
+                    meta,
+                    season: item.season,
+                    episode: item.episode,
+                    isWatched: true,
+                    store: traktStore
+                )
+            }
+        }
+        if RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
+            Task { @MainActor in
+                _ = await MdbListProgressService.setWatched(
+                    meta,
+                    season: item.season,
+                    episode: item.episode,
+                    isWatched: true,
+                    store: traktStore,
+                    profileScope: activeProfileId
+                )
+            }
+        }
+    }
+
     @discardableResult
     static func markWatched(_ meta: NuvioMeta, season: Int? = nil, episode: Int? = nil) -> Bool {
         print("[WatchedStore] markWatched called: meta=\(meta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil")")
         // A new mark is attributed to the selected backend immediately. Trakt
         // is also mirrored when connected, even if another backend owns resume.
-        let item = WatchedStoreItem(
-            meta: meta.persistenceSnapshot,
+        let current = items()
+        let source = TraktSettingsStore.watchProgressSource(in: ProfileSettings.current)
+        let item = manualMark(
+            meta: meta,
             watchedAt: Date(),
             season: season,
             episode: episode,
-            sources: [TraktSettingsStore.watchProgressSource(in: ProfileSettings.current).rawValue]
+            source: source,
+            currentItems: current
         )
-        let updated = [item] + items().filter {
+        let updated = [item] + current.filter {
             !(sameContent($0.meta, meta)
                 && $0.season == season && $0.episode == episode)
         }
@@ -6912,15 +7586,7 @@ enum WatchedStore {
                 isWatched: true,
                 profileId: profileId
             )
-            Task {
-                _ = await TraktHistoryService.setWatched(
-                    meta,
-                    season: season,
-                    episode: episode,
-                    isWatched: true,
-                    store: traktStore
-                )
-            }
+            schedulePendingProviderFlush(.trakt, store: traktStore, profileId: profileId)
         }
         if RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: traktStore) {
             Task {
@@ -6945,15 +7611,16 @@ enum WatchedStore {
                 )
             }
         }
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .wetrakr, in: traktStore) {
-            Task { @MainActor in
-                _ = await WeTrakrProgressService.markWatched(
-                    meta: meta,
-                    season: season,
-                    episode: episode,
-                    store: traktStore
-                )
-            }
+        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr {
+            _ = enqueueSelectedWeTrakrMutation(
+                meta: meta,
+                season: season,
+                episode: episode,
+                isWatched: true,
+                store: traktStore,
+                profileId: activeProfileId
+            )
+            schedulePendingProviderFlush(.wetrakr, store: traktStore, profileId: activeProfileId)
         }
         return true
     }
@@ -6964,8 +7631,9 @@ enum WatchedStore {
         let removed = currentItems.first {
             sameContent($0.meta, meta) && $0.season == nil && $0.episode == nil
         }
-        let updated = currentItems.filter {
-            !(sameContent($0.meta, meta) && $0.season == nil && $0.episode == nil)
+        let resetBindings = unwatchResetProviderBindings(in: ProfileSettings.current, profileId: activeProfileId)
+        let updated = removingWatchedRows(currentItems, resetBindings: resetBindings) {
+            sameContent($0.meta, meta) && $0.season == nil && $0.episode == nil
         }
         guard persist(updated) else { return false }
         let removedMeta = removed?.meta ?? meta.persistenceSnapshot
@@ -6975,21 +7643,73 @@ enum WatchedStore {
         return true
     }
 
+    private static func unwatchResetProviderBindings(
+        in settings: UserDefaults,
+        profileId: String?
+    ) -> Set<PlaybackProviderAccountBinding> {
+        let selectedSource = TraktSettingsStore.watchProgressSource(in: settings)
+        var bindings: Set<PlaybackProviderAccountBinding> = []
+        if selectedSource == .trakt || selectedSource == .wetrakr {
+            let accountID = selectedSource == .trakt
+                ? TraktHistoryService.completionAccountID(in: settings, profileId: profileId)
+                : currentWeTrakrCompletionAccountID(in: settings, profileId: profileId)
+            if let accountID {
+                bindings.insert(PlaybackProviderAccountBinding(provider: selectedSource.rawValue, accountID: accountID))
+            }
+        }
+        if selectedSource != .trakt,
+           RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: settings),
+           let accountID = TraktHistoryService.completionAccountID(in: settings, profileId: profileId) {
+            bindings.insert(PlaybackProviderAccountBinding(
+                provider: TraktWatchProgressSource.trakt.rawValue,
+                accountID: accountID
+            ))
+        }
+        return bindings
+    }
+
+    /// Explicit unwatch drops locally visible state and cancels only provider
+    /// uploads that the action will reset. Other provider events stay in a
+    /// hidden outbox-only row until their own account drains them.
+    static func removingWatchedRows(
+        _ current: [WatchedStoreItem],
+        resetBindings: Set<PlaybackProviderAccountBinding>,
+        matching predicate: (WatchedStoreItem) -> Bool
+    ) -> [WatchedStoreItem] {
+        current.compactMap { item in
+            guard predicate(item) else { return item }
+            let remainingEvents = item.pendingPlaybackCompletions.filter { event in
+                !resetBindings.contains(where: {
+                    $0.provider.caseInsensitiveCompare(event.provider) == .orderedSame
+                        && $0.accountID == event.accountID
+                })
+            }
+            guard !remainingEvents.isEmpty else { return nil }
+            var outboxOnly = item
+            outboxOnly.sources = []
+            outboxOnly.watchCountsBySource = [:]
+            outboxOnly.lastCountedPlaybackIDsBySource = [:]
+            outboxOnly.pendingPlaybackCompletions = remainingEvents
+            return outboxOnly
+        }
+    }
+
     /// Removes the whole-title mark only; per-episode history stays. Leaves a
     /// tombstone so the next sync deletes the remote row instead of pulling the
     /// mark right back. Tombstone is written only after the local list saves.
     @discardableResult
     static func remove(metaId: String, type: String) -> Bool {
         let currentItems = items()
+        let resetBindings = unwatchResetProviderBindings(in: ProfileSettings.current, profileId: activeProfileId)
         let removed = currentItems.first {
             $0.meta.id == metaId
                 && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame
                 && $0.season == nil && $0.episode == nil
         }
-        let updated = currentItems.filter {
-            !($0.meta.id == metaId
+        let updated = removingWatchedRows(currentItems, resetBindings: resetBindings) {
+            $0.meta.id == metaId
                 && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame
-                && $0.season == nil && $0.episode == nil)
+                && $0.season == nil && $0.episode == nil
         }
         guard persist(updated) else { return false }
         guard let removed else { return true }
@@ -7002,9 +7722,9 @@ enum WatchedStore {
     @discardableResult
     static func removeEpisode(meta: NuvioMeta, season: Int, episode: Int) -> Bool {
         let currentItems = items()
-        let updated = currentItems.filter {
-            !(sameContent($0.meta, meta)
-                && $0.season == season && $0.episode == episode)
+        let resetBindings = unwatchResetProviderBindings(in: ProfileSettings.current, profileId: activeProfileId)
+        let updated = removingWatchedRows(currentItems, resetBindings: resetBindings) {
+            sameContent($0.meta, meta) && $0.season == season && $0.episode == episode
         }
         guard persist(updated) else { return false }
         addTombstone(meta: meta, season: season, episode: episode)
@@ -7101,15 +7821,7 @@ enum WatchedStore {
                 isWatched: false,
                 profileId: profileId
             )
-            Task {
-                _ = await TraktHistoryService.setWatched(
-                    meta,
-                    season: season,
-                    episode: episode,
-                    isWatched: false,
-                    store: traktStore
-                )
-            }
+            schedulePendingProviderFlush(.trakt, store: traktStore, profileId: profileId)
         }
         if RemoteTrackingState.shouldSyncWatchedHistory(to: .simkl, in: traktStore) {
             Task {
@@ -7134,15 +7846,66 @@ enum WatchedStore {
                 )
             }
         }
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .wetrakr, in: traktStore) {
-            Task { @MainActor in
-                _ = await WeTrakrProgressService.markUnwatched(
-                    meta: meta,
-                    season: season,
-                    episode: episode,
-                    store: traktStore
+        if TraktSettingsStore.watchProgressSource(in: traktStore) == .wetrakr,
+           enqueueSelectedWeTrakrMutation(
+               meta: meta,
+               season: season,
+               episode: episode,
+               isWatched: false,
+               store: traktStore,
+               profileId: activeProfileId
+           ) {
+            schedulePendingProviderFlush(.wetrakr, store: traktStore, profileId: activeProfileId)
+        }
+    }
+
+    @discardableResult
+    private static func enqueueSelectedWeTrakrMutation(
+        meta: NuvioMeta,
+        season: Int?,
+        episode: Int?,
+        isWatched: Bool,
+        store: UserDefaults,
+        profileId: String?
+    ) -> Bool {
+        guard TraktSettingsStore.watchProgressSource(in: store) == .wetrakr,
+              !(meta.isSeries && season == nil && episode == nil && !isWatched) else { return false }
+        let accountID = currentWeTrakrCompletionAccountID(in: store, profileId: profileId)
+        return enqueuePendingProviderMutation(
+            meta: meta,
+            season: season,
+            episode: episode,
+            isWatched: isWatched,
+            provider: .wetrakr,
+            accountID: accountID,
+            profileId: profileId
+        )
+    }
+
+    private static func schedulePendingProviderFlush(
+        _ provider: TraktWatchProgressSource,
+        store: UserDefaults,
+        profileId: String?
+    ) {
+        switch provider {
+        case .trakt:
+            guard TraktHistoryService.completionAccountID(in: store, profileId: profileId) != nil else { return }
+            Task {
+                _ = await TraktHistoryService.flushPendingPlaybackCompletions(
+                    store: store,
+                    profileId: profileId
                 )
             }
+        case .wetrakr:
+            guard currentWeTrakrCompletionAccountID(in: store, profileId: profileId) != nil else { return }
+            Task { @MainActor in
+                _ = await WeTrakrProgressService.flushPendingPlaybackCompletions(
+                    store: store,
+                    profileId: profileId
+                )
+            }
+        case .simkl, .mdblist, .nuvioSync:
+            break
         }
     }
 
@@ -7179,10 +7942,75 @@ enum WatchedStore {
         )
     }
 
+    private static func mergeAuthoritativeProviderSnapshot(
+        _ remoteItems: [WatchedStoreItem],
+        provider: TraktWatchProgressSource,
+        currentAccountID: String?,
+        syncStartedAt: Date,
+        profileId: String?
+    ) -> Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return mergeRemoteLocked(
+            remoteItems,
+            confirmsTombstoneDeletions: false,
+            profileId: profileId,
+            authoritativeProvider: provider,
+            currentAccountID: currentAccountID,
+            syncStartedAt: syncStartedAt
+        )
+    }
+
+    private static func providerWatchCount(
+        _ item: WatchedStoreItem,
+        provider: TraktWatchProgressSource
+    ) -> Int? {
+        if let count = item.watchCountsBySource.first(where: {
+            $0.key.caseInsensitiveCompare(provider.rawValue) == .orderedSame
+        })?.value {
+            return max(1, count)
+        }
+        if item.sources.contains(where: { $0.caseInsensitiveCompare(provider.rawValue) == .orderedSame }) {
+            return 1
+        }
+        if item.sources.isEmpty, item.watchCountsBySource.isEmpty, item.pendingPlaybackCompletions.isEmpty {
+            return 1
+        }
+        return nil
+    }
+
+    private static func replacingProviderWatchCount(
+        _ item: WatchedStoreItem,
+        provider: TraktWatchProgressSource,
+        count: Int
+    ) -> WatchedStoreItem {
+        var copy = item
+        copy.watchCountsBySource = copy.watchCountsBySource.filter {
+            $0.key.caseInsensitiveCompare(provider.rawValue) != .orderedSame
+        }
+        copy.watchCountsBySource[provider.rawValue] = max(1, count)
+        return copy
+    }
+
+    private static func hasPendingCompletion(
+        _ item: WatchedStoreItem,
+        provider: TraktWatchProgressSource,
+        accountID: String?
+    ) -> Bool {
+        guard let accountID else { return false }
+        return item.pendingPlaybackCompletions.contains {
+            $0.provider.caseInsensitiveCompare(provider.rawValue) == .orderedSame
+                && $0.accountID == accountID
+        }
+    }
+
     private static func mergeRemoteLocked(
         _ remoteItems: [WatchedStoreItem],
         confirmsTombstoneDeletions: Bool,
-        profileId: String?
+        profileId: String?,
+        authoritativeProvider: TraktWatchProgressSource? = nil,
+        currentAccountID: String? = nil,
+        syncStartedAt: Date? = nil
     ) -> Bool {
         let removedMarks = tombstonesLocked(profileId: profileId)
         guard !remoteItems.isEmpty || !removedMarks.isEmpty else { return true }
@@ -7209,7 +8037,66 @@ enum WatchedStore {
         }
 
         let current = itemsLocked(profileId: profileId)
-        let merged = mergedByIdentity(current + accepted)
+        let mergeAccepted: [WatchedStoreItem]
+        var authoritativeCountsByIdentity: [String: Int] = [:]
+        var protectedCountIdentities = Set<String>()
+        if let authoritativeProvider, let syncStartedAt, let currentAccountID {
+            let pendingMutations = allProviderMutations(profileId: profileId).filter {
+                $0.provider.caseInsensitiveCompare(authoritativeProvider.rawValue) == .orderedSame
+            }
+            var protectedLocalCountsByIdentity: [String: Int] = [:]
+            for item in current {
+                let providerEvents = item.pendingPlaybackCompletions.filter {
+                    $0.provider.caseInsensitiveCompare(authoritativeProvider.rawValue) == .orderedSame
+                }
+                let hasCurrentAccountCompletion = providerEvents.contains { $0.accountID == currentAccountID }
+                let hasOtherAccountWork = providerEvents.contains { $0.accountID != currentAccountID }
+                    || pendingMutations.contains {
+                        $0.accountID != currentAccountID && pendingMatches($0, item: item)
+                    }
+                let hasCurrentAccountMutation = pendingMutations.contains {
+                    $0.accountID == currentAccountID && pendingMatches($0, item: item)
+                }
+                let protectsNewerLocalCount = item.watchedAt > syncStartedAt && !hasOtherAccountWork
+                guard hasCurrentAccountCompletion || hasCurrentAccountMutation || protectsNewerLocalCount else {
+                    continue
+                }
+                let keys = watchedIdentityKeys(item)
+                protectedCountIdentities.formUnion(keys)
+                guard let count = providerWatchCount(item, provider: authoritativeProvider) else { continue }
+                for key in keys { protectedLocalCountsByIdentity[key] = count }
+            }
+
+            for item in accepted {
+                let remoteCount = providerWatchCount(item, provider: authoritativeProvider) ?? 1
+                for key in watchedIdentityKeys(item) {
+                    authoritativeCountsByIdentity[key] = remoteCount
+                }
+            }
+            mergeAccepted = accepted.map { item in
+                guard let protectedCount = watchedIdentityKeys(item)
+                    .compactMap({ protectedLocalCountsByIdentity[$0] }).first else { return item }
+                return replacingProviderWatchCount(item, provider: authoritativeProvider, count: protectedCount)
+            }
+        } else {
+            mergeAccepted = accepted
+        }
+
+        var merged = mergedByIdentity(current + mergeAccepted)
+        if let authoritativeProvider, !authoritativeCountsByIdentity.isEmpty {
+            for index in merged.indices {
+                let keys = watchedIdentityKeys(merged[index])
+                guard keys.isDisjoint(with: protectedCountIdentities),
+                      let remoteCount = keys.compactMap({ authoritativeCountsByIdentity[$0] }).first else {
+                    continue
+                }
+                merged[index] = replacingProviderWatchCount(
+                    merged[index],
+                    provider: authoritativeProvider,
+                    count: remoteCount
+                )
+            }
+        }
         if merged == current {
             return true
         }
@@ -7257,6 +8144,7 @@ enum WatchedStore {
             let current = itemsLocked(profileId: profileId)
             let obsolete = current.filter { item in
                 guard item.watchedAt <= syncStartedAt,
+                      item.pendingPlaybackCompletions.isEmpty,
                       item.sources.isEmpty || item.sources.contains(TraktWatchProgressSource.nuvioSync.rawValue) else {
                     return false
                 }
@@ -7269,8 +8157,7 @@ enum WatchedStore {
             let updated = current.compactMap { item -> WatchedStoreItem? in
                 guard obsoleteIDs.contains(item.id) else { return item }
                 guard !item.sources.isEmpty else { return nil }
-                var retained = item
-                retained.sources.remove(TraktWatchProgressSource.nuvioSync.rawValue)
+                let retained = item.removing(source: .nuvioSync)
                 return retained.sources.isEmpty ? nil : retained
             }
             let changed = updated.count != current.count || zip(updated, current).contains {
@@ -7305,11 +8192,39 @@ enum WatchedStore {
         _ remoteItems: [WatchedStoreItem],
         syncStartedAt: Date
     ) -> Bool {
+        let profileId = activeProfileId
+        let accountID = TraktHistoryService.completionAccountID(
+            in: ProfileSettings.current,
+            profileId: profileId
+        )
+        return reconcileTraktSnapshot(
+            remoteItems,
+            syncStartedAt: syncStartedAt,
+            currentAccountID: accountID
+        )
+    }
+
+    @discardableResult
+    static func reconcileTraktSnapshot(
+        _ remoteItems: [WatchedStoreItem],
+        syncStartedAt: Date,
+        currentAccountID: String?
+    ) -> Bool {
         let remoteItems = remoteItems.map { $0.adding(source: .trakt) }
-        guard mergeRemote(remoteItems, confirmsTombstoneDeletions: false) else { return false }
+        let profileId = activeProfileId
+        guard mergeAuthoritativeProviderSnapshot(
+            remoteItems,
+            provider: .trakt,
+            currentAccountID: currentAccountID,
+            syncStartedAt: syncStartedAt,
+            profileId: profileId
+        ) else { return false }
 
         let remoteKeys = Set(remoteItems.flatMap(traktIdentityKeys))
-        let pendingMarks = pendingTraktMutations().filter(\.isWatched)
+        let pendingMarks = currentAccountID.map { accountID in
+            pendingProviderMutations(provider: .trakt, profileId: profileId)
+                .filter { $0.isWatched && $0.accountID == accountID }
+        } ?? []
         let current = items()
         let obsolete = current.filter { item in
             guard item.watchedAt <= syncStartedAt,
@@ -7317,25 +8232,29 @@ enum WatchedStore {
                   isRepresentedByTraktSnapshot(item) else { return false }
             let keys = traktIdentityKeys(item)
             guard keys.isDisjoint(with: remoteKeys) else { return false }
+            guard !hasPendingCompletion(
+                item,
+                provider: .trakt,
+                accountID: currentAccountID
+            ) else { return false }
             return !pendingMarks.contains { pendingMatches($0, item: item) }
         }
         if !obsolete.isEmpty {
             let obsoleteIDs = Set(obsolete.map(\.id))
             let updated = current.compactMap { item -> WatchedStoreItem? in
                 guard obsoleteIDs.contains(item.id) else { return item }
-                // A merged row can be confirmed by several independent
-                // backends. Trakt absence removes only Trakt's ownership; the
-                // Nuvio/Simkl mark must remain visible under those sources.
-                guard !item.sources.isEmpty else {
-                    return nil
-                }
-                var retained = item
-                retained.sources.remove(TraktWatchProgressSource.trakt.rawValue)
-                return retained.sources.isEmpty ? nil : retained
+                let retained = item.removing(source: .trakt)
+                return retained.sources.isEmpty && retained.pendingPlaybackCompletions.isEmpty
+                    ? nil
+                    : retained
             }
-            guard persist(updated) else { return false }
+            guard persist(updated, profileId: profileId) else { return false }
         }
-        confirmPendingTraktMutations(against: remoteItems)
+        confirmPendingTraktMutations(
+            against: remoteItems,
+            profileId: profileId,
+            currentAccountID: currentAccountID
+        )
         return true
     }
 
@@ -7359,13 +8278,13 @@ enum WatchedStore {
         let current = items()
         let updated = current.compactMap { item -> WatchedStoreItem? in
             guard item.watchedAt <= syncStartedAt,
+                  item.pendingPlaybackCompletions.isEmpty,
                   !watchedIdentityKeys(item).isDisjoint(with: removedRemoteKeys),
                   item.sources.isEmpty || item.sources.contains(TraktWatchProgressSource.simkl.rawValue) else {
                 return item
             }
             guard !item.sources.isEmpty else { return nil }
-            var retained = item
-            retained.sources.remove(TraktWatchProgressSource.simkl.rawValue)
+            let retained = item.removing(source: .simkl)
             return retained.sources.isEmpty ? nil : retained
         }
         let changed = updated.count != current.count || zip(updated, current).contains {
@@ -7395,6 +8314,7 @@ enum WatchedStore {
         let current = items()
         let updated = current.compactMap { item -> WatchedStoreItem? in
             guard item.watchedAt <= syncStartedAt,
+                  item.pendingPlaybackCompletions.isEmpty,
                   !watchedIdentityKeys(item).isDisjoint(with: removedRemoteKeys),
                   item.sources.isEmpty || item.sources.contains(source) else {
                 return item
@@ -7402,6 +8322,12 @@ enum WatchedStore {
             guard !item.sources.isEmpty else { return nil }
             var retained = item
             retained.sources.remove(source)
+            retained.watchCountsBySource = retained.watchCountsBySource.filter {
+                $0.key.caseInsensitiveCompare(source) != .orderedSame
+            }
+            retained.lastCountedPlaybackIDsBySource = retained.lastCountedPlaybackIDsBySource.filter {
+                $0.key.caseInsensitiveCompare(source) != .orderedSame
+            }
             return retained.sources.isEmpty ? nil : retained
         }
         let changed = updated.count != current.count || zip(updated, current).contains {
@@ -7418,9 +8344,36 @@ enum WatchedStore {
         previousRemoteItems: [WatchedStoreItem],
         syncStartedAt: Date
     ) -> Bool {
+        let profileId = activeProfileId
+        let accountID = currentWeTrakrCompletionAccountID(
+            in: ProfileSettings.current,
+            profileId: profileId
+        )
+        return reconcileWeTrakrSnapshot(
+            remoteItems,
+            previousRemoteItems: previousRemoteItems,
+            syncStartedAt: syncStartedAt,
+            currentAccountID: accountID
+        )
+    }
+
+    @discardableResult
+    static func reconcileWeTrakrSnapshot(
+        _ remoteItems: [WatchedStoreItem],
+        previousRemoteItems: [WatchedStoreItem],
+        syncStartedAt: Date,
+        currentAccountID: String?
+    ) -> Bool {
         let source = TraktWatchProgressSource.wetrakr.rawValue
         let remoteItems = remoteItems.map { $0.adding(source: .wetrakr) }
-        guard mergeRemote(remoteItems, confirmsTombstoneDeletions: false) else { return false }
+        let profileId = activeProfileId
+        guard mergeAuthoritativeProviderSnapshot(
+            remoteItems,
+            provider: .wetrakr,
+            currentAccountID: currentAccountID,
+            syncStartedAt: syncStartedAt,
+            profileId: profileId
+        ) else { return false }
 
         let currentRemoteKeys = Set(remoteItems.flatMap(watchedIdentityKeys))
         let removedRemoteKeys = Set(previousRemoteItems.flatMap(watchedIdentityKeys))
@@ -7428,19 +8381,38 @@ enum WatchedStore {
         guard !removedRemoteKeys.isEmpty else { return true }
 
         let current = items()
+        let pendingMarks: [PendingProviderMutation] = currentAccountID.map { accountID in
+            pendingProviderMutations(provider: .wetrakr, profileId: profileId)
+                .filter { $0.isWatched && $0.accountID == accountID }
+        } ?? []
         let updated = current.compactMap { item -> WatchedStoreItem? in
             guard item.watchedAt <= syncStartedAt,
                   !watchedIdentityKeys(item).isDisjoint(with: removedRemoteKeys),
                   item.sources.isEmpty || item.sources.contains(source) else {
                 return item
             }
-            guard !item.sources.isEmpty else { return nil }
+            guard !hasPendingCompletion(item, provider: .wetrakr, accountID: currentAccountID),
+                  !pendingMarks.contains(where: { pendingMatches($0, item: item) }) else {
+                return item
+            }
             var retained = item
             retained.sources.remove(source)
-            return retained.sources.isEmpty ? nil : retained
+            retained.watchCountsBySource = retained.watchCountsBySource.filter {
+                $0.key.caseInsensitiveCompare(source) != .orderedSame
+            }
+            retained.lastCountedPlaybackIDsBySource = retained.lastCountedPlaybackIDsBySource.filter {
+                $0.key.caseInsensitiveCompare(source) != .orderedSame
+            }
+            return retained.sources.isEmpty && retained.pendingPlaybackCompletions.isEmpty
+                ? nil
+                : retained
         }
         let changed = updated.count != current.count || zip(updated, current).contains {
-            $0.id != $1.id || $0.sources != $1.sources
+            $0.id != $1.id
+                || $0.sources != $1.sources
+                || $0.watchCountsBySource != $1.watchCountsBySource
+                || $0.lastCountedPlaybackIDsBySource != $1.lastCountedPlaybackIDsBySource
+                || $0.pendingPlaybackCompletions != $1.pendingPlaybackCompletions
         }
         return !changed || persist(updated)
     }
@@ -7528,11 +8500,28 @@ enum WatchedStore {
                 // The newer row wins on timing, but attribution accumulates:
                 // dropping the loser's sources would forget that the other
                 // backend also has this mark.
-                let combined = merged[existingIndex].sources.union(item.sources)
-                if item.watchedAt > merged[existingIndex].watchedAt {
+                let existing = merged[existingIndex]
+                let combinedSources = existing.sources.union(item.sources)
+                var combinedCounts = existing.watchCountsBySource
+                for (provider, count) in item.watchCountsBySource {
+                    combinedCounts[provider] = max(combinedCounts[provider] ?? 0, count)
+                }
+                var combinedCompletionIDs = existing.lastCountedPlaybackIDsBySource
+                for (provider, completionID) in item.lastCountedPlaybackIDsBySource {
+                    if combinedCompletionIDs[provider] == nil || item.watchedAt >= existing.watchedAt {
+                        combinedCompletionIDs[provider] = completionID
+                    }
+                }
+                let combinedPlaybackCompletions = mergedPlaybackCompletions(
+                    existing.pendingPlaybackCompletions + item.pendingPlaybackCompletions
+                )
+                if item.watchedAt > existing.watchedAt {
                     merged[existingIndex] = item
                 }
-                merged[existingIndex].sources = combined
+                merged[existingIndex].sources = combinedSources
+                merged[existingIndex].watchCountsBySource = combinedCounts
+                merged[existingIndex].lastCountedPlaybackIDsBySource = combinedCompletionIDs
+                merged[existingIndex].pendingPlaybackCompletions = combinedPlaybackCompletions
                 // Retain every alias learned for this content so a later row
                 // can match by IMDb, TMDB, or catalog id without another scan.
                 for key in identityKeys {
@@ -7637,25 +8626,116 @@ enum WatchedStore {
 
     // MARK: Pending Trakt mutations
 
-    struct PendingTraktMutation: Codable, Identifiable {
+    struct PendingTraktMutation: Codable, Equatable, Identifiable {
         let id: String
+        /// Raw `TraktWatchProgressSource` provider value. Missing legacy values
+        /// decode as Trakt so existing pending resets retain their behavior.
+        let provider: String
+        /// Stable account identity captured at the time of the manual action.
+        let accountID: String?
         let meta: NuvioMeta
         let season: Int?
         let episode: Int?
         let isWatched: Bool
         let changedAt: Date
+        /// New provider-bound mutations are removed only by their exact drainer
+        /// acknowledgement. Legacy Trakt rows retain snapshot confirmation.
+        let requiresExactAcknowledgment: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case id, provider, accountID, meta, season, episode, isWatched, changedAt
+            case requiresExactAcknowledgment
+        }
+
+        init(
+            id: String,
+            provider: TraktWatchProgressSource = .trakt,
+            accountID: String? = nil,
+            meta: NuvioMeta,
+            season: Int?,
+            episode: Int?,
+            isWatched: Bool,
+            changedAt: Date,
+            requiresExactAcknowledgment: Bool = true
+        ) {
+            self.id = id
+            self.provider = provider.rawValue
+            self.accountID = accountID
+            self.meta = meta
+            self.season = season
+            self.episode = episode
+            self.isWatched = isWatched
+            self.changedAt = changedAt
+            self.requiresExactAcknowledgment = requiresExactAcknowledgment
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            provider = try container.decodeIfPresent(String.self, forKey: .provider)
+                ?? TraktWatchProgressSource.trakt.rawValue
+            accountID = try container.decodeIfPresent(String.self, forKey: .accountID)
+            meta = try container.decode(NuvioMeta.self, forKey: .meta)
+            season = try container.decodeIfPresent(Int.self, forKey: .season)
+            episode = try container.decodeIfPresent(Int.self, forKey: .episode)
+            isWatched = try container.decode(Bool.self, forKey: .isWatched)
+            changedAt = try container.decode(Date.self, forKey: .changedAt)
+            requiresExactAcknowledgment = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .requiresExactAcknowledgment
+            ) ?? false
+        }
     }
+
+    typealias PendingProviderMutation = PendingTraktMutation
 
     private static func pendingTraktStorageKey(for profileId: String?) -> String {
         "\(storageKey(for: profileId)).pendingTrakt"
     }
 
     static func pendingTraktMutations(profileId: String? = activeProfileId) -> [PendingTraktMutation] {
+        pendingProviderMutations(provider: .trakt, profileId: profileId)
+    }
+
+    static func pendingProviderMutations(
+        provider: TraktWatchProgressSource,
+        profileId: String? = activeProfileId
+    ) -> [PendingTraktMutation] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return allProviderMutations(profileId: profileId)
+            .filter { $0.provider.caseInsensitiveCompare(provider.rawValue) == .orderedSame }
+            .sorted {
+                if $0.changedAt != $1.changedAt { return $0.changedAt < $1.changedAt }
+                return $0.id < $1.id
+            }
+    }
+
+    @discardableResult
+    static func acknowledgeProviderMutation(
+        id: String,
+        provider: TraktWatchProgressSource,
+        profileId: String? = activeProfileId
+    ) -> Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let current = allProviderMutations(profileId: profileId)
+        let updated = current.filter {
+            !($0.id == id && $0.provider.caseInsensitiveCompare(provider.rawValue) == .orderedSame)
+        }
+        guard updated.count != current.count else { return true }
+        return persistPendingTraktMutations(updated, profileId: profileId)
+    }
+
+    private static func allProviderMutations(profileId: String?) -> [PendingTraktMutation] {
         guard let data = readData(forKey: pendingTraktStorageKey(for: profileId)),
               let decoded = try? makeDecoder().decode([PendingTraktMutation].self, from: data) else {
             return []
         }
-        return decoded.sorted { $0.changedAt < $1.changedAt }
+        return decoded.sorted {
+            if $0.changedAt != $1.changedAt { return $0.changedAt < $1.changedAt }
+            return $0.id < $1.id
+        }
     }
 
     @discardableResult
@@ -7666,30 +8746,76 @@ enum WatchedStore {
         isWatched: Bool,
         profileId: String?
     ) -> Bool {
+        let settings = ProfileSettings.store(for: profileId)
+        return enqueuePendingProviderMutation(
+            meta: meta,
+            season: season,
+            episode: episode,
+            isWatched: isWatched,
+            provider: .trakt,
+            accountID: TraktHistoryService.completionAccountID(in: settings, profileId: profileId),
+            profileId: profileId
+        )
+    }
+
+    @discardableResult
+    private static func enqueuePendingProviderMutation(
+        meta: NuvioMeta,
+        season: Int?,
+        episode: Int?,
+        isWatched: Bool,
+        provider: TraktWatchProgressSource,
+        accountID: String?,
+        profileId: String?
+    ) -> Bool {
         let entry = PendingTraktMutation(
             id: UUID().uuidString,
-            meta: meta.persistenceSnapshot,
+            provider: provider,
+            accountID: accountID,
+            meta: playbackCompletionMetaSnapshot(meta),
             season: season,
             episode: episode,
             isWatched: isWatched,
             changedAt: Date()
         )
-        let updated = pendingTraktMutations(profileId: profileId).filter {
-            !samePendingContent($0.meta, season: $0.season, episode: $0.episode,
-                                and: meta, season: season, episode: episode)
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let current = allProviderMutations(profileId: profileId)
+        let updated = current.filter { old in
+            old.provider.caseInsensitiveCompare(provider.rawValue) != .orderedSame
+                || old.accountID != accountID
+                || !samePendingContent(old.meta, season: old.season, episode: old.episode,
+                                      and: meta, season: season, episode: episode)
         } + [entry]
         return persistPendingTraktMutations(updated, profileId: profileId)
     }
 
-    private static func confirmPendingTraktMutations(against remoteItems: [WatchedStoreItem]) {
-        let pending = pendingTraktMutations()
-        guard !pending.isEmpty else { return }
-        let remaining = pending.filter { mutation in
+    private static func confirmPendingTraktMutations(
+        against remoteItems: [WatchedStoreItem],
+        profileId: String?,
+        currentAccountID: String?
+    ) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let allPending = allProviderMutations(profileId: profileId)
+        let legacyPending = allPending.filter {
+            $0.provider.caseInsensitiveCompare(TraktWatchProgressSource.trakt.rawValue) == .orderedSame
+                && !$0.requiresExactAcknowledgment
+                && currentAccountID != nil
+                && $0.accountID == currentAccountID
+        }
+        guard !legacyPending.isEmpty else { return }
+        let remainingLegacy = legacyPending.filter { mutation in
             let existsRemotely = remoteItems.contains { pendingMatches(mutation, item: $0) }
             return mutation.isWatched ? !existsRemotely : existsRemotely
         }
-        guard remaining.count != pending.count else { return }
-        _ = persistPendingTraktMutations(remaining, profileId: activeProfileId)
+        guard remainingLegacy.count != legacyPending.count else { return }
+        let remainingIDs = Set(remainingLegacy.map(\.id))
+        let confirmedIDs = Set(legacyPending.map(\.id)).subtracting(remainingIDs)
+        _ = persistPendingTraktMutations(
+            allPending.filter { !confirmedIDs.contains($0.id) },
+            profileId: profileId
+        )
     }
 
     private static func pendingMatches(
@@ -7742,7 +8868,12 @@ enum WatchedStore {
     }
 
     static func clearPendingTraktMutations(profileId: String?) {
-        _ = persistPendingTraktMutations([], profileId: profileId)
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let remaining = allProviderMutations(profileId: profileId).filter {
+            $0.provider.caseInsensitiveCompare(TraktWatchProgressSource.trakt.rawValue) != .orderedSame
+        }
+        _ = persistPendingTraktMutations(remaining, profileId: profileId)
     }
 
     // MARK: Tombstones — locally deleted marks awaiting remote deletion
@@ -7913,7 +9044,10 @@ enum WatchedStore {
                 watchedAt: $0.watchedAt,
                 season: $0.season,
                 episode: $0.episode,
-                sources: $0.sources
+                sources: $0.sources,
+                watchCountsBySource: $0.watchCountsBySource,
+                lastCountedPlaybackIDsBySource: $0.lastCountedPlaybackIDsBySource,
+                pendingPlaybackCompletions: $0.pendingPlaybackCompletions
             )
         }
         .sorted { $0.watchedAt > $1.watchedAt }
@@ -7937,6 +9071,12 @@ enum WatchedStore {
     private static func persistLocked(_ items: [WatchedStoreItem], profileId: String?) -> Bool {
         let sorted = items.sorted { $0.watchedAt > $1.watchedAt }
         let key = storageKey(for: profileId)
+
+        if failNextPersistenceForTesting {
+            failNextPersistenceForTesting = false
+            persistenceDiagnostic = "write failed (injected test failure)"
+            return false
+        }
 
         guard let data = try? makeEncoder().encode(sorted) else {
             persistenceDiagnostic = "encode failed"
@@ -7962,7 +9102,12 @@ enum WatchedStore {
         let isUnchanged: Bool
         if let previousItems {
             isUnchanged = previousItems.count == sorted.count && zip(previousItems, sorted).allSatisfy { old, new in
-                old.id == new.id && old.watchedAt == new.watchedAt
+                old.id == new.id
+                    && old.watchedAt == new.watchedAt
+                    && old.sources == new.sources
+                    && old.watchCountsBySource == new.watchCountsBySource
+                    && old.lastCountedPlaybackIDsBySource == new.lastCountedPlaybackIDsBySource
+                    && old.pendingPlaybackCompletions == new.pendingPlaybackCompletions
             }
         } else {
             isUnchanged = false
@@ -8007,7 +9152,11 @@ enum WatchedStore {
     /// share these files with a real install) must use this instead.
     static func eraseProfile(_ profileId: String) {
         invalidateCache()
-        let keys = [storageKey(for: profileId), tombstoneStorageKey(for: profileId)]
+        let keys = [
+            storageKey(for: profileId),
+            tombstoneStorageKey(for: profileId),
+            pendingTraktStorageKey(for: profileId)
+        ]
         for key in keys {
             UserDefaults.standard.removeObject(forKey: key)
             if let url = storageURL(forKey: key) {

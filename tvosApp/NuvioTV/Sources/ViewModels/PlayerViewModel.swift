@@ -314,7 +314,6 @@ class PlayerViewModel: ObservableObject {
     /// Keep that cadence lower than local persistence so normal playback never
     /// produces a request every five seconds.
     private var didStartTraktScrobble = false
-    private var didQueueTraktStop = false
     private var lastTraktProgressReport = Date.distantPast
     private var traktProgressTask: Task<Void, Never>?
     private static let traktProgressReportInterval: TimeInterval = 30
@@ -739,7 +738,8 @@ class PlayerViewModel: ObservableObject {
                 // the original launch resume would seek the adopted session
                 // backward during the first tick.
                 resumeFrom: nil,
-                currentEpisode: currentEpisode
+                currentEpisode: currentEpisode,
+                preservesCompletionResumeTarget: true
             )
             tick()
             startPolling()
@@ -753,7 +753,8 @@ class PlayerViewModel: ObservableObject {
             httpHeaders: httpHeaders,
             externalSubtitles: externalSubtitles,
             resumeFrom: resumeFrom,
-            currentEpisode: currentEpisode
+            currentEpisode: currentEpisode,
+            beginsNewPlaybackCompletionSession: !hasLoaded
         )
         guard !hasLoaded else { return }
         hasLoaded = true
@@ -1029,7 +1030,9 @@ class PlayerViewModel: ObservableObject {
         externalSubtitles: [NuvioSubtitle],
         resumeFrom: Double?,
         currentEpisode: NuvioVideo? = nil,
-        preserveSessionPreferences: Bool = false
+        preserveSessionPreferences: Bool = false,
+        beginsNewPlaybackCompletionSession: Bool = false,
+        preservesCompletionResumeTarget: Bool = false
     ) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
         isTrailerPlaybackSession = isTrailerPlayback
@@ -1108,6 +1111,28 @@ class PlayerViewModel: ObservableObject {
         } else if !meta.isSeries {
             self.currentEpisodeVideo = nil
         }
+        let completionIdentity = playbackCompletionIdentity(for: meta)
+        if beginsNewPlaybackCompletionSession {
+            let completionContext = capturePlaybackCompletionContext(profileID: WatchedStore.activeProfileId)
+            sessionCoordinator.beginNewPlaybackCompletionSession(
+                identity: completionIdentity,
+                profileID: WatchedStore.activeProfileId,
+                resumeTargetSeconds: resumeFrom,
+                source: completionContext.source,
+                completionAccounts: completionContext.accountIDs
+            )
+        } else if preservesCompletionResumeTarget {
+            sessionCoordinator.preservePlaybackCompletionTargetIdentity(
+                completionIdentity,
+                fallbackProfileID: WatchedStore.activeProfileId
+            )
+        } else {
+            sessionCoordinator.updatePlaybackCompletionTarget(
+                completionIdentity,
+                fallbackProfileID: WatchedStore.activeProfileId,
+                resumeTargetSeconds: resumeFrom
+            )
+        }
         let selectionKey = isTrailerPlayback
             ? nil
             : PlayerTrackSelectionStore.key(meta: meta, episode: self.activeEpisodeNumbers)
@@ -1126,7 +1151,6 @@ class PlayerViewModel: ObservableObject {
         self.hasProducedMidFilePosition = false
         self.explicitSeekProgressCheckpoint = nil
         self.didStartTraktScrobble = false
-        self.didQueueTraktStop = false
         self.lastTraktProgressReport = .distantPast
         self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
         self.didDetectReplacementStream = false
@@ -1678,14 +1702,7 @@ class PlayerViewModel: ObservableObject {
         // existing local rollover behavior.
         if let activeMeta {
             markWatchedIfNeeded()
-            if usesTraktProgress {
-                reportTraktProgress(
-                    meta: activeMeta,
-                    playbackTime: time,
-                    action: .stop,
-                    force: true
-                )
-            } else {
+            if !usesTraktProgress {
                 ContinueWatchingStore.saveUpNext(
                     meta: activeMeta,
                     duration: time.duration,
@@ -2538,6 +2555,30 @@ class PlayerViewModel: ObservableObject {
         if !isLiveStream {
             applyPendingResumeIfNeeded()
             updateSkipIntervalState()
+            let isCoherentCompletionSample = isTrackablePlayback
+                && c.hasCoherentTimeSample
+                && !isPreSeekSettlingSample
+                && !isReplacementSlate
+                && !sessionCoordinator.isProgressSaveSuspended
+                && !isAwaitingStreamStart
+                && !isFailingOver
+                && !isReloadingStream
+                && !isSwitchingSource
+                && hasRenderedFirstFrame
+                && latestTime.duration >= 60
+                && latestTime.current > 0
+                && latestTime.current < latestTime.duration
+            let isGenuinelyPlaying = status == .playing
+                && c.isPlayerPlaying
+                && !c.isPlayerLoading
+                && !c.isPlayerEnded
+                && !c.isAtEndOfFile
+            observePlaybackCompletionEligibility(
+                at: latestTime,
+                isCoherent: isCoherentCompletionSample,
+                isGenuinelyPlaying: isGenuinelyPlaying,
+                isBelowCompletionBoundary: !shouldMarkAsWatched(at: latestTime)
+            )
         }
 
         if c.isPlayerEnded {
@@ -2553,14 +2594,7 @@ class PlayerViewModel: ObservableObject {
                !isSwitchingSource, !isReloadingStream, !isFailingOver,
                time.duration >= 60, time.current / time.duration >= 0.85 {
                 markWatchedIfNeeded()
-                if usesTraktProgress {
-                    reportTraktProgress(
-                        meta: activeMeta,
-                        playbackTime: time,
-                        action: .stop,
-                        force: true
-                    )
-                } else {
+                if !usesTraktProgress {
                     // Retire the episode that just finished. This keeps a
                     // completed row in the ledger, which is what produces the
                     // Next Up card below — and what lets a later season still
@@ -2665,7 +2699,20 @@ class PlayerViewModel: ObservableObject {
 
     func play() {
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] play() called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
-        if status == .ended { seek(to: 0) }
+        if status == .ended {
+            if let activeMeta {
+                let completionContext = capturePlaybackCompletionContext(profileID: WatchedStore.activeProfileId)
+                sessionCoordinator.beginNewPlaybackCompletionSession(
+                    identity: playbackCompletionIdentity(for: activeMeta),
+                    profileID: WatchedStore.activeProfileId,
+                    source: completionContext.source,
+                    completionAccounts: completionContext.accountIDs
+                )
+            }
+            pendingResumeSeconds = nil
+            didApplyResume = false
+            seek(to: 0)
+        }
         engine.playPlayback()
         status = .playing
         // MDBList has an explicit start transition for resuming a paused
@@ -4847,14 +4894,7 @@ class PlayerViewModel: ObservableObject {
         if shouldSaveNextUpProgress(at: progressTime), let nextEpisode {
             print("[ContinueWatching][Player] shouldSaveNextUpProgress triggered for nextEpisode: S\(nextEpisode.season)E\(nextEpisode.episode)")
             markWatchedIfNeeded()
-            if usesTraktProgress {
-                reportTraktProgress(
-                    meta: activeMeta,
-                    playbackTime: progressTime,
-                    action: .stop,
-                    force: true
-                )
-            } else {
+            if !usesTraktProgress {
                 // The card is up because this episode reached its ending, so
                 // retire it in the ledger before suggesting the next one.
                 ContinueWatchingStore.markPlaybackCompleted(
@@ -4892,14 +4932,18 @@ class PlayerViewModel: ObservableObject {
             )
         }
         if usesTraktProgress {
-            print("[ContinueWatching][Player] routing progress to TraktProgressService: action=\(completesPlayback ? "stop" : (eventAction.map { "\($0)" } ?? "update"))")
-            reportTraktProgress(
-                meta: activeMeta,
-                playbackTime: progressTime,
-                action: completesPlayback ? .stop : eventAction,
-                force: force || completesPlayback,
-                isPeriodicHeartbeat: isPeriodicHeartbeat
-            )
+            if completesPlayback {
+                markWatchedIfNeeded()
+            } else {
+                print("[ContinueWatching][Player] routing progress to provider: action=\(eventAction.map { "\($0)" } ?? "update")")
+                reportTraktProgress(
+                    meta: activeMeta,
+                    playbackTime: progressTime,
+                    action: eventAction,
+                    force: force,
+                    isPeriodicHeartbeat: isPeriodicHeartbeat
+                )
+            }
         } else if completesPlayback {
             // Record completion, not the raw position. An ending marker fires
             // during the credits — well before the 90% the ledger needs to call
@@ -4950,7 +4994,17 @@ class PlayerViewModel: ObservableObject {
     }
 
     private var usesTraktProgress: Bool {
-        RemoteTrackingState.isProgressSourceAuthenticated
+        let store = ProfileSettings.current
+        let source = sessionCoordinator.playbackCompletionTracker?.source
+            ?? TraktSettingsStore.watchProgressSource(in: store)
+        return RemoteTrackingState.isProgressSourceAuthenticated(source, in: store)
+    }
+
+    static func shouldReportPlaybackProgress(
+        afterCompletionWasRecorded wasRecorded: Bool,
+        source: TraktWatchProgressSource
+    ) -> Bool {
+        !(wasRecorded && (source == .trakt || source == .wetrakr))
     }
 
     /// Trailers use the movie's metadata for artwork and playback, but are not
@@ -4982,8 +5036,26 @@ class PlayerViewModel: ObservableObject {
             return
         }
 
+        let store = ProfileSettings.current
+        let tracker = sessionCoordinator.playbackCompletionTracker
+        let source = tracker?.source ?? TraktSettingsStore.watchProgressSource(in: store)
+        let profileID = tracker?.profileID ?? WatchedStore.activeProfileId
+        guard ProfileSettings.isActiveStore(store),
+              Self.isCurrentPlaybackProfile(profileID),
+              RemoteTrackingState.isProgressSourceAuthenticated(source, in: store) else { return }
+        guard Self.shouldReportPlaybackProgress(
+            afterCompletionWasRecorded: tracker?.wasRecorded == true,
+            source: source
+        ) else { return }
+        let expectedAccountID = tracker?.completionAccounts?[source.rawValue]
+        if tracker?.completionAccounts != nil,
+           (source == .trakt || source == .wetrakr),
+           expectedAccountID == nil {
+            return
+        }
+        let playbackID = tracker?.completionID
         let episodeNumbers = resolvedEpisodeNumbers
-        if TraktSettingsStore.watchProgressSource == .simkl,
+        if source == .simkl,
            didStartTraktScrobble,
            action == nil,
            isPeriodicHeartbeat,
@@ -4997,6 +5069,7 @@ class PlayerViewModel: ObservableObject {
                 duration: playbackTime.duration,
                 season: episodeNumbers?.season,
                 episode: episodeNumbers?.episode,
+                source: source,
                 notify: false
             )
             return
@@ -5007,13 +5080,17 @@ class PlayerViewModel: ObservableObject {
             return
         }
 
-        let scrobbleAction = action
-            ?? (isPeriodicHeartbeat ? .start : (didStartTraktScrobble ? .pause : .start))
-        if scrobbleAction == .stop, didQueueTraktStop { return }
+        // A non-completion stop is a progress checkpoint for Trakt/WeTrakr.
+        // Their completion finalizers own the only history write; Simkl and
+        // MDBList keep their existing action semantics.
+        let scrobbleAction: TraktScrobbleAction
+        if (source == .trakt || source == .wetrakr), action == .stop {
+            scrobbleAction = .pause
+        } else {
+            scrobbleAction = action ?? (didStartTraktScrobble ? .pause : .start)
+        }
         didStartTraktScrobble = true
-        if scrobbleAction == .stop { didQueueTraktStop = true }
         lastTraktProgressReport = now
-        let traktStore = ProfileSettings.current
 
         TraktProgressService.recordLocalPlayback(
             meta: meta,
@@ -5021,25 +5098,29 @@ class PlayerViewModel: ObservableObject {
             duration: playbackTime.duration,
             season: episodeNumbers?.season,
             episode: episodeNumbers?.episode,
+            source: source,
             notify: force
         )
 
         let previousTask = traktProgressTask
-        traktProgressTask = Task { [weak self] in
+        traktProgressTask = Task {
             await previousTask?.value
             guard !Task.isCancelled else { return }
-            let succeeded = await TraktProgressService.reportPlayback(
+            guard ProfileSettings.isActiveStore(store),
+                  Self.isCurrentPlaybackProfile(profileID) else { return }
+            _ = await TraktProgressService.reportPlayback(
                 meta: meta,
                 position: playbackTime.current,
                 duration: playbackTime.duration,
                 season: episodeNumbers?.season,
                 episode: episodeNumbers?.episode,
                 action: scrobbleAction,
-                store: traktStore
+                store: store,
+                sourceOverride: source,
+                expectedAccountID: expectedAccountID,
+                playbackID: playbackID,
+                profileId: profileID
             )
-            if scrobbleAction == .stop, !succeeded {
-                self?.didQueueTraktStop = false
-            }
         }
     }
 
@@ -5078,6 +5159,28 @@ class PlayerViewModel: ObservableObject {
         return isOverThreshold
     }
 
+    func observePlaybackCompletionEligibility(
+        at sample: PlayerTime,
+        isCoherent: Bool,
+        isGenuinelyPlaying: Bool,
+        isBelowCompletionBoundary: Bool
+    ) {
+        let resumeTargetReached: Bool
+        if let resumeTarget = sessionCoordinator.playbackCompletionTracker?.resumeTargetSeconds {
+            let target = min(resumeTarget, max(sample.duration - 5, 0))
+            resumeTargetReached = sample.current >= max(target - 2, 0)
+        } else {
+            resumeTargetReached = true
+        }
+
+        sessionCoordinator.observePlaybackCompletionSample(
+            isCoherent: isCoherent,
+            isGenuinelyPlaying: isGenuinelyPlaying,
+            isBelowCompletionBoundary: isBelowCompletionBoundary,
+            hasReachedResumeTarget: resumeTargetReached
+        )
+    }
+
     /// Season/episode for the item currently playing. Prefer the structured
     /// episode object from Details / auto-advance; fall back to parsing the
     /// player subtitle line or stream filename so a format mismatch cannot
@@ -5089,34 +5192,149 @@ class PlayerViewModel: ObservableObject {
         return activeEpisodeNumbers
     }
 
-    /// Marks the current playback watched — the specific episode for series,
-    /// the title itself for movies. Skips if already marked so repeated ticks
-    /// past the threshold don't rewrite the store.
+    private func playbackCompletionIdentity(for meta: NuvioMeta) -> PlaybackCompletionIdentity {
+        let numbers = resolvedEpisodeNumbers
+        return PlaybackCompletionIdentity(
+            titleID: meta.id,
+            contentType: meta.isSeries ? "series" : meta.type.lowercased(),
+            season: numbers?.season,
+            episode: numbers?.episode,
+            episodeID: numbers == nil ? currentEpisodeVideo?.id : nil
+        )
+    }
+
+    private func capturePlaybackCompletionContext(profileID: String?) -> (
+        source: TraktWatchProgressSource,
+        accountIDs: [String: String]
+    ) {
+        let store = ProfileSettings.current
+        let source = TraktSettingsStore.watchProgressSource(in: store)
+        var accountIDs: [String: String] = [:]
+
+        if source == .trakt || RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: store),
+           let accountID = TraktHistoryService.completionAccountID(in: store, profileId: profileID) {
+            accountIDs[TraktWatchProgressSource.trakt.rawValue] = accountID
+        }
+        if source == .wetrakr,
+           let accountID = WeTrakrProgressService.completionAccountID(in: store, profileId: profileID) {
+            accountIDs[TraktWatchProgressSource.wetrakr.rawValue] = accountID
+        }
+        return (source, accountIDs)
+    }
+
+    /// Finalizes the durable completion after any queued progress report for
+    /// this player. The captured provider/account stay bound to the play even
+    /// if the user changes tracking settings or links another account before
+    /// the network request runs.
+    private func finishPlaybackCompletion(
+        meta: NuvioMeta,
+        playbackTime: PlayerTime,
+        season: Int?,
+        episode: Int?,
+        completionID: String,
+        tracker: PlaybackCompletionTracker
+    ) {
+        let profileID = tracker.profileID
+        guard !isLiveStream,
+              tracker.completionID == completionID,
+              Self.isCurrentPlaybackProfile(profileID),
+              ProfileSettings.isActiveStore(ProfileSettings.current) else { return }
+
+        let store = ProfileSettings.current
+        let source = tracker.source ?? TraktSettingsStore.watchProgressSource(in: store)
+        let expectedAccountID = tracker.completionAccounts?[source.rawValue]
+        let traktMirrorAccountID = source == .trakt
+            ? nil
+            : tracker.completionAccounts?[TraktWatchProgressSource.trakt.rawValue]
+        let previousTask = traktProgressTask
+        traktProgressTask = Task { @MainActor in
+            await previousTask?.value
+            guard !Task.isCancelled,
+                  ProfileSettings.isActiveStore(store),
+                  Self.isCurrentPlaybackProfile(profileID) else { return }
+
+            let succeeded = await TraktProgressService.finishPlaybackForHistory(
+                meta: meta,
+                position: playbackTime.current,
+                duration: playbackTime.duration,
+                season: season,
+                episode: episode,
+                store: store,
+                profileId: profileID,
+                completionID: completionID,
+                source: source,
+                expectedAccountID: expectedAccountID,
+                traktMirrorAccountID: traktMirrorAccountID
+            )
+            guard ProfileSettings.isActiveStore(store),
+                  Self.isCurrentPlaybackProfile(profileID) else { return }
+            if !succeeded {
+                print("[ContinueWatching][Player] completion finalization deferred for \(meta.id) (\(source.rawValue))")
+            }
+        }
+    }
+
+    /// Records one completed playback per logical play. The coordinator-owned
+    /// completion ID survives source retries and PiP adoption, while a rewatch
+    /// must have played below the completion boundary before it can increment.
     private func markWatchedIfNeeded() {
         guard isTrackablePlayback else { return }
         guard let activeMeta else { return }
         let numbers = resolvedEpisodeNumbers
         let season = numbers?.season
         let episode = numbers?.episode
-        if let season, let episode {
-            guard !WatchedStore.containsEpisode(meta: activeMeta, season: season, episode: episode) else {
-                print("[ContinueWatching][Player] markWatchedIfNeeded: episode S\(season)E\(episode) already in WatchedStore")
-                return
-            }
-        } else {
-            // Series without resolved S/E must not write a whole-title mark —
-            // that would checkmark the poster but never the episode card.
-            if activeMeta.isSeries {
-                print("[ContinueWatching][Player] markWatchedIfNeeded: series without S/E numbers, skipping whole-title mark")
-                return
-            }
-            guard !WatchedStore.contains(meta: activeMeta) else {
-                print("[ContinueWatching][Player] markWatchedIfNeeded: movie \(activeMeta.id) already in WatchedStore")
-                return
-            }
+        // Series without resolved S/E must not write a whole-title mark —
+        // that would checkmark the poster but never the episode card.
+        if activeMeta.isSeries && (season == nil || episode == nil) {
+            print("[ContinueWatching][Player] markWatchedIfNeeded: series without S/E numbers, skipping whole-title mark")
+            return
         }
-        print("[ContinueWatching][Player] markWatchedIfNeeded: calling WatchedStore.markWatched for \(activeMeta.id) S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil")")
-        WatchedStore.markWatched(activeMeta, season: season, episode: episode)
+        let identity = playbackCompletionIdentity(for: activeMeta)
+        let profileID = WatchedStore.activeProfileId
+        guard let tracker = sessionCoordinator.playbackCompletionTracker,
+              tracker.profileID == profileID,
+              Self.isCurrentPlaybackProfile(profileID),
+              ProfileSettings.isActiveStore(ProfileSettings.current) else {
+            print("[ContinueWatching][Player] markWatchedIfNeeded: profile changed during playback; skipping completion")
+            return
+        }
+        let watchCount: Int
+        if let season, let episode {
+            watchCount = WatchedStore.episodeWatchCount(meta: activeMeta, season: season, episode: episode)
+        } else {
+            watchCount = WatchedStore.watchCount(meta: activeMeta)
+        }
+        guard let completionID = sessionCoordinator.playbackCompletionIDForRecording(
+            identity: identity,
+            currentProfileID: profileID,
+            isAlreadyWatched: watchCount > 0
+        ) else {
+            return
+        }
+        let accepted = WatchedStore.recordPlaybackCompletion(
+            activeMeta,
+            season: season,
+            episode: episode,
+            completionID: completionID,
+            source: tracker.source,
+            completionAccounts: tracker.completionAccounts
+        )
+        guard accepted else { return }
+        sessionCoordinator.markPlaybackCompletionRecorded(completionID: completionID)
+        finishPlaybackCompletion(
+            meta: activeMeta,
+            playbackTime: time,
+            season: season,
+            episode: episode,
+            completionID: completionID,
+            tracker: tracker
+        )
+        print("[ContinueWatching][Player] markWatchedIfNeeded: recorded completion for \(activeMeta.id) S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil")")
+    }
+
+    private static func isCurrentPlaybackProfile(_ profileID: String?) -> Bool {
+        WatchedStore.activeProfileId == profileID
+            && ProfileSettings.activeProfileID == profileID
     }
 
     /// Extracts "S1 · E3" from the episode subtitle DetailsScreen passes along

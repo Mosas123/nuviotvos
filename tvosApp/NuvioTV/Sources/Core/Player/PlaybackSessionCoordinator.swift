@@ -2,6 +2,97 @@ import Foundation
 import UIKit
 import Combine
 
+struct PlaybackCompletionIdentity: Equatable {
+    let titleID: String
+    let contentType: String
+    let season: Int?
+    let episode: Int?
+    let episodeID: String?
+}
+
+struct PlaybackCompletionTracker {
+    let profileID: String?
+    private(set) var source: TraktWatchProgressSource?
+    private(set) var completionAccounts: [String: String]?
+    private(set) var identity: PlaybackCompletionIdentity
+    private(set) var completionID: String
+    private(set) var hasEligiblePlayingSample = false
+    private(set) var wasRecorded = false
+    private(set) var hasConfirmedResumeTarget: Bool
+    private(set) var resumeTargetSeconds: Double?
+
+    init(
+        profileID: String?,
+        identity: PlaybackCompletionIdentity,
+        resumeTargetSeconds: Double? = nil,
+        source: TraktWatchProgressSource? = nil,
+        completionAccounts: [String: String]? = nil
+    ) {
+        self.profileID = profileID
+        self.source = source
+        self.completionAccounts = completionAccounts
+        self.identity = identity
+        completionID = UUID().uuidString
+        self.resumeTargetSeconds = Self.normalizedResumeTarget(resumeTargetSeconds)
+        hasConfirmedResumeTarget = self.resumeTargetSeconds == nil
+    }
+
+    mutating func transition(to identity: PlaybackCompletionIdentity) {
+        guard self.identity != identity else { return }
+        self.identity = identity
+        completionID = UUID().uuidString
+        hasEligiblePlayingSample = false
+        wasRecorded = false
+        resumeTargetSeconds = nil
+        hasConfirmedResumeTarget = true
+    }
+
+    mutating func updateResumeTarget(_ seconds: Double?) {
+        let target = Self.normalizedResumeTarget(seconds)
+        guard resumeTargetSeconds != target else { return }
+        resumeTargetSeconds = target
+        hasConfirmedResumeTarget = target == nil
+    }
+
+    mutating func observePlayingSample(
+        isCoherent: Bool,
+        isGenuinelyPlaying: Bool,
+        isBelowCompletionBoundary: Bool,
+        hasReachedResumeTarget: Bool = true
+    ) {
+        guard !wasRecorded, isCoherent, isGenuinelyPlaying else { return }
+        if !hasConfirmedResumeTarget, hasReachedResumeTarget {
+            hasConfirmedResumeTarget = true
+        }
+        guard hasConfirmedResumeTarget, isBelowCompletionBoundary else { return }
+        hasEligiblePlayingSample = true
+    }
+
+    func completionIDForRecording(
+        identity: PlaybackCompletionIdentity,
+        currentProfileID: String?,
+        isAlreadyWatched: Bool
+    ) -> String? {
+        guard self.identity == identity,
+              profileID == currentProfileID,
+              !wasRecorded,
+              !isAlreadyWatched || hasEligiblePlayingSample else {
+            return nil
+        }
+        return completionID
+    }
+
+    mutating func markRecorded(completionID: String) {
+        guard self.completionID == completionID else { return }
+        wasRecorded = true
+    }
+
+    private static func normalizedResumeTarget(_ seconds: Double?) -> Double? {
+        guard let seconds, seconds.isFinite, seconds > 5 else { return nil }
+        return seconds
+    }
+}
+
 /// Owns backend selection, generation-safe loads, and one-way Aether → MPV handoff.
 @MainActor
 final class PlaybackSessionCoordinator: ObservableObject {
@@ -35,6 +126,90 @@ final class PlaybackSessionCoordinator: ObservableObject {
     var prepareForHandoff: ((inout PlaybackLoadRequest) -> Void)?
     var onBackendHandoff: ((PlaybackLoadRequest) -> Void)?
     private(set) var currentCacheSessionToken: String?
+    private(set) var playbackCompletionTracker: PlaybackCompletionTracker?
+
+    func beginNewPlaybackCompletionSession(
+        identity: PlaybackCompletionIdentity,
+        profileID: String?,
+        resumeTargetSeconds: Double? = nil,
+        source: TraktWatchProgressSource? = nil,
+        completionAccounts: [String: String]? = nil
+    ) {
+        playbackCompletionTracker = PlaybackCompletionTracker(
+            profileID: profileID,
+            identity: identity,
+            resumeTargetSeconds: resumeTargetSeconds,
+            source: source,
+            completionAccounts: completionAccounts
+        )
+    }
+
+    /// Keeps the current profile scope while preserving the completion guard
+    /// across same-content source reloads and PiP view-model adoption. A new
+    /// episode/title receives a fresh completion ID in the same play session.
+    func updatePlaybackCompletionTarget(
+        _ identity: PlaybackCompletionIdentity,
+        fallbackProfileID: String?,
+        resumeTargetSeconds: Double? = nil
+    ) {
+        guard var tracker = playbackCompletionTracker else {
+            beginNewPlaybackCompletionSession(
+                identity: identity,
+                profileID: fallbackProfileID,
+                resumeTargetSeconds: resumeTargetSeconds
+            )
+            return
+        }
+        tracker.transition(to: identity)
+        tracker.updateResumeTarget(resumeTargetSeconds)
+        playbackCompletionTracker = tracker
+    }
+
+    func preservePlaybackCompletionTargetIdentity(
+        _ identity: PlaybackCompletionIdentity,
+        fallbackProfileID: String?
+    ) {
+        guard var tracker = playbackCompletionTracker else {
+            beginNewPlaybackCompletionSession(identity: identity, profileID: fallbackProfileID)
+            return
+        }
+        tracker.transition(to: identity)
+        playbackCompletionTracker = tracker
+    }
+
+    func observePlaybackCompletionSample(
+        isCoherent: Bool,
+        isGenuinelyPlaying: Bool,
+        isBelowCompletionBoundary: Bool,
+        hasReachedResumeTarget: Bool = true
+    ) {
+        guard var tracker = playbackCompletionTracker else { return }
+        tracker.observePlayingSample(
+            isCoherent: isCoherent,
+            isGenuinelyPlaying: isGenuinelyPlaying,
+            isBelowCompletionBoundary: isBelowCompletionBoundary,
+            hasReachedResumeTarget: hasReachedResumeTarget
+        )
+        playbackCompletionTracker = tracker
+    }
+
+    func playbackCompletionIDForRecording(
+        identity: PlaybackCompletionIdentity,
+        currentProfileID: String?,
+        isAlreadyWatched: Bool
+    ) -> String? {
+        playbackCompletionTracker?.completionIDForRecording(
+            identity: identity,
+            currentProfileID: currentProfileID,
+            isAlreadyWatched: isAlreadyWatched
+        )
+    }
+
+    func markPlaybackCompletionRecorded(completionID: String) {
+        guard var tracker = playbackCompletionTracker else { return }
+        tracker.markRecorded(completionID: completionID)
+        playbackCompletionTracker = tracker
+    }
 
     var activeEngine: PlaybackEngineControlling {
         switch activeBackend {

@@ -1915,6 +1915,159 @@ private final class GeminiURLProtocolStub: URLProtocol {
     override func stopLoading() {}
 }
 
+private struct TraktStubReply {
+    let statusCode: Int
+    let headers: [String: String]
+    let data: Data
+}
+
+private final class TraktHistoryURLProtocolStub: URLProtocol {
+    static var handler: ((URLRequest) throws -> TraktStubReply)?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let reply = try handler(request)
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: reply.statusCode,
+                httpVersion: nil,
+                headerFields: reply.headers
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if !reply.data.isEmpty { client?.urlProtocol(self, didLoad: reply.data) }
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private final class TraktCompletionHistoryMock: @unchecked Sendable {
+    private let lock = NSLock()
+    private let expectedWatchedAt: String
+    private let matchingMovieID: String
+    private var historyContainsCompletion = false
+    private var completionPostCount = 0
+    private var _postedWatchedAt: [String] = []
+    private var _paths: [String] = []
+    private var _historyQueryURL: URL?
+    var pauseResponseID: Int64? = 501
+    var playbackRowID: Int64? = 501
+    private let pauseAt = "2026-10-11T12:34:00Z"
+
+    init(expectedWatchedAt: String, matchingMovieID: String) {
+        self.expectedWatchedAt = expectedWatchedAt
+        self.matchingMovieID = matchingMovieID
+    }
+
+    var postedWatchedAt: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _postedWatchedAt
+    }
+
+    var paths: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _paths
+    }
+
+    var historyQueryURL: URL? {
+        lock.lock(); defer { lock.unlock() }
+        return _historyQueryURL
+    }
+
+    func resetPlaybackPaths() {
+        lock.lock(); defer { lock.unlock() }
+        _paths.removeAll()
+    }
+
+    func handle(_ request: URLRequest) throws -> TraktStubReply {
+        lock.lock(); defer { lock.unlock() }
+        let path = request.url?.path ?? ""
+        let method = request.httpMethod ?? "GET"
+        _paths.append("\(method) \(path)")
+
+        if method == "GET", path == "/users/me/history/movies" {
+            _historyQueryURL = request.url
+            let watchedAt = historyContainsCompletion ? expectedWatchedAt : "2001-01-01T12:34:00Z"
+            return jsonReply([
+                [
+                    "id": 900,
+                    "watched_at": watchedAt,
+                    "movie": [
+                        "title": "Completion Retry",
+                        "year": 2026,
+                        "ids": ["imdb": matchingMovieID, "tmdb": 42]
+                    ]
+                ]
+            ], headers: ["x-pagination-page-count": "1"])
+        }
+
+        if method == "POST", path == "/sync/history" {
+            let data = try XCTUnwrap(GeminiURLProtocolStub.body(from: request))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let movies = try XCTUnwrap(object["movies"] as? [[String: Any]])
+            let watchedAt = try XCTUnwrap(movies.first?["watched_at"] as? String)
+            _postedWatchedAt.append(watchedAt)
+            completionPostCount += 1
+            if completionPostCount == 2 {
+                historyContainsCompletion = true
+                throw URLError(.timedOut) // Trakt accepted the retry but its acknowledgment was lost.
+            }
+            return TraktStubReply(statusCode: 200, headers: [:], data: Data())
+        }
+
+        if method == "POST", path == "/scrobble/start" {
+            return TraktStubReply(statusCode: 204, headers: [:], data: Data())
+        }
+
+        if method == "POST", path == "/scrobble/pause" {
+            guard let pauseResponseID else {
+                return TraktStubReply(statusCode: 204, headers: [:], data: Data())
+            }
+            return jsonReply(["id": pauseResponseID, "paused_at": pauseAt])
+        }
+
+        if method == "GET", path == "/sync/playback/movies" {
+            let rowID = playbackRowID ?? 0
+            return jsonReply([
+                [
+                    "id": rowID,
+                    "progress": 75.0,
+                    "paused_at": pauseAt,
+                    "movie": [
+                        "title": "Pause Cleanup",
+                        "ids": ["imdb": matchingMovieID]
+                    ]
+                ]
+            ])
+        }
+
+        if method == "DELETE", path.hasPrefix("/sync/playback/") {
+            return TraktStubReply(statusCode: 204, headers: [:], data: Data())
+        }
+
+        throw URLError(.unsupportedURL)
+    }
+
+    private func jsonReply(_ object: Any, headers: [String: String] = [:]) -> TraktStubReply {
+        TraktStubReply(
+            statusCode: 200,
+            headers: ["Content-Type": "application/json"].merging(headers) { _, new in new },
+            data: (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+        )
+    }
+}
+
 private actor BatchAttemptRecorder {
     private var attempts: [[Int]] = []
 
@@ -1954,6 +2107,773 @@ private func waitForWhile(_ condition: () -> Bool) async {
     while !condition() && Date() < deadline {
         try? await Task.sleep(nanoseconds: 10_000_000)
         await Task.yield()
+    }
+}
+
+final class PlaybackCompletionTrackerTests: XCTestCase {
+    func testTrackerSupportsTheUnscopedDefaultProfile() {
+        let identity = PlaybackCompletionIdentity(
+            titleID: "tt-default-profile-completion",
+            contentType: "movie",
+            season: nil,
+            episode: nil,
+            episodeID: nil
+        )
+        let tracker = PlaybackCompletionTracker(profileID: nil, identity: identity)
+
+        XCTAssertEqual(
+            tracker.completionIDForRecording(
+                identity: identity,
+                currentProfileID: nil,
+                isAlreadyWatched: false
+            ),
+            tracker.completionID
+        )
+        XCTAssertNil(tracker.completionIDForRecording(
+            identity: identity,
+            currentProfileID: "another-profile",
+            isAlreadyWatched: false
+        ))
+    }
+
+    func testRewatchNeedsCoherentPlayingSampleBelowCompletionBoundary() {
+        let identity = PlaybackCompletionIdentity(
+            titleID: "tt-rewatch-test",
+            contentType: "movie",
+            season: nil,
+            episode: nil,
+            episodeID: nil
+        )
+        var tracker = PlaybackCompletionTracker(profileID: "profile-a", identity: identity)
+        let completionID = tracker.completionID
+
+        XCTAssertEqual(
+            tracker.completionIDForRecording(
+                identity: identity,
+                currentProfileID: "profile-a",
+                isAlreadyWatched: false
+            ),
+            completionID,
+            "The first completion keeps its existing behavior"
+        )
+        XCTAssertNil(tracker.completionIDForRecording(
+            identity: identity,
+            currentProfileID: "profile-a",
+            isAlreadyWatched: true
+        ))
+
+        tracker.observePlayingSample(
+            isCoherent: false,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: true
+        )
+        tracker.observePlayingSample(
+            isCoherent: true,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: false
+        )
+        XCTAssertFalse(tracker.hasEligiblePlayingSample, "A startup clock or credits-only resume must not arm a rewatch")
+        XCTAssertNil(tracker.completionIDForRecording(
+            identity: identity,
+            currentProfileID: "profile-a",
+            isAlreadyWatched: true
+        ))
+
+        tracker.observePlayingSample(
+            isCoherent: true,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: true
+        )
+        XCTAssertTrue(tracker.hasEligiblePlayingSample)
+        XCTAssertEqual(tracker.completionIDForRecording(
+            identity: identity,
+            currentProfileID: "profile-a",
+            isAlreadyWatched: true
+        ), completionID)
+        XCTAssertNil(tracker.completionIDForRecording(
+            identity: identity,
+            currentProfileID: "profile-b",
+            isAlreadyWatched: true
+        ), "A play started under another profile must not be recorded here")
+    }
+
+    @MainActor
+    func testCoordinatorPreservesCompletionGuardAcrossReloadAndPiPAdoptionButResetsForNewEpisode() throws {
+        let coordinator = PlaybackSessionCoordinator(
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let episodeOne = PlaybackCompletionIdentity(
+            titleID: "series-1",
+            contentType: "series",
+            season: 1,
+            episode: 1,
+            episodeID: "s1e1"
+        )
+        coordinator.beginNewPlaybackCompletionSession(
+            identity: episodeOne,
+            profileID: "profile-a",
+            resumeTargetSeconds: 900
+        )
+        let firstID = try XCTUnwrap(coordinator.playbackCompletionTracker?.completionID)
+        XCTAssertFalse(coordinator.playbackCompletionTracker?.hasConfirmedResumeTarget == true)
+        coordinator.updatePlaybackCompletionTarget(
+            episodeOne,
+            fallbackProfileID: "profile-b",
+            resumeTargetSeconds: 900
+        )
+        coordinator.preservePlaybackCompletionTargetIdentity(episodeOne, fallbackProfileID: "profile-b")
+        XCTAssertFalse(coordinator.playbackCompletionTracker?.hasConfirmedResumeTarget == true)
+        coordinator.observePlaybackCompletionSample(
+            isCoherent: true,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: true,
+            hasReachedResumeTarget: true
+        )
+        coordinator.markPlaybackCompletionRecorded(completionID: firstID)
+
+        // Source reload and PiP restoration both update the same target on the
+        // retained coordinator; neither can make another mark for this play.
+        coordinator.updatePlaybackCompletionTarget(episodeOne, fallbackProfileID: "profile-b")
+        coordinator.updatePlaybackCompletionTarget(episodeOne, fallbackProfileID: "profile-b")
+        XCTAssertEqual(coordinator.playbackCompletionTracker?.completionID, firstID)
+        XCTAssertTrue(coordinator.playbackCompletionTracker?.wasRecorded == true)
+        XCTAssertEqual(coordinator.playbackCompletionTracker?.profileID, "profile-a")
+
+        let episodeTwo = PlaybackCompletionIdentity(
+            titleID: "series-1",
+            contentType: "series",
+            season: 1,
+            episode: 2,
+            episodeID: "s1e2"
+        )
+        coordinator.updatePlaybackCompletionTarget(episodeTwo, fallbackProfileID: "profile-b")
+        let secondID = try XCTUnwrap(coordinator.playbackCompletionTracker?.completionID)
+        XCTAssertNotEqual(secondID, firstID)
+        XCTAssertFalse(coordinator.playbackCompletionTracker?.hasEligiblePlayingSample == true)
+        XCTAssertFalse(coordinator.playbackCompletionTracker?.wasRecorded == true)
+        XCTAssertNil(coordinator.playbackCompletionIDForRecording(
+            identity: episodeTwo,
+            currentProfileID: "profile-a",
+            isAlreadyWatched: true
+        ))
+
+        coordinator.beginNewPlaybackCompletionSession(identity: episodeTwo, profileID: "profile-a")
+        XCTAssertNotEqual(coordinator.playbackCompletionTracker?.completionID, secondID)
+        XCTAssertEqual(coordinator.playbackCompletionTracker?.profileID, "profile-a")
+    }
+
+    @MainActor
+    func testSaveProgressRecordsFirstCompletionOnceAndRequiresEligibleRewatch() {
+        let profileID = "playback-completion-save-progress-tests"
+        let profileState = activateProfile(profileID)
+        WatchedStore.eraseProfile(profileID)
+        defer {
+            restore(profileState)
+        }
+
+        let movie = NuvioMeta(id: "tt-playback-completion", name: "Completion", type: "movie")
+        var sessions: [(PlayerViewModel, PlaybackSessionCoordinator)] = []
+        defer {
+            for (model, coordinator) in sessions {
+                model.shutdown()
+                coordinator.stopAll()
+            }
+        }
+
+        func makeModel(resumeFrom: Double?) -> (PlayerViewModel, PlaybackSessionCoordinator) {
+            let coordinator = PlaybackSessionCoordinator(
+                engineSettingProvider: { "MPVKit" },
+                loadDispatcher: { _, _, _ in }
+            )
+            let model = PlayerViewModel(sessionCoordinator: coordinator)
+            model.load(
+                url: URL(fileURLWithPath: "/tmp/playback-completion-test.mkv"),
+                meta: movie,
+                subtitle: "",
+                resumeFrom: resumeFrom
+            )
+            model.status = .playing
+            model.time = PlayerTime(current: 1_100, duration: 1_200)
+            let session = (model, coordinator)
+            sessions.append(session)
+            return session
+        }
+
+        let (firstPlay, firstCoordinator) = makeModel(resumeFrom: 6)
+        firstPlay.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 1)
+        firstPlay.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 1, "Repeated completion paths share one playback ID")
+        let completedPlayID = firstCoordinator.playbackCompletionTracker?.completionID
+        firstPlay.status = .ended
+        firstPlay.play()
+        XCTAssertNotEqual(firstCoordinator.playbackCompletionTracker?.completionID, completedPlayID)
+
+        let (rewatch, _) = makeModel(resumeFrom: 100)
+        rewatch.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 1, "A resumed play at the completion boundary is not a rewatch")
+        rewatch.observePlaybackCompletionEligibility(
+            at: PlayerTime(current: 100, duration: 1_200),
+            isCoherent: true,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: true
+        )
+        rewatch.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 2)
+        rewatch.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 2, "Repeated save paths must not count one rewatch twice")
+
+        let (creditsResume, _) = makeModel(resumeFrom: 1_100)
+        creditsResume.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 2, "Credits-only resume must not increment an existing count")
+
+        let (profileSwitch, _) = makeModel(resumeFrom: 100)
+        let otherProfileID = "playback-completion-other-profile"
+        WatchedStore.eraseProfile(otherProfileID)
+        WatchedStore.setActiveProfile(otherProfileID)
+        profileSwitch.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 0, "A play captured under another profile must not be written here")
+        WatchedStore.setActiveProfile(profileID)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 2)
+        WatchedStore.eraseProfile(otherProfileID)
+    }
+
+    @MainActor
+    func testEligibilityHelperAllowsRewindAfterResumeTargetConfirmation() {
+        let profileID = "playback-completion-resume-rewind-tests"
+        let profileState = activateProfile(profileID)
+        WatchedStore.eraseProfile(profileID)
+        let movie = NuvioMeta(id: "tt-resume-rewind", name: "Resume rewind", type: "movie")
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(movie, completionID: "previous-play"))
+
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        model.load(
+            url: URL(fileURLWithPath: "/tmp/playback-resume-rewind-test.mkv"),
+            meta: movie,
+            subtitle: "",
+            resumeFrom: 1_100
+        )
+        model.status = .playing
+        model.time = PlayerTime(current: 1_100, duration: 1_200)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+            restore(profileState)
+        }
+
+        model.observePlaybackCompletionEligibility(
+            at: PlayerTime(current: 1_100, duration: 1_200),
+            isCoherent: true,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: false
+        )
+        XCTAssertTrue(coordinator.playbackCompletionTracker?.hasConfirmedResumeTarget == true)
+        XCTAssertFalse(coordinator.playbackCompletionTracker?.hasEligiblePlayingSample == true)
+
+        // The retained request position is still 1,100 after resume settles.
+        // A later coherent sample after an intentional rewind must still arm.
+        model.observePlaybackCompletionEligibility(
+            at: PlayerTime(current: 40, duration: 1_200),
+            isCoherent: true,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: true
+        )
+        XCTAssertTrue(coordinator.playbackCompletionTracker?.hasEligiblePlayingSample == true)
+
+        model.time = PlayerTime(current: 1_100, duration: 1_200)
+        model.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: movie), 2)
+    }
+
+    @MainActor
+    func testSaveProgressCountsCompletionsPerEpisode() {
+        let profileID = "playback-completion-episode-tests"
+        let profileState = activateProfile(profileID)
+        WatchedStore.eraseProfile(profileID)
+        defer {
+            restore(profileState)
+        }
+
+        let series = NuvioMeta(id: "series-completion", name: "Episode completion", type: "series")
+        var sessions: [(PlayerViewModel, PlaybackSessionCoordinator)] = []
+        defer {
+            for (model, coordinator) in sessions {
+                model.shutdown()
+                coordinator.stopAll()
+            }
+        }
+
+        func makeEpisode(season: Int, episode: Int, resumeFrom: Double?) -> (PlayerViewModel, PlaybackSessionCoordinator) {
+            let coordinator = PlaybackSessionCoordinator(
+                aetherControllerFactory: { nil },
+                engineSettingProvider: { "MPVKit" },
+                loadDispatcher: { _, _, _ in }
+            )
+            let model = PlayerViewModel(sessionCoordinator: coordinator)
+            model.load(
+                url: URL(fileURLWithPath: "/tmp/playback-episode-completion-test.mkv"),
+                meta: series,
+                subtitle: "S\(season) · E\(episode)",
+                resumeFrom: resumeFrom
+            )
+            model.status = .playing
+            model.time = PlayerTime(current: 1_100, duration: 1_200)
+            let session = (model, coordinator)
+            sessions.append(session)
+            return session
+        }
+
+        let (firstEpisode, _) = makeEpisode(season: 1, episode: 1, resumeFrom: 6)
+        firstEpisode.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: series, season: 1, episode: 1), 1)
+        firstEpisode.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: series, season: 1, episode: 1), 1)
+
+        let (episodeRewatch, _) = makeEpisode(season: 1, episode: 1, resumeFrom: 100)
+        episodeRewatch.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: series, season: 1, episode: 1), 1)
+        episodeRewatch.observePlaybackCompletionEligibility(
+            at: PlayerTime(current: 100, duration: 1_200),
+            isCoherent: true,
+            isGenuinelyPlaying: true,
+            isBelowCompletionBoundary: true
+        )
+        episodeRewatch.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: series, season: 1, episode: 1), 2)
+
+        let (nextEpisode, _) = makeEpisode(season: 1, episode: 2, resumeFrom: 6)
+        nextEpisode.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: series, season: 1, episode: 1), 2)
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: series, season: 1, episode: 2), 1)
+    }
+
+    @MainActor
+    func testInferredEpisodeIdentitySurvivesMissingCurrentEpisodeConfiguration() {
+        let profileID = "playback-completion-inferred-episode-tests"
+        let profileState = activateProfile(profileID)
+        WatchedStore.eraseProfile(profileID)
+        defer {
+            restore(profileState)
+        }
+
+        let episode = NuvioVideo(id: "series-inferred:1:1", title: "Episode 1", season: 1, episode: 1)
+        let series = NuvioMeta(
+            id: "series-inferred",
+            name: "Inferred episode",
+            type: "series",
+            videos: [episode]
+        )
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        model.load(
+            url: URL(fileURLWithPath: "/tmp/playback-inferred-episode-test.mkv"),
+            meta: series,
+            subtitle: "S1 · E1",
+            resumeFrom: 6
+        )
+        model.configureNextEpisode(
+            episodes: [episode],
+            current: nil,
+            autoPlayEnabled: false,
+            autoPlayCountdownSeconds: 10,
+            resolver: { _ in nil }
+        )
+        model.status = .playing
+        model.time = PlayerTime(current: 1_100, duration: 1_200)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+        }
+
+        model.saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.episodeWatchCount(meta: series, season: 1, episode: 1), 1)
+    }
+
+    @MainActor
+    func testSaveProgressRetainsTrailerLiveAndReplacementExclusions() {
+        let profileID = "playback-completion-exclusion-tests"
+        let profileState = activateProfile(profileID)
+        WatchedStore.eraseProfile(profileID)
+        defer {
+            restore(profileState)
+        }
+
+        var sessions: [(PlayerViewModel, PlaybackSessionCoordinator)] = []
+        defer {
+            for (model, coordinator) in sessions {
+                model.shutdown()
+                coordinator.stopAll()
+            }
+        }
+
+        func makeModel(meta: NuvioMeta, subtitle: String, duration: Double) -> PlayerViewModel {
+            let coordinator = PlaybackSessionCoordinator(
+                engineSettingProvider: { "MPVKit" },
+                loadDispatcher: { _, _, _ in }
+            )
+            let model = PlayerViewModel(sessionCoordinator: coordinator)
+            model.load(
+                url: URL(fileURLWithPath: "/tmp/playback-completion-exclusion.mkv"),
+                meta: meta,
+                subtitle: subtitle,
+                resumeFrom: 6
+            )
+            model.status = .playing
+            model.time = PlayerTime(current: duration - 10, duration: duration)
+            sessions.append((model, coordinator))
+            return model
+        }
+
+        let trailer = NuvioMeta(id: "trailer-only", name: "Trailer", type: "movie")
+        makeModel(meta: trailer, subtitle: PlaybackMarkers.trailerSubtitle, duration: 1_200)
+            .saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: trailer), 0)
+
+        let live = NuvioMeta(id: "channel:completion-live", name: "Live", type: "channel")
+        makeModel(meta: live, subtitle: "", duration: 1_200).saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: live), 0)
+
+        let replacement = NuvioMeta(id: "replacement-slate", name: "Slate", type: "movie")
+        makeModel(meta: replacement, subtitle: "", duration: 120).saveProgress(force: true)
+        XCTAssertEqual(WatchedStore.watchCount(meta: replacement), 0)
+    }
+
+    @MainActor
+    private func activateProfile(_ profileID: String) -> PlaybackTestProfile {
+        let previousSettingsProfileID = ProfileSettings.activeProfileID
+        let previousWatchedProfileID = WatchedStore.activeProfileId
+        ProfileSettings.setActiveProfile(profileID, isPrimary: false)
+        WatchedStore.setActiveProfile(profileID)
+        return PlaybackTestProfile(
+            id: profileID,
+            previousSettingsProfileID: previousSettingsProfileID,
+            previousWatchedProfileID: previousWatchedProfileID
+        )
+    }
+
+    @MainActor
+    private func restore(_ profile: PlaybackTestProfile) {
+        WatchedStore.eraseProfile(profile.id)
+        ProfileSettings.eraseAll(profileIds: [profile.id])
+        if let previous = profile.previousSettingsProfileID {
+            ProfileSettings.setActiveProfile(previous, isPrimary: previous == "1")
+        } else {
+            ProfileSettings.clearActiveProfile()
+        }
+        WatchedStore.setActiveProfile(profile.previousWatchedProfileID)
+    }
+
+    private struct PlaybackTestProfile {
+        let id: String
+        let previousSettingsProfileID: String?
+        let previousWatchedProfileID: String?
+    }
+}
+
+final class TraktCompletionHistoryTests: XCTestCase {
+    @MainActor
+    func testCompletedTraktOrWeTrakrPlayDoesNotReportAnotherProgressHeartbeat() {
+        for source in [TraktWatchProgressSource.trakt, .wetrakr] {
+            XCTAssertFalse(PlayerViewModel.shouldReportPlaybackProgress(
+                afterCompletionWasRecorded: true,
+                source: source
+            ))
+        }
+        for source in [TraktWatchProgressSource.simkl, .mdblist, .nuvioSync] {
+            XCTAssertTrue(PlayerViewModel.shouldReportPlaybackProgress(
+                afterCompletionWasRecorded: true,
+                source: source
+            ))
+        }
+        XCTAssertTrue(PlayerViewModel.shouldReportPlaybackProgress(
+            afterCompletionWasRecorded: false,
+            source: .trakt
+        ))
+    }
+
+    @MainActor
+    func testCompletionRetryUsesImmutableMinuteAndConfirmsLostAcknowledgment() async throws {
+        let profile = activateTraktProfile(slug: "account-a")
+        defer { restore(profile) }
+        let movie = NuvioMeta(
+            id: "tt-completion-retry",
+            name: "Completion Retry",
+            imdbId: "tt-completion-retry",
+            tmdbId: 42,
+            type: "movie",
+            year: 2026
+        )
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            movie,
+            completionID: "completion-retry-id",
+            source: .trakt,
+            completionAccounts: [TraktWatchProgressSource.trakt.rawValue: "account-a"]
+        ))
+        let event = try XCTUnwrap(
+            WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profile.id).first
+        )
+
+        let mock = TraktCompletionHistoryMock(
+            expectedWatchedAt: TraktHistoryService.completionMinuteTimestamp(event.watchedAt),
+            matchingMovieID: "tt-completion-retry"
+        )
+        let session = makeTraktSession(mock: mock)
+        defer {
+            TraktHistoryURLProtocolStub.handler = nil
+            session.invalidateAndCancel()
+        }
+
+        // A completion captured under A stays queued after the profile is
+        // relinked to B; the drain must not issue any request under B.
+        TraktAuthStore.saveUser(username: "Account B", slug: "account-b", store: profile.store)
+        let mismatchedAccountFlush = await TraktHistoryService.flushPendingPlaybackCompletions(
+            store: profile.store,
+            profileId: profile.id,
+            session: session
+        )
+        XCTAssertFalse(mismatchedAccountFlush)
+        XCTAssertTrue(mock.paths.isEmpty)
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profile.id).count, 1)
+
+        TraktAuthStore.saveUser(username: "Account A", slug: "account-a", store: profile.store)
+        let firstAttempt = await TraktHistoryService.flushPendingPlaybackCompletions(
+            store: profile.store,
+            profileId: profile.id,
+            session: session
+        )
+        XCTAssertFalse(firstAttempt, "A matching item from an earlier minute must not acknowledge this completion")
+        XCTAssertTrue(WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profile.id).contains(event))
+
+        let retryAttempt = await TraktHistoryService.flushPendingPlaybackCompletions(
+            store: profile.store,
+            profileId: profile.id,
+            session: session
+        )
+        XCTAssertTrue(retryAttempt, "The next attempt confirms the exact event after its POST response is lost")
+        XCTAssertTrue(WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profile.id).isEmpty)
+        let expectedMinute = TraktHistoryService.completionMinuteTimestamp(event.watchedAt)
+        XCTAssertEqual(mock.postedWatchedAt, [expectedMinute, expectedMinute])
+        XCTAssertEqual(mock.paths.filter { $0.hasPrefix("POST /sync/history") }.count, 2)
+
+        let historyURL = try XCTUnwrap(mock.historyQueryURL)
+        let query = try XCTUnwrap(URLComponents(url: historyURL, resolvingAgainstBaseURL: false)?.queryItems)
+        let start = try XCTUnwrap(query.first(where: { $0.name == "start_at" })?.value)
+        let end = try XCTUnwrap(query.first(where: { $0.name == "end_at" })?.value)
+        let formatter = ISO8601DateFormatter()
+        let startDate = try XCTUnwrap(formatter.date(from: start))
+        let endDate = try XCTUnwrap(formatter.date(from: end))
+        XCTAssertEqual(endDate.timeIntervalSince(startDate), 59)
+    }
+
+    @MainActor
+    func testTraktFinalizerDeletesOnlyItsConfirmedPlaybackAndPartialPauseDoesNotStop() async throws {
+        let profile = activateTraktProfile(slug: "account-a")
+        defer { restore(profile) }
+        let movie = NuvioMeta(
+            id: "tt-pause-cleanup",
+            name: "Pause Cleanup",
+            imdbId: "tt-pause-cleanup",
+            type: "movie"
+        )
+        let mock = TraktCompletionHistoryMock(
+            expectedWatchedAt: "2026-10-11T12:34:00Z",
+            matchingMovieID: "tt-pause-cleanup"
+        )
+        mock.pauseResponseID = 501
+        mock.playbackRowID = 501
+        let session = makeTraktSession(mock: mock)
+        defer {
+            TraktHistoryURLProtocolStub.handler = nil
+            session.invalidateAndCancel()
+        }
+
+        TraktHistoryService.noteSuccessfulPlaybackStart(
+            accountID: "account-a",
+            profileId: profile.id,
+            playbackID: "finished-playback"
+        )
+        let matchingRowResult = await TraktHistoryService.finishTraktPlaybackForHistory(
+            meta: movie,
+            position: 900,
+            duration: 1_200,
+            season: nil,
+            episode: nil,
+            store: profile.store,
+            profileId: profile.id,
+            completionID: "finished-playback",
+            expectedAccountID: "account-a",
+            session: session
+        )
+        XCTAssertTrue(matchingRowResult)
+        XCTAssertTrue(mock.paths.contains("POST /scrobble/pause"))
+        XCTAssertTrue(mock.paths.contains("GET /sync/playback/movies"))
+        XCTAssertTrue(mock.paths.contains("DELETE /sync/playback/501"))
+        XCTAssertFalse(mock.paths.contains("POST /scrobble/stop"))
+
+        mock.resetPlaybackPaths()
+        mock.pauseResponseID = 601
+        mock.playbackRowID = 602
+        TraktHistoryService.noteSuccessfulPlaybackStart(
+            accountID: "account-a",
+            profileId: profile.id,
+            playbackID: "newer-playback"
+        )
+        let staleFinalizer = await TraktHistoryService.finishTraktPlaybackForHistory(
+            meta: movie,
+            position: 900,
+            duration: 1_200,
+            season: nil,
+            episode: nil,
+            store: profile.store,
+            profileId: profile.id,
+            completionID: "stale-playback",
+            expectedAccountID: "account-a",
+            session: session
+        )
+        XCTAssertTrue(staleFinalizer)
+        XCTAssertTrue(mock.paths.isEmpty, "A stale completion cannot pause the newer same-title session")
+
+        mock.pauseResponseID = 601
+        mock.playbackRowID = 602
+        let wrongRowResult = await TraktHistoryService.finishTraktPlaybackForHistory(
+            meta: movie,
+            position: 900,
+            duration: 1_200,
+            season: nil,
+            episode: nil,
+            store: profile.store,
+            profileId: profile.id,
+            completionID: "newer-playback",
+            expectedAccountID: "account-a",
+            session: session
+        )
+        XCTAssertTrue(wrongRowResult)
+        XCTAssertFalse(mock.paths.contains("DELETE /sync/playback/601"), "A different row ID is not owned by this pause response")
+
+        mock.resetPlaybackPaths()
+        let partialStartResult = await TraktProgressService.reportPlayback(
+            meta: movie,
+            position: 300,
+            duration: 1_200,
+            season: nil,
+            episode: nil,
+            action: .start,
+            store: profile.store,
+            sourceOverride: .trakt,
+            expectedAccountID: "account-a",
+            playbackID: "partial-playback",
+            profileId: profile.id,
+            session: session
+        )
+        XCTAssertTrue(partialStartResult)
+        XCTAssertTrue(TraktHistoryService.ownsPlayback(
+            accountID: "account-a",
+            profileId: profile.id,
+            playbackID: "partial-playback"
+        ))
+        mock.resetPlaybackPaths()
+        let partialPauseResult = await TraktProgressService.reportPlayback(
+            meta: movie,
+            position: 300,
+            duration: 1_200,
+            season: nil,
+            episode: nil,
+            action: .pause,
+            store: profile.store,
+            sourceOverride: .trakt,
+            expectedAccountID: "account-a",
+            playbackID: "partial-playback",
+            profileId: profile.id,
+            session: session
+        )
+        XCTAssertTrue(partialPauseResult)
+        XCTAssertTrue(mock.paths.contains("POST /scrobble/pause"))
+        XCTAssertFalse(mock.paths.contains("POST /scrobble/stop"))
+        XCTAssertFalse(mock.paths.contains(where: { $0.hasPrefix("DELETE /sync/playback/") }))
+    }
+
+    func testFallbackEpisodeHistoryCountsDistinctHistoryIDs() {
+        let series = NuvioMeta(id: "tmdb:42", name: "Repeated Episode", imdbId: "tt2042", type: "series")
+        let earlier = Date(timeIntervalSince1970: 1_800_000_000)
+        let later = earlier.addingTimeInterval(120)
+        func row(_ watchedAt: Date) -> WatchedStoreItem {
+            WatchedStoreItem(meta: series, watchedAt: watchedAt, season: 2, episode: 3)
+        }
+
+        let aggregate = TraktHistoryService.aggregateFallbackEpisodeHistory([
+            .init(historyID: 100, item: row(earlier)),
+            .init(historyID: 100, item: row(earlier)),
+            .init(historyID: 101, item: row(later))
+        ])
+        XCTAssertEqual(aggregate.count, 1)
+        XCTAssertEqual(aggregate.first?.watchCountsBySource[TraktWatchProgressSource.trakt.rawValue], 2)
+        XCTAssertEqual(aggregate.first?.watchedAt, later)
+    }
+
+    @MainActor
+    private func activateTraktProfile(slug: String) -> TestProfile {
+        let previousProfileID = ProfileSettings.activeProfileID
+        let previousWatchedProfileID = WatchedStore.activeProfileId
+        let id = "trakt-completion-\(UUID().uuidString)"
+        ProfileSettings.setActiveProfile(id, isPrimary: false)
+        WatchedStore.setActiveProfile(id)
+        let store = ProfileSettings.current
+        store.set("test-trakt-client", forKey: SettingsKey.traktClientID)
+        TraktAuthStore.saveToken(
+            TraktTokenResponse(
+                accessToken: "test-access-token",
+                tokenType: "bearer",
+                expiresIn: 3_600,
+                refreshToken: "test-refresh-token",
+                createdAt: Int(Date().timeIntervalSince1970)
+            ),
+            clientID: "test-trakt-client",
+            store: store,
+            isNewLogin: true
+        )
+        TraktAuthStore.saveUser(username: slug, slug: slug, store: store)
+        return TestProfile(
+            id: id,
+            store: store,
+            previousProfileID: previousProfileID,
+            previousWatchedProfileID: previousWatchedProfileID
+        )
+    }
+
+    @MainActor
+    private func restore(_ profile: TestProfile) {
+        WatchedStore.eraseProfile(profile.id)
+        ProfileSettings.eraseAll(profileIds: [profile.id])
+        if let previous = profile.previousProfileID {
+            ProfileSettings.setActiveProfile(previous, isPrimary: previous == "1")
+        } else {
+            ProfileSettings.clearActiveProfile()
+        }
+        WatchedStore.setActiveProfile(profile.previousWatchedProfileID)
+    }
+
+    private func makeTraktSession(mock: TraktCompletionHistoryMock) -> URLSession {
+        TraktHistoryURLProtocolStub.handler = { try mock.handle($0) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TraktHistoryURLProtocolStub.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private struct TestProfile {
+        let id: String
+        let store: UserDefaults
+        let previousProfileID: String?
+        let previousWatchedProfileID: String?
     }
 }
 
