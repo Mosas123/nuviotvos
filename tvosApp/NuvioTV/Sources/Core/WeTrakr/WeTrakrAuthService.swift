@@ -319,6 +319,11 @@ enum WeTrakrAuthStore {
         setOptional(avatarURL, forKey: Key.avatarURL, defaults: defaults)
     }
 
+    static func clearCachedUser(store defaults: UserDefaults) {
+        [Key.username, Key.displayName, Key.accountID, Key.accountPlan, Key.avatarURL]
+            .forEach { defaults.removeObject(forKey: $0) }
+    }
+
     static func cachedStats(in defaults: UserDefaults) -> WeTrakrCachedStats? {
         guard let data = defaults.data(forKey: Key.cachedStats) else { return nil }
         return try? JSONDecoder().decode(WeTrakrCachedStats.self, from: data)
@@ -528,6 +533,10 @@ final class WeTrakrAuthService {
         let response = try result.valueOrThrow()
 
         WeTrakrAuthStore.clearDeviceFlow(store: store)
+        // A fresh device authorization may connect a different WeTrakr user.
+        // Until settings for the new token are verified, the old account ID
+        // must not authorize queued completions.
+        WeTrakrAuthStore.clearCachedUser(store: store)
         WeTrakrAuthStore.saveToken(
             response.accessToken,
             refreshToken: response.refreshToken,
@@ -552,6 +561,7 @@ final class WeTrakrAuthService {
         guard let refreshToken = state.refreshToken, !refreshToken.isEmpty, !clientID.isEmpty else {
             throw WeTrakrServiceError.message("No refresh token available.")
         }
+        let capturedAccessToken = state.accessToken ?? ""
 
         let body = WeTrakrRefreshTokenRequest(
             refreshToken: refreshToken,
@@ -563,6 +573,11 @@ final class WeTrakrAuthService {
             clientID: clientID
         )
         let response = try result.valueOrThrow()
+        guard !capturedAccessToken.isEmpty,
+              isCurrentProfileBinding(for: capturedAccessToken),
+              currentState.accountID == state.accountID else {
+            throw WeTrakrServiceError.message("WeTrakr account changed during token refresh.")
+        }
 
         WeTrakrAuthStore.saveToken(
             response.accessToken,
@@ -589,6 +604,7 @@ final class WeTrakrAuthService {
                 clientID: clientID
             )
             let settings = try result.valueOrThrow()
+            guard isCurrentProfileBinding(for: token) else { return false }
 
             let avatarFullURL: String? = {
                 guard let raw = settings.images?.avatar, !raw.isEmpty else { return nil }
@@ -610,6 +626,22 @@ final class WeTrakrAuthService {
         } catch {
             return false
         }
+    }
+
+    private func isCurrentProfileBinding(for capturedToken: String) -> Bool {
+        guard ProfileSettings.isActiveStore(store),
+              currentState.accessToken == capturedToken else {
+            return false
+        }
+        if let activeProfileID = ProfileSettings.activeProfileID,
+           activeProfileID != profileScope {
+            return false
+        }
+        if let storedProfileID = store.string(forKey: "nuvio.tv.profile.settings.profileID"),
+           storedProfileID != profileScope {
+            return false
+        }
+        return true
     }
 
     func fetchUserStats() async -> WeTrakrCachedStats? {

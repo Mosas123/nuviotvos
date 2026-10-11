@@ -172,6 +172,7 @@ enum TraktAuthStore {
         static let expiresIn = "nuvio.tv.trakt.auth.expiresIn"
         static let username = "nuvio.tv.trakt.auth.username"
         static let userSlug = "nuvio.tv.trakt.auth.userSlug"
+        static let accountBindingID = "nuvio.tv.trakt.auth.accountBindingID"
         static let deviceCode = "nuvio.tv.trakt.auth.deviceCode"
         static let userCode = "nuvio.tv.trakt.auth.userCode"
         static let verificationURL = "nuvio.tv.trakt.auth.verificationURL"
@@ -229,6 +230,7 @@ enum TraktAuthStore {
                 Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt,
                 Key.expiresIn, Key.username, Key.userSlug, Key.cachedStats
             ].forEach { defaults.removeObject(forKey: $0) }
+            defaults.removeObject(forKey: Key.accountBindingID)
             defaults.removeObject(forKey: SettingsKey.traktConnected)
         }
         defaults.set(response.deviceCode, forKey: Key.deviceCode)
@@ -242,8 +244,16 @@ enum TraktAuthStore {
     static func saveToken(
         _ response: TraktTokenResponse,
         clientID: String,
-        store defaults: UserDefaults = ProfileSettings.current
+        store defaults: UserDefaults = ProfileSettings.current,
+        isNewLogin: Bool = false
     ) {
+        if isNewLogin {
+            defaults.removeObject(forKey: Key.username)
+            defaults.removeObject(forKey: Key.userSlug)
+            defaults.set(UUID().uuidString, forKey: Key.accountBindingID)
+        } else if defaults.string(forKey: Key.accountBindingID) == nil {
+            defaults.set(UUID().uuidString, forKey: Key.accountBindingID)
+        }
         defaults.set(response.accessToken, forKey: Key.accessToken)
         defaults.set(response.refreshToken, forKey: Key.refreshToken)
         defaults.set(response.tokenType, forKey: Key.tokenType)
@@ -261,6 +271,10 @@ enum TraktAuthStore {
     ) {
         setOptional(username, forKey: Key.username, defaults: defaults)
         setOptional(slug, forKey: Key.userSlug, defaults: defaults)
+    }
+
+    static func accountBindingID(in defaults: UserDefaults) -> String? {
+        defaults.string(forKey: Key.accountBindingID)
     }
 
     static func updatePollInterval(
@@ -296,7 +310,7 @@ enum TraktAuthStore {
     static func clearAuth(store defaults: UserDefaults = ProfileSettings.current) {
         [
             Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt, Key.expiresIn,
-            Key.username, Key.userSlug, Key.deviceCode, Key.userCode, Key.verificationURL,
+            Key.username, Key.userSlug, Key.accountBindingID, Key.deviceCode, Key.userCode, Key.verificationURL,
             Key.expiresAt, Key.pollInterval, Key.credentialClientID, Key.cachedStats
         ].forEach { defaults.removeObject(forKey: $0) }
         defaults.removeObject(forKey: SettingsKey.traktConnected)
@@ -798,7 +812,7 @@ final class TraktAuthService {
     }
 
     func pollDeviceToken() async -> TraktPollResult {
-        guard hasRequiredCredentials() else {
+        guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else {
             return .failed("Enter your Trakt Client ID first.")
         }
         let state = currentState()
@@ -807,6 +821,9 @@ final class TraktAuthService {
               !deviceCode.isEmpty else {
             return .failed("No active Trakt device code.")
         }
+        let capturedProfileID = ProfileSettings.activeProfileID
+        let capturedClientID = clientID
+        let capturedDeviceCode = deviceCode
 
         do {
             let response: HTTPResult<TraktTokenResponse> = try await postResult(
@@ -819,7 +836,18 @@ final class TraktAuthService {
                 authorized: false
             )
             if let token = response.value, (200..<300).contains(response.statusCode) {
-                TraktAuthStore.saveToken(token, clientID: clientID, store: store)
+                guard ProfileSettings.isActiveStore(store),
+                      ProfileSettings.activeProfileID == capturedProfileID,
+                      currentState().deviceCode == capturedDeviceCode,
+                      clientID == capturedClientID else {
+                    return .failed("The active profile or Trakt account changed during login.")
+                }
+                TraktAuthStore.saveToken(
+                    token,
+                    clientID: capturedClientID,
+                    store: store,
+                    isNewLogin: true
+                )
                 TraktAuthStore.clearDeviceFlow(store: store)
                 // Same reasoning as the Simkl connect path: point watch progress
                 // at the tracker the user just linked, unless they have already
@@ -856,6 +884,9 @@ final class TraktAuthService {
         let state = currentState()
         guard TraktAuthStore.isAuthenticated(in: store), let refreshToken = state.refreshToken else { return false }
         if !force && !isTokenExpiredOrExpiring(state) { return true }
+        let capturedProfileID = ProfileSettings.activeProfileID
+        let capturedClientID = clientID
+        let capturedBindingID = TraktAuthStore.accountBindingID(in: store)
 
         do {
             let response: HTTPResult<TraktTokenResponse> = try await postResult(
@@ -868,13 +899,25 @@ final class TraktAuthService {
                 ),
                 authorized: false
             )
+            let latestState = currentState()
+            let isCapturedSession = ProfileSettings.isActiveStore(store)
+                && ProfileSettings.activeProfileID == capturedProfileID
+                && clientID == capturedClientID
+                && latestState.refreshToken == refreshToken
+                && capturedBindingID == TraktAuthStore.accountBindingID(in: store)
             guard let token = response.value, (200..<300).contains(response.statusCode) else {
-                if response.statusCode == 401 || response.statusCode == 403 {
+                if isCapturedSession && (response.statusCode == 401 || response.statusCode == 403) {
                     TraktAuthStore.clearAuth(store: store)
                 }
                 return false
             }
-            TraktAuthStore.saveToken(token, clientID: clientID, store: store)
+            guard isCapturedSession else {
+                // A relink or a concurrent refresh won while this request was
+                // in flight. Never overwrite that newer account/session.
+                return TraktAuthStore.isAuthenticated(in: store)
+                    && !isTokenExpiredOrExpiring(latestState)
+            }
+            TraktAuthStore.saveToken(token, clientID: capturedClientID, store: store)
             return true
         } catch {
             return false
@@ -898,7 +941,21 @@ final class TraktAuthService {
     }
 
     func fetchUserSettings() async -> String? {
+        guard ProfileSettings.isActiveStore(store) else { return nil }
+        let capturedProfileID = ProfileSettings.activeProfileID
+        let capturedBindingID = TraktAuthStore.accountBindingID(in: store)
+        let capturedAccessToken = currentState().accessToken
+        let capturedRefreshToken = currentState().refreshToken
         guard let response: TraktUserSettingsResponse = try? await authorizedGet(path: "users/settings") else {
+            return nil
+        }
+        let latestState = currentState()
+        guard ProfileSettings.isActiveStore(store),
+              ProfileSettings.activeProfileID == capturedProfileID,
+              TraktAuthStore.isAuthenticated(in: store),
+              (capturedBindingID != nil
+                ? TraktAuthStore.accountBindingID(in: store) == capturedBindingID
+                : latestState.accessToken == capturedAccessToken && latestState.refreshToken == capturedRefreshToken) else {
             return nil
         }
         let username = response.user?.username
@@ -953,6 +1010,24 @@ final class TraktAuthService {
             throw TraktServiceError.message(
                 result.errorMessage ?? "Trakt request failed (\(result.statusCode))."
             )
+        }
+    }
+
+    /// Deletes an exact Trakt playback progress row. A missing row is already
+    /// cleaned up, while every other non-success status remains retryable.
+    fileprivate func authorizedDeletePlayback(path: String) async -> Bool {
+        guard await refreshTokenIfNeeded(), let token = currentState().accessToken else {
+            return false
+        }
+        var request = baseRequest(path: path)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return (200..<300).contains(http.statusCode) || http.statusCode == 404
+        } catch {
+            return false
         }
     }
 
@@ -1706,9 +1781,14 @@ struct TraktProgressService {
         season: Int?,
         episode: Int?,
         action: TraktScrobbleAction,
-        store: UserDefaults = ProfileSettings.current
+        store: UserDefaults = ProfileSettings.current,
+        sourceOverride: TraktWatchProgressSource? = nil,
+        expectedAccountID: String? = nil,
+        playbackID: String? = nil,
+        profileId: String? = nil,
+        session: URLSession = .shared
     ) async -> Bool {
-        let source = TraktSettingsStore.watchProgressSource(in: store)
+        let source = sourceOverride ?? TraktSettingsStore.watchProgressSource(in: store)
         print("[TraktProgressService] reportPlayback: action=\(action.rawValue), source=\(source.rawValue), meta=\(meta.id), pos=\(position)/\(duration)")
         if source == .simkl {
             return await SimklProgressService.reportPlayback(
@@ -1740,6 +1820,9 @@ struct TraktProgressService {
                 season: season,
                 episode: episode,
                 action: action,
+                expectedAccountID: expectedAccountID,
+                playbackID: playbackID,
+                profileId: profileId,
                 store: store
             )
         }
@@ -1751,6 +1834,14 @@ struct TraktProgressService {
               duration.isFinite,
               duration > 0,
               let media = scrobbleMedia(for: meta) else {
+            return false
+        }
+        let profileID = profileId ?? WatchedStore.activeProfileId
+        guard WatchedStore.activeProfileId == profileID,
+              ProfileSettings.activeProfileID == profileID else { return false }
+        guard let accountID = expectedAccountID
+                ?? TraktHistoryService.completionAccountID(in: store, profileId: profileID),
+              expectedAccountID == nil || expectedAccountID == accountID else {
             return false
         }
 
@@ -1773,22 +1864,50 @@ struct TraktProgressService {
             )
         }
 
-        do {
-            try await TraktAuthService(store: store).authorizedPostEmpty(
-                path: "scrobble/\(action.rawValue)",
-                body: request
-            )
-            NotificationCenter.default.post(
-                name: TraktSettingsStore.continueWatchingChangedNotification,
-                object: nil
-            )
-            return true
-        } catch {
-            return false
+        let service = TraktAuthService(session: session, store: store)
+        return await TraktHistoryService.withPlaybackHistoryLane(accountID: accountID) {
+            guard ProfileSettings.isActiveStore(store),
+                  WatchedStore.activeProfileId == profileID,
+                  TraktHistoryService.completionAccountID(in: store, profileId: profileID) == accountID else {
+                return false
+            }
+            if action == .pause, let playbackID,
+               !TraktHistoryService.ownsPlayback(
+                    accountID: accountID,
+                    profileId: profileID,
+                    playbackID: playbackID
+               ) {
+                return false
+            }
+            do {
+                try await service.authorizedPostEmpty(
+                    path: "scrobble/\(action.rawValue)",
+                    body: request
+                )
+                guard ProfileSettings.isActiveStore(store),
+                      WatchedStore.activeProfileId == profileID,
+                      TraktHistoryService.completionAccountID(in: store, profileId: profileID) == accountID else {
+                    return false
+                }
+                if action == .start, let playbackID {
+                    TraktHistoryService.noteSuccessfulPlaybackStart(
+                        accountID: accountID,
+                        profileId: profileID,
+                        playbackID: playbackID
+                    )
+                }
+                NotificationCenter.default.post(
+                    name: TraktSettingsStore.continueWatchingChangedNotification,
+                    object: nil
+                )
+                return true
+            } catch {
+                return false
+            }
         }
     }
 
-    private static func scrobbleMedia(for meta: NuvioMeta) -> TraktScrobbleMedia? {
+    fileprivate static func scrobbleMedia(for meta: NuvioMeta) -> TraktScrobbleMedia? {
         let firstIDComponent = meta.id.split(separator: ":", maxSplits: 1).first.map(String.init) ?? meta.id
         let imdb = meta.imdbId ?? (firstIDComponent.hasPrefix("tt") ? firstIDComponent : nil)
         let tmdb = meta.tmdbId ?? (meta.id.hasPrefix("tmdb:")
@@ -1796,6 +1915,88 @@ struct TraktProgressService {
             : nil)
         guard imdb != nil || tmdb != nil else { return nil }
         return TraktScrobbleMedia(ids: TraktScrobbleIDs(imdb: imdb, tmdb: tmdb))
+    }
+
+    /// Routes a locally accepted completion to exactly one provider history
+    /// owner. Trakt and WeTrakr use their completion outboxes; Simkl/MDBList
+    /// retain their prior stop behavior, and a Nuvio Sync completion may drain
+    /// its captured Trakt mirror event without sending a scrobble.
+    static func finishPlaybackForHistory(
+        meta: NuvioMeta,
+        position: Double,
+        duration: Double,
+        season: Int?,
+        episode: Int?,
+        store: UserDefaults = ProfileSettings.current,
+        profileId: String?,
+        completionID: String,
+        source: TraktWatchProgressSource,
+        expectedAccountID: String?,
+        traktMirrorAccountID: String?
+    ) async -> Bool {
+        guard ProfileSettings.isActiveStore(store),
+              ProfileSettings.activeProfileID == profileId,
+              WatchedStore.activeProfileId == profileId,
+              !completionID.isEmpty else { return false }
+
+        switch source {
+        case .trakt:
+            guard let expectedAccountID else { return false }
+            return await TraktHistoryService.finishTraktPlaybackForHistory(
+                meta: meta,
+                position: position,
+                duration: duration,
+                season: season,
+                episode: episode,
+                store: store,
+                profileId: profileId,
+                completionID: completionID,
+                expectedAccountID: expectedAccountID
+            )
+        case .wetrakr:
+            guard let expectedAccountID else { return false }
+            let weResult = await WeTrakrProgressService.finishPlaybackForHistory(
+                meta: meta,
+                position: position,
+                duration: duration,
+                season: season,
+                episode: episode,
+                store: store,
+                profileId: profileId,
+                completionID: completionID,
+                accountID: expectedAccountID
+            )
+            guard ProfileSettings.isActiveStore(store),
+                  ProfileSettings.activeProfileID == profileId,
+                  WatchedStore.activeProfileId == profileId else { return false }
+            if let traktMirrorAccountID {
+                let mirrorResult = await TraktHistoryService.flushPendingPlaybackHistory(
+                    store: store,
+                    profileId: profileId,
+                    expectedAccountID: traktMirrorAccountID
+                )
+                return weResult && mirrorResult
+            }
+            return weResult
+        case .nuvioSync:
+            guard let traktMirrorAccountID else { return true }
+            return await TraktHistoryService.flushPendingPlaybackHistory(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: traktMirrorAccountID
+            )
+        case .simkl, .mdblist:
+            return await reportPlayback(
+                meta: meta,
+                position: position,
+                duration: duration,
+                season: season,
+                episode: episode,
+                action: .stop,
+                store: store,
+                sourceOverride: source
+            )
+        }
     }
 
     private static func playbackSeed(from item: TraktPlaybackDTO, type: String) -> TraktProgressSeed? {
@@ -2081,10 +2282,46 @@ enum TraktWatchedHistoryPagination {
 /// connected Trakt account should receive an explicit watched action even when
 /// resume points are kept in Nuvio Sync.
 struct TraktHistoryService {
+    private struct PlaybackOwner: Equatable {
+        let profileId: String?
+        let playbackID: String
+    }
+
+    private enum PendingHistoryWrite {
+        case mutation(WatchedStore.PendingProviderMutation)
+        case completion(WatchedPlaybackCompletionUpload)
+
+        var changedAt: Date {
+            switch self {
+            case .mutation(let mutation): return mutation.changedAt
+            case .completion(let completion): return completion.watchedAt
+            }
+        }
+
+        var stableID: String {
+            switch self {
+            case .mutation(let mutation): return "0:\(mutation.id)"
+            case .completion(let completion): return "1:\(completion.id)"
+            }
+        }
+
+        var priorityAtEqualTime: Int {
+            switch self {
+            case .mutation(let mutation): return mutation.isWatched ? 1 : 0
+            case .completion: return 2
+            }
+        }
+    }
+
     private struct WatchedHistoryFetchResult {
         let items: [WatchedStoreItem]
         let receivedResponse: Bool
         let isComplete: Bool
+    }
+
+    struct EpisodeHistoryEntry {
+        let historyID: Int64
+        let item: WatchedStoreItem
     }
 
     @MainActor
@@ -2096,6 +2333,550 @@ struct TraktHistoryService {
 
     @MainActor private static var inFlightSync: InFlightSync?
     @MainActor private static var syncGeneration = 0
+    @MainActor private static var activePlaybackHistoryLanes = Set<String>()
+    @MainActor private static var playbackHistoryLaneWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    @MainActor private static var activePlaybackOwners: [String: PlaybackOwner] = [:]
+
+    /// Stable cached account binding used by completion outbox events. A
+    /// missing slug is deliberately treated as unknown so a retry cannot bind
+    /// an old play to whichever account is linked later.
+    static func completionAccountID(
+        in store: UserDefaults = ProfileSettings.current,
+        profileId: String?
+    ) -> String? {
+        guard WatchedStore.activeProfileId == profileId,
+              ProfileSettings.activeProfileID == profileId,
+              ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store),
+              let rawSlug = TraktAuthStore.state(in: store).userSlug else {
+            return nil
+        }
+        let slug = rawSlug.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !slug.isEmpty, slug != "me" else { return nil }
+        return slug
+    }
+
+    /// Drains Trakt resets and completion events for the active account. Each
+    /// event retains its original UTC minute and only leaves the outbox after a
+    /// matching history row is confirmed.
+    @MainActor
+    static func flushPendingPlaybackCompletions(
+        store: UserDefaults = ProfileSettings.current,
+        profileId: String? = WatchedStore.activeProfileId,
+        session: URLSession = .shared
+    ) async -> Bool {
+        guard let expectedAccountID = completionAccountID(in: store, profileId: profileId) else {
+            return false
+        }
+        return await withPlaybackHistoryLane(accountID: expectedAccountID) {
+            await drainPendingPlaybackHistory(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID,
+                session: session
+            )
+        }
+    }
+
+    /// Called by other provider finalizers when a captured Trakt mirror account
+    /// has completion rows to flush, without issuing a Trakt scrobble pause.
+    @MainActor
+    static func flushPendingPlaybackHistory(
+        store: UserDefaults,
+        profileId: String?,
+        expectedAccountID: String,
+        session: URLSession = .shared
+    ) async -> Bool {
+        guard isCurrentTraktAccount(
+            store: store,
+            profileId: profileId,
+            expectedAccountID: expectedAccountID
+        ) else { return false }
+        return await withPlaybackHistoryLane(accountID: expectedAccountID) {
+            await drainPendingPlaybackHistory(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID,
+                session: session
+            )
+        }
+    }
+
+    /// Completes a captured Trakt playback without using /scrobble/stop as a
+    /// second history writer. Pause progress is removed only when Trakt returns
+    /// its row id and a fresh playback read still matches that exact row.
+    @MainActor
+    static func finishTraktPlaybackForHistory(
+        meta: NuvioMeta,
+        position: Double,
+        duration: Double,
+        season: Int?,
+        episode: Int?,
+        store: UserDefaults,
+        profileId: String?,
+        completionID: String,
+        expectedAccountID: String,
+        session: URLSession = .shared
+    ) async -> Bool {
+        guard !completionID.isEmpty,
+              isCurrentTraktAccount(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID
+              ) else { return false }
+
+        return await withPlaybackHistoryLane(accountID: expectedAccountID) {
+            guard isCurrentTraktAccount(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID
+            ) else { return false }
+
+            let ownsLivePlayback = ownsPlayback(
+                accountID: expectedAccountID,
+                profileId: profileId,
+                playbackID: completionID
+            )
+            if ownsLivePlayback {
+                await pauseAndRemoveOwnedPlaybackProgress(
+                    meta: meta,
+                    position: position,
+                    duration: duration,
+                    season: season,
+                    episode: episode,
+                    store: store,
+                    profileId: profileId,
+                    expectedAccountID: expectedAccountID,
+                    session: session,
+                    playbackID: completionID
+                )
+                if ownsPlayback(accountID: expectedAccountID, profileId: profileId, playbackID: completionID) {
+                    activePlaybackOwners.removeValue(forKey: playbackOwnerKey(expectedAccountID))
+                }
+            }
+            guard isCurrentTraktAccount(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID
+            ) else { return false }
+            return await drainPendingPlaybackHistory(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID,
+                session: session
+            )
+        }
+    }
+
+    @MainActor
+    private static func pauseAndRemoveOwnedPlaybackProgress(
+        meta: NuvioMeta,
+        position: Double,
+        duration: Double,
+        season: Int?,
+        episode: Int?,
+        store: UserDefaults,
+        profileId: String?,
+        expectedAccountID: String,
+        session: URLSession,
+        playbackID: String
+    ) async {
+        guard position.isFinite,
+              duration.isFinite,
+              position > 0,
+              duration > 0,
+              ownsPlayback(accountID: expectedAccountID, profileId: profileId, playbackID: playbackID),
+              let media = TraktProgressService.scrobbleMedia(for: meta) else { return }
+        let episodeItem: TraktScrobbleEpisode?
+        if meta.isSeries {
+            guard let season, season >= 0, let episode, episode > 0 else { return }
+            episodeItem = TraktScrobbleEpisode(season: season, number: episode)
+        } else {
+            episodeItem = nil
+        }
+        let request = TraktScrobbleRequest(
+            progress: min(max(position / duration * 100, 0.01), 100),
+            movie: meta.isSeries ? nil : media,
+            show: meta.isSeries ? media : nil,
+            episode: episodeItem
+        )
+        let requestedAt = Date()
+        let service = TraktAuthService(session: session, store: store)
+        let response: TraktScrobbleResponseDTO? = try? await service.authorizedPost(
+            path: "scrobble/pause",
+            body: request
+        )
+        guard isCurrentTraktAccount(
+            store: store,
+            profileId: profileId,
+            expectedAccountID: expectedAccountID
+        ), let response, let playbackID = response.id else { return }
+
+        let expectedPauseMinute = normalizedUTCMinute(
+            response.pausedAt.flatMap(historyDate) ?? requestedAt
+        )
+        let path = meta.isSeries ? "sync/playback/episodes" : "sync/playback/movies"
+        guard let playbacks: [TraktPlaybackDTO] = try? await service.authorizedGet(path: path) else { return }
+        guard isCurrentTraktAccount(
+            store: store,
+            profileId: profileId,
+            expectedAccountID: expectedAccountID
+        ) else { return }
+        let expectedProgress = min(max(position / duration * 100, 0.01), 100)
+        let ownedRows = playbacks.filter { item in
+            guard item.id == playbackID,
+                  let pausedAt = item.pausedAt.flatMap(historyDate),
+                  normalizedUTCMinute(pausedAt) == expectedPauseMinute,
+                  let progress = item.progress,
+                  abs(progress - expectedProgress) <= 1.0 else { return false }
+            if meta.isSeries {
+                guard item.show != nil,
+                      item.episode?.season == season,
+                      item.episode?.number == episode,
+                      let show = item.show else { return false }
+                return completionMatches(show: show, expected: meta)
+            }
+            guard item.show == nil, let movie = item.movie else { return false }
+            return completionMatches(show: movie, expected: meta)
+        }
+        guard ownedRows.count == 1 else { return }
+        _ = await service.authorizedDeletePlayback(path: "sync/playback/\(playbackID)")
+        guard isCurrentTraktAccount(
+            store: store,
+            profileId: profileId,
+            expectedAccountID: expectedAccountID
+        ) else { return }
+    }
+
+    @MainActor
+    fileprivate static func withPlaybackHistoryLane(
+        accountID: String,
+        operation: @escaping @MainActor () async -> Bool
+    ) async -> Bool {
+        let key = "TRAKT:\(accountID.lowercased())"
+        if activePlaybackHistoryLanes.contains(key) {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                playbackHistoryLaneWaiters[key, default: []].append(continuation)
+            }
+        } else {
+            activePlaybackHistoryLanes.insert(key)
+        }
+
+        defer {
+            if var waiters = playbackHistoryLaneWaiters[key], !waiters.isEmpty {
+                let next = waiters.removeFirst()
+                playbackHistoryLaneWaiters[key] = waiters.isEmpty ? nil : waiters
+                next.resume()
+            } else {
+                playbackHistoryLaneWaiters.removeValue(forKey: key)
+                activePlaybackHistoryLanes.remove(key)
+            }
+        }
+        return await operation()
+    }
+
+    @MainActor
+    static func ownsPlayback(accountID: String, profileId: String?, playbackID: String) -> Bool {
+        activePlaybackOwners[playbackOwnerKey(accountID)] == PlaybackOwner(
+            profileId: profileId,
+            playbackID: playbackID
+        )
+    }
+
+    @MainActor
+    static func noteSuccessfulPlaybackStart(accountID: String, profileId: String?, playbackID: String) {
+        activePlaybackOwners[playbackOwnerKey(accountID)] = PlaybackOwner(
+            profileId: profileId,
+            playbackID: playbackID
+        )
+    }
+
+    private static func playbackOwnerKey(_ accountID: String) -> String {
+        accountID.lowercased()
+    }
+
+    private enum ExactHistoryLookup: Equatable {
+        case found
+        case absent
+        case uncertain
+    }
+
+    @MainActor
+    private static func isCurrentTraktAccount(
+        store: UserDefaults,
+        profileId: String?,
+        expectedAccountID: String
+    ) -> Bool {
+        guard WatchedStore.activeProfileId == profileId,
+              ProfileSettings.activeProfileID == profileId,
+              ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store) else { return false }
+        return completionAccountID(in: store, profileId: profileId) == expectedAccountID
+    }
+
+    @MainActor
+    private static func drainPendingPlaybackHistory(
+        store: UserDefaults,
+        profileId: String?,
+        expectedAccountID: String,
+        session: URLSession = .shared
+    ) async -> Bool {
+        guard isCurrentTraktAccount(
+            store: store,
+            profileId: profileId,
+            expectedAccountID: expectedAccountID
+        ) else { return false }
+
+        let mutations = WatchedStore.pendingProviderMutations(provider: .trakt, profileId: profileId)
+        let completions = WatchedStore.pendingPlaybackCompletions(provider: .trakt, profileId: profileId)
+        let writes = mutations
+            .filter { $0.accountID == expectedAccountID }
+            .map(PendingHistoryWrite.mutation)
+            + completions
+                .filter { $0.accountID == expectedAccountID }
+                .map(PendingHistoryWrite.completion)
+        let orderedWrites = writes.sorted { lhs, rhs in
+            if lhs.changedAt != rhs.changedAt { return lhs.changedAt < rhs.changedAt }
+            if lhs.priorityAtEqualTime != rhs.priorityAtEqualTime {
+                return lhs.priorityAtEqualTime < rhs.priorityAtEqualTime
+            }
+            return lhs.stableID < rhs.stableID
+        }
+
+        let hasDeferredAccountWork = mutations.contains { $0.accountID != expectedAccountID }
+            || completions.contains { $0.accountID != expectedAccountID }
+        let service = TraktAuthService(session: session, store: store)
+        for write in orderedWrites {
+            guard isCurrentTraktAccount(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID
+            ) else { return false }
+            switch write {
+            case .mutation(let mutation):
+                guard await uploadManualMutation(mutation, using: service) else { return false }
+                guard isCurrentTraktAccount(
+                    store: store,
+                    profileId: profileId,
+                    expectedAccountID: expectedAccountID
+                ) else { return false }
+                guard WatchedStore.acknowledgeProviderMutation(
+                    id: mutation.id,
+                    provider: .trakt,
+                    profileId: profileId
+                ) else { return false }
+
+            case .completion(let completion):
+                guard await uploadPlaybackCompletion(
+                    completion,
+                    using: service,
+                    store: store,
+                    profileId: profileId,
+                    expectedAccountID: expectedAccountID
+                ) else { return false }
+            }
+        }
+        return !hasDeferredAccountWork
+    }
+
+    private static func uploadManualMutation(
+        _ pending: WatchedStore.PendingProviderMutation,
+        using service: TraktAuthService
+    ) async -> Bool {
+        guard let request = mutation(
+            for: pending.meta,
+            season: pending.season,
+            episodes: pending.episode.map { [$0] } ?? [],
+            watchedAt: pending.isWatched ? minuteISO8601(pending.changedAt) : nil
+        ) else { return false }
+        do {
+            let result: TraktHistoryWriteResponseDTO = try await service.authorizedPost(
+                path: pending.isWatched ? "sync/history" : "sync/history/remove",
+                body: request
+            )
+            guard result.itemErrors.orEmpty.isEmpty else { return false }
+            if pending.isWatched {
+                guard result.added != nil,
+                      (result.notFound?.total ?? 0) == 0 else { return false }
+                // A zero added count with no item errors is an idempotent
+                // success for an already-watched manual marker.
+                return true
+            }
+            // A reset is satisfied if Trakt deleted the row or confirms there
+            // was no matching history item to remove.
+            return result.deleted != nil || (result.notFound?.total ?? 0) > 0
+        } catch {
+            return false
+        }
+    }
+
+    @MainActor
+    private static func uploadPlaybackCompletion(
+        _ completion: WatchedPlaybackCompletionUpload,
+        using service: TraktAuthService,
+        store: UserDefaults,
+        profileId: String?,
+        expectedAccountID: String
+    ) async -> Bool {
+        guard completion.accountID == expectedAccountID,
+              isCurrentTraktAccount(store: store, profileId: profileId, expectedAccountID: expectedAccountID) else {
+            return false
+        }
+        let preflight = await exactHistoryLookup(for: completion, using: service)
+        guard isCurrentTraktAccount(store: store, profileId: profileId, expectedAccountID: expectedAccountID) else {
+            return false
+        }
+        switch preflight {
+        case .found:
+            return WatchedStore.acknowledgePlaybackCompletion(
+                completionID: completion.completionID,
+                provider: .trakt,
+                accountID: expectedAccountID,
+                profileId: profileId
+            )
+        case .uncertain:
+            return false
+        case .absent:
+            guard let request = mutation(
+                for: completion.meta,
+                season: completion.season,
+                episodes: completion.episode.map { [$0] } ?? [],
+                watchedAt: minuteISO8601(completion.watchedAt)
+            ) else { return false }
+            // A POST can succeed on Trakt while its response is lost. Always
+            // verify the exact minute and identity before acknowledging.
+            try? await service.authorizedPostEmpty(path: "sync/history", body: request)
+            guard isCurrentTraktAccount(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID
+            ) else { return false }
+            guard await exactHistoryLookup(for: completion, using: service) == .found else {
+                return false
+            }
+            guard isCurrentTraktAccount(
+                store: store,
+                profileId: profileId,
+                expectedAccountID: expectedAccountID
+            ) else { return false }
+            return WatchedStore.acknowledgePlaybackCompletion(
+                completionID: completion.completionID,
+                provider: .trakt,
+                accountID: expectedAccountID,
+                profileId: profileId
+            )
+        }
+    }
+
+    private static func exactHistoryLookup(
+        for completion: WatchedPlaybackCompletionUpload,
+        using service: TraktAuthService
+    ) async -> ExactHistoryLookup {
+        let minuteStart = normalizedUTCMinute(completion.watchedAt)
+        let start = minuteISO8601(minuteStart)
+        let end = utcISO8601(minuteStart.addingTimeInterval(59))
+        let matches: Set<Int64>?
+        let hasUnidentifiedMatch: Bool
+
+        if completion.meta.isSeries {
+            guard let season = completion.season, let episode = completion.episode else { return .uncertain }
+            guard let rows: [TraktEpisodeHistoryDTO] = await fetchCompletionHistoryPages(
+                using: service,
+                path: { page in
+                    "users/me/history/episodes?start_at=\(start)&end_at=\(end)&page=\(page)&limit=\(TraktWatchedHistoryPagination.pageLimit)"
+                }
+            ) else { return .uncertain }
+            var ids = Set<Int64>()
+            var unidentified = false
+            for row in rows {
+                guard let show = row.show,
+                      completionMatches(show: show, expected: completion.meta),
+                      row.episode?.season == season,
+                      row.episode?.number == episode else { continue }
+                guard let watchedAt = historyDate(row.watchedAt) else {
+                    unidentified = true
+                    continue
+                }
+                guard normalizedUTCMinute(watchedAt) == minuteStart else { continue }
+                if let id = row.id { ids.insert(id) } else { unidentified = true }
+            }
+            matches = ids
+            hasUnidentifiedMatch = unidentified
+        } else {
+            guard completion.season == nil, completion.episode == nil else { return .uncertain }
+            guard let rows: [TraktMovieHistoryDTO] = await fetchCompletionHistoryPages(
+                using: service,
+                path: { page in
+                    "users/me/history/movies?start_at=\(start)&end_at=\(end)&page=\(page)&limit=\(TraktWatchedHistoryPagination.pageLimit)"
+                }
+            ) else { return .uncertain }
+            var ids = Set<Int64>()
+            var unidentified = false
+            for row in rows {
+                guard let movie = row.movie,
+                      completionMatches(show: movie, expected: completion.meta) else { continue }
+                guard let watchedAt = historyDate(row.watchedAt) else {
+                    unidentified = true
+                    continue
+                }
+                guard normalizedUTCMinute(watchedAt) == minuteStart else { continue }
+                if let id = row.id { ids.insert(id) } else { unidentified = true }
+            }
+            matches = ids
+            hasUnidentifiedMatch = unidentified
+        }
+
+        guard !hasUnidentifiedMatch, let matches else { return .uncertain }
+        if matches.isEmpty { return .absent }
+        return matches.count == 1 ? .found : .uncertain
+    }
+
+    private static func completionMatches(show: TraktProgressMediaDTO, expected: NuvioMeta) -> Bool {
+        guard let contentID = historyContentID(from: show.ids) else { return false }
+        let remote = historyMeta(from: show, contentID: contentID, type: expected.isSeries ? "series" : "movie")
+        return WatchedStore.sameContent(remote, expected)
+    }
+
+    private static func fetchCompletionHistoryPages<T: Decodable>(
+        using service: TraktAuthService,
+        path: (Int) -> String
+    ) async -> [T]? {
+        var items: [T] = []
+        var page = 1
+        while page <= TraktWatchedHistoryPagination.maxPages {
+            guard let response: HTTPResult<[T]> = try? await service.authorizedGetResult(path: path(page)),
+                  (200..<300).contains(response.statusCode),
+                  let rows = response.value else { return nil }
+            if rows.isEmpty { return items }
+            items.append(contentsOf: rows)
+            guard TraktWatchedHistoryPagination.shouldFetchNextPage(
+                page: page,
+                itemCount: rows.count,
+                pageCount: TraktWatchedHistoryPagination.pageCount(from: response.headers)
+            ) else { return items }
+            page += 1
+        }
+        return nil
+    }
+
+    private static func normalizedUTCMinute(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: floor(date.timeIntervalSince1970 / 60) * 60)
+    }
+
+    static func completionMinuteTimestamp(_ date: Date) -> String {
+        utcISO8601(normalizedUTCMinute(date))
+    }
+
+    private static func minuteISO8601(_ date: Date) -> String {
+        completionMinuteTimestamp(date)
+    }
+
+    private static func utcISO8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
+    }
 
     /// Returns a complete Trakt watched snapshot without mutating Nuvio's
     /// watched store. Used by one-way provider transfers.
@@ -2160,20 +2941,13 @@ struct TraktHistoryService {
         let service = TraktAuthService(store: store)
         guard await service.refreshTokenIfNeeded() else { return false }
 
-        // Local changes are durable until a complete pull confirms them. Retry
-        // them before fetching so a transient POST failure cannot be mistaken
-        // for an authoritative remote removal.
-        for pending in WatchedStore.pendingTraktMutations(profileId: targetProfileId) {
-            guard WatchedStore.activeProfileId == targetProfileId else { return false }
-            _ = await setWatched(
-                pending.meta,
-                season: pending.season,
-                episode: pending.episode,
-                isWatched: pending.isWatched,
-                store: store,
-                notifyChange: false
-            )
-        }
+        // Durable resets and playback completions share one account-bound lane.
+        // Unbound/old-account mutations stay queued instead of being sent to a
+        // newly linked Trakt account.
+        _ = await flushPendingPlaybackCompletions(store: store, profileId: targetProfileId)
+        guard ProfileSettings.isActiveStore(store),
+              WatchedStore.activeProfileId == targetProfileId,
+              ProfileSettings.activeProfileID == targetProfileId else { return false }
         let syncStartedAt = Date()
         let result = await fetchWatchedHistorySnapshot(using: service)
         guard result.receivedResponse else { return false }
@@ -2404,16 +3178,17 @@ struct TraktHistoryService {
         return formatter.string(from: Date())
     }
 
-    private static func watchedMovie(_ item: TraktWatchedMovieDTO) -> WatchedStoreItem? {
+    static func watchedMovie(_ item: TraktWatchedMovieDTO) -> WatchedStoreItem? {
         guard let movie = item.movie,
               let contentID = historyContentID(from: movie.ids) else { return nil }
         return WatchedStoreItem(
             meta: historyMeta(from: movie, contentID: contentID, type: "movie"),
-            watchedAt: historyDate(item.lastWatchedAt) ?? .distantPast
+            watchedAt: historyDate(item.lastWatchedAt) ?? .distantPast,
+            watchCountsBySource: [TraktWatchProgressSource.trakt.rawValue: max(1, item.plays ?? 1)]
         )
     }
 
-    private static func watchedEpisodes(_ item: TraktWatchedShowDTO) -> [WatchedStoreItem]? {
+    static func watchedEpisodes(_ item: TraktWatchedShowDTO) -> [WatchedStoreItem]? {
         guard let show = item.show,
               let contentID = historyContentID(from: show.ids),
               let seasons = item.seasons,
@@ -2432,7 +3207,10 @@ struct TraktHistoryService {
                         meta: meta,
                         watchedAt: historyDate(episode.lastWatchedAt ?? item.lastWatchedAt) ?? .distantPast,
                         season: seasonNumber,
-                        episode: episodeNumber
+                        episode: episodeNumber,
+                        watchCountsBySource: [
+                            TraktWatchProgressSource.trakt.rawValue: max(1, episode.plays ?? 1)
+                        ]
                     )
                 )
             }
@@ -2445,19 +3223,62 @@ struct TraktHistoryService {
     ) async -> [WatchedStoreItem]? {
         let pageSize = 100
         var page = 1
-        var watched: [WatchedStoreItem] = []
+        var entries: [EpisodeHistoryEntry] = []
 
         while true {
             guard let historyPage: [TraktEpisodeHistoryDTO] = try? await service.authorizedGet(
                 path: "users/me/history/episodes?page=\(page)&limit=\(pageSize)"
             ) else { return nil }
 
-            let converted = historyPage.compactMap(watchedEpisode)
+            let converted = historyPage.compactMap { item -> EpisodeHistoryEntry? in
+                guard let historyID = item.id,
+                      let watched = watchedEpisode(item) else { return nil }
+                return EpisodeHistoryEntry(historyID: historyID, item: watched)
+            }
             // A row we cannot identify makes absence unsafe as a deletion signal.
             guard converted.count == historyPage.count else { return nil }
-            watched.append(contentsOf: converted)
-            guard historyPage.count == pageSize else { return watched }
+            entries.append(contentsOf: converted)
+            guard historyPage.count == pageSize else {
+                return aggregateFallbackEpisodeHistory(entries)
+            }
             page += 1
+        }
+    }
+
+    static func aggregateFallbackEpisodeHistory(_ entries: [EpisodeHistoryEntry]) -> [WatchedStoreItem] {
+        struct Group {
+            var item: WatchedStoreItem
+            var historyIDs: Set<Int64>
+        }
+        var groups: [String: Group] = [:]
+        for entry in entries {
+            guard let season = entry.item.season, let episode = entry.item.episode else { continue }
+            let identityKeys = WatchedStore.contentIdentityKeys(for: entry.item.meta)
+            let canonicalID = identityKeys.first(where: { $0.hasPrefix("imdb:") })
+                ?? identityKeys.first(where: { $0.hasPrefix("tmdb:") })
+                ?? identityKeys.sorted().first
+                ?? entry.item.meta.id.lowercased()
+            let key = "\(WatchedStore.normalizedType(entry.item.meta.canonicalType))|\(canonicalID)|\(season)|\(episode)"
+            if var group = groups[key] {
+                group.historyIDs.insert(entry.historyID)
+                if entry.item.watchedAt > group.item.watchedAt {
+                    group.item = entry.item
+                }
+                groups[key] = group
+            } else {
+                groups[key] = Group(item: entry.item, historyIDs: [entry.historyID])
+            }
+        }
+
+        return groups.values.map { group in
+            WatchedStoreItem(
+                meta: group.item.meta,
+                watchedAt: group.item.watchedAt,
+                season: group.item.season,
+                episode: group.item.episode,
+                sources: [TraktWatchProgressSource.trakt.rawValue],
+                watchCountsBySource: [TraktWatchProgressSource.trakt.rawValue: max(1, group.historyIDs.count)]
+            )
         }
     }
 
@@ -2466,12 +3287,13 @@ struct TraktHistoryService {
               let episode = item.episode,
               let seasonNumber = episode.season,
               let episodeNumber = episode.number,
+              let watchedAt = historyDate(item.watchedAt),
               seasonNumber >= 0,
               episodeNumber > 0,
               let contentID = historyContentID(from: show.ids) else { return nil }
         return WatchedStoreItem(
             meta: historyMeta(from: show, contentID: contentID, type: "series"),
-            watchedAt: historyDate(item.watchedAt) ?? .distantPast,
+            watchedAt: watchedAt,
             season: seasonNumber,
             episode: episodeNumber
         )
@@ -2528,6 +3350,49 @@ struct TraktHistoryService {
 private struct TraktHistoryMutation: Encodable {
     let movies: [TraktHistoryMovie]?
     let shows: [TraktHistoryShow]?
+}
+
+private struct TraktHistoryWriteResponseDTO: Decodable {
+    let added: TraktHistoryCountDTO?
+    let deleted: TraktHistoryCountDTO?
+    let notFound: TraktHistoryNotFoundDTO?
+    let itemErrors: [TraktHistoryItemErrorDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case added, deleted
+        case notFound = "not_found"
+        case itemErrors = "item_errors"
+    }
+}
+
+private struct TraktHistoryCountDTO: Decodable {
+    let movies: Int?
+    let shows: Int?
+    let seasons: Int?
+    let episodes: Int?
+
+    var total: Int { (movies ?? 0) + (shows ?? 0) + (seasons ?? 0) + (episodes ?? 0) }
+}
+
+private struct TraktHistoryNotFoundDTO: Decodable {
+    let movies: [TraktHistoryNotFoundItemDTO]?
+    let shows: [TraktHistoryNotFoundItemDTO]?
+    let seasons: [TraktHistoryNotFoundItemDTO]?
+    let episodes: [TraktHistoryNotFoundItemDTO]?
+
+    var total: Int { (movies?.count ?? 0) + (shows?.count ?? 0) + (seasons?.count ?? 0) + (episodes?.count ?? 0) }
+}
+
+private struct TraktHistoryNotFoundItemDTO: Decodable {
+    let ids: TraktProgressIDsDTO?
+    let title: String?
+    let year: Int?
+    let number: Int?
+}
+
+private struct TraktHistoryItemErrorDTO: Decodable {
+    let code: String?
+    let message: String?
 }
 
 private struct TraktHistoryMovie: Encodable {
@@ -2618,6 +3483,7 @@ private struct TraktWatchedEpisodeSeed {
 }
 
 private struct TraktPlaybackDTO: Decodable {
+    let id: Int64?
     let progress: Double?
     let pausedAt: String?
     let movie: TraktProgressMediaDTO?
@@ -2625,12 +3491,22 @@ private struct TraktPlaybackDTO: Decodable {
     let episode: TraktProgressEpisodeDTO?
 
     enum CodingKeys: String, CodingKey {
-        case progress, movie, show, episode
+        case id, progress, movie, show, episode
         case pausedAt = "paused_at"
     }
 }
 
-private struct TraktProgressMediaDTO: Decodable {
+private struct TraktScrobbleResponseDTO: Decodable {
+    let id: Int64?
+    let pausedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case pausedAt = "paused_at"
+    }
+}
+
+struct TraktProgressMediaDTO: Decodable {
     let title: String?
     let year: Int?
     let ids: TraktProgressIDsDTO?
@@ -2646,13 +3522,13 @@ private struct TraktProgressEpisodeDTO: Decodable {
     let number: Int?
 }
 
-private struct TraktProgressIDsDTO: Decodable {
+struct TraktProgressIDsDTO: Decodable {
     let trakt: Int?
     let imdb: String?
     let tmdb: Int?
 }
 
-private struct TraktWatchedShowDTO: Decodable {
+struct TraktWatchedShowDTO: Decodable {
     let lastWatchedAt: String?
     let show: TraktProgressMediaDTO?
     let seasons: [TraktWatchedSeasonDTO]?
@@ -2663,33 +3539,46 @@ private struct TraktWatchedShowDTO: Decodable {
     }
 }
 
-private struct TraktWatchedMovieDTO: Decodable {
+struct TraktWatchedMovieDTO: Decodable {
     let lastWatchedAt: String?
+    let plays: Int?
     let movie: TraktProgressMediaDTO?
 
     enum CodingKeys: String, CodingKey {
-        case movie
+        case movie, plays
         case lastWatchedAt = "last_watched_at"
     }
 }
 
 private struct TraktEpisodeHistoryDTO: Decodable {
+    let id: Int64?
     let watchedAt: String?
     let show: TraktProgressMediaDTO?
     let episode: TraktProgressEpisodeDTO?
 
     enum CodingKeys: String, CodingKey {
-        case show, episode
+        case id, show, episode
         case watchedAt = "watched_at"
     }
 }
 
-private struct TraktWatchedSeasonDTO: Decodable {
+private struct TraktMovieHistoryDTO: Decodable {
+    let id: Int64?
+    let watchedAt: String?
+    let movie: TraktProgressMediaDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case id, movie
+        case watchedAt = "watched_at"
+    }
+}
+
+struct TraktWatchedSeasonDTO: Decodable {
     let number: Int?
     let episodes: [TraktWatchedEpisodeDTO]?
 }
 
-private struct TraktWatchedEpisodeDTO: Decodable {
+struct TraktWatchedEpisodeDTO: Decodable {
     let number: Int?
     let plays: Int?
     let lastWatchedAt: String?

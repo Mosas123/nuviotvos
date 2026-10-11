@@ -47,6 +47,21 @@ struct WeTrakrHTTPResult<T> {
     let value: T?
     let rawData: Data
     let errorMessage: String?
+    let headers: [String: String]
+
+    init(
+        statusCode: Int,
+        value: T?,
+        rawData: Data,
+        errorMessage: String?,
+        headers: [String: String] = [:]
+    ) {
+        self.statusCode = statusCode
+        self.value = value
+        self.rawData = rawData
+        self.errorMessage = errorMessage
+        self.headers = headers
+    }
 
     var oauthError: String? {
         guard !rawData.isEmpty,
@@ -110,6 +125,7 @@ final class WeTrakrAPIClient {
         self.decoder = dec
         let enc = JSONEncoder()
         enc.keyEncodingStrategy = .useDefaultKeys
+        enc.outputFormatting = [.sortedKeys]
         self.encoder = enc
     }
 
@@ -152,7 +168,8 @@ final class WeTrakrAPIClient {
         body: B,
         accessToken: String? = nil,
         clientID: String? = nil,
-        queryItems: [URLQueryItem] = []
+        queryItems: [URLQueryItem] = [],
+        idempotencyKey: String? = nil
     ) async throws -> WeTrakrHTTPResult<T> {
         let bodyData = try encoder.encode(body)
         let request = try makeRequest(
@@ -161,7 +178,8 @@ final class WeTrakrAPIClient {
             accessToken: accessToken,
             clientID: clientID,
             queryItems: queryItems,
-            body: bodyData
+            body: bodyData,
+            idempotencyKey: idempotencyKey
         )
         return try await perform(request)
     }
@@ -188,7 +206,8 @@ final class WeTrakrAPIClient {
         body: B,
         accessToken: String? = nil,
         clientID: String? = nil,
-        queryItems: [URLQueryItem] = []
+        queryItems: [URLQueryItem] = [],
+        idempotencyKey: String? = nil
     ) async throws -> WeTrakrHTTPResult<Data> {
         let bodyData = try encoder.encode(body)
         let request = try makeRequest(
@@ -197,7 +216,8 @@ final class WeTrakrAPIClient {
             accessToken: accessToken,
             clientID: clientID,
             queryItems: queryItems,
-            body: bodyData
+            body: bodyData,
+            idempotencyKey: idempotencyKey
         )
         return try await performRaw(request)
     }
@@ -207,7 +227,8 @@ final class WeTrakrAPIClient {
         body: (any Encodable)? = nil,
         accessToken: String? = nil,
         clientID: String? = nil,
-        queryItems: [URLQueryItem] = []
+        queryItems: [URLQueryItem] = [],
+        idempotencyKey: String? = nil
     ) async throws -> WeTrakrHTTPResult<T> {
         let bodyData = try body.map { try encoder.encode($0) }
         let request = try makeRequest(
@@ -216,7 +237,8 @@ final class WeTrakrAPIClient {
             accessToken: accessToken,
             clientID: clientID,
             queryItems: queryItems,
-            body: bodyData
+            body: bodyData,
+            idempotencyKey: idempotencyKey
         )
         return try await perform(request)
     }
@@ -226,7 +248,8 @@ final class WeTrakrAPIClient {
         body: (any Encodable)? = nil,
         accessToken: String? = nil,
         clientID: String? = nil,
-        queryItems: [URLQueryItem] = []
+        queryItems: [URLQueryItem] = [],
+        idempotencyKey: String? = nil
     ) async throws -> WeTrakrHTTPResult<Data> {
         let bodyData = try body.map { try encoder.encode($0) }
         let request = try makeRequest(
@@ -235,7 +258,8 @@ final class WeTrakrAPIClient {
             accessToken: accessToken,
             clientID: clientID,
             queryItems: queryItems,
-            body: bodyData
+            body: bodyData,
+            idempotencyKey: idempotencyKey
         )
         return try await performRaw(request)
     }
@@ -246,7 +270,8 @@ final class WeTrakrAPIClient {
         accessToken: String?,
         clientID: String?,
         queryItems: [URLQueryItem],
-        body: Data?
+        body: Data?,
+        idempotencyKey: String? = nil
     ) throws -> URLRequest {
         let normalizedBase = WeTrakrConfig.apiBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let normalizedPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -282,6 +307,11 @@ final class WeTrakrAPIClient {
             request.setValue(clientID, forHTTPHeaderField: "wetrakr-api-key")
         }
 
+        if let idempotencyKey = idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !idempotencyKey.isEmpty {
+            request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
+        }
+
         request.httpBody = body
         return request
     }
@@ -314,7 +344,8 @@ final class WeTrakrAPIClient {
             statusCode: statusCode,
             value: decoded,
             rawData: data,
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            headers: Self.headers(from: response)
         )
     }
 
@@ -333,7 +364,16 @@ final class WeTrakrAPIClient {
             statusCode: statusCode,
             value: (200..<300).contains(statusCode) ? data : nil,
             rawData: data,
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            headers: Self.headers(from: response)
         )
+    }
+
+    private static func headers(from response: URLResponse) -> [String: String] {
+        guard let response = response as? HTTPURLResponse else { return [:] }
+        return response.allHeaderFields.reduce(into: [:]) { headers, field in
+            guard let key = field.key as? String else { return }
+            headers[key.lowercased()] = String(describing: field.value)
+        }
     }
 }

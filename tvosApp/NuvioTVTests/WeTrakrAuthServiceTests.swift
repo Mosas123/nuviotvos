@@ -1,26 +1,202 @@
 import XCTest
 @testable import NuvioTV
 
+private final class WeTrakrFixtureURLProtocol: URLProtocol {
+    typealias Response = (status: Int, headers: [String: String], body: Data)
+
+    private final class State: @unchecked Sendable {
+        let lock = NSLock()
+        var handler: ((URLRequest) -> Response)?
+        var requests: [URLRequest] = []
+    }
+
+    private static let state = State()
+
+    static func install(_ handler: @escaping (URLRequest) -> Response) {
+        state.lock.lock()
+        state.handler = handler
+        state.requests = []
+        state.lock.unlock()
+    }
+
+    static func capturedRequests() -> [URLRequest] {
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        return state.requests
+    }
+
+    static func reset() {
+        state.lock.lock()
+        state.handler = nil
+        state.requests = []
+        state.lock.unlock()
+    }
+
+    private static func normalizedRequest(_ request: URLRequest) -> URLRequest {
+        var normalized = request
+        guard normalized.httpBody == nil, let stream = request.httpBodyStream else { return normalized }
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let readCount = buffer.withUnsafeMutableBufferPointer { bufferPointer in
+                stream.read(bufferPointer.baseAddress!, maxLength: bufferPointer.count)
+            }
+            guard readCount > 0 else { break }
+            data.append(buffer, count: readCount)
+        }
+        normalized.httpBodyStream = nil
+        normalized.httpBody = data
+        return normalized
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let normalizedRequest = Self.normalizedRequest(request)
+        Self.state.lock.lock()
+        let handler = Self.state.handler
+        Self.state.requests.append(normalizedRequest)
+        Self.state.lock.unlock()
+
+        guard let handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        let fixture = handler(normalizedRequest)
+        guard let url = request.url,
+              let response = HTTPURLResponse(
+                url: url,
+                statusCode: fixture.status,
+                httpVersion: "HTTP/1.1",
+                headerFields: fixture.headers
+              ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: fixture.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 @MainActor
 final class WeTrakrAuthServiceTests: XCTestCase {
     private var suiteName: String!
     private var store: UserDefaults!
     private var memoryStorage: WeTrakrMemoryTokenStorage!
+    private var originalProfileID: String?
+    private var isolatedProfileID: String?
+    private var originalWatchSource: TraktWatchProgressSource!
+    private var originalProgressClient: WeTrakrAPIClient!
+    private var originalProgressTokenStorage: WeTrakrTokenStorage!
+    private var fixtureSession: URLSession?
 
     override func setUp() {
         super.setUp()
         suiteName = "WeTrakrAuthServiceTests.\(UUID().uuidString)"
         store = UserDefaults(suiteName: suiteName)!
         memoryStorage = WeTrakrMemoryTokenStorage()
+        originalProfileID = ProfileSettings.activeProfileID
+        originalWatchSource = TraktSettingsStore.watchProgressSource
+        originalProgressClient = WeTrakrProgressService.client
+        originalProgressTokenStorage = WeTrakrProgressService.tokenStorage
+        WeTrakrFixtureURLProtocol.reset()
     }
 
     override func tearDown() {
+        fixtureSession?.invalidateAndCancel()
+        fixtureSession = nil
+        WeTrakrFixtureURLProtocol.reset()
+        if let isolatedProfileID {
+            WatchedStore.setActiveProfile(nil)
+            let profileStore = ProfileSettings.store(for: isolatedProfileID)
+            for key in profileStore.dictionaryRepresentation().keys {
+                profileStore.removeObject(forKey: key)
+            }
+        }
+        if let originalProfileID {
+            ProfileSettings.setActiveProfile(originalProfileID)
+            WatchedStore.setActiveProfile(originalProfileID)
+        } else {
+            ProfileSettings.clearActiveProfile()
+            WatchedStore.setActiveProfile(nil)
+        }
+        TraktSettingsStore.watchProgressSource = originalWatchSource
+        WeTrakrProgressService.client = originalProgressClient
+        WeTrakrProgressService.tokenStorage = originalProgressTokenStorage
         if let suiteName {
             UserDefaults.standard.removePersistentDomain(forName: suiteName)
         }
         store = nil
         memoryStorage = nil
+        isolatedProfileID = nil
         super.tearDown()
+    }
+
+    private func prepareWeTrakrProfile(accountID: String? = "account-1") -> String {
+        let profileID = "wetrakr-test-\(UUID().uuidString)"
+        isolatedProfileID = profileID
+        ProfileSettings.setActiveProfile(profileID, isPrimary: false)
+        WatchedStore.setActiveProfile(profileID)
+        store = ProfileSettings.current
+        store.set("test-client", forKey: SettingsKey.wetrakrClientID)
+        WeTrakrProgressService.tokenStorage = memoryStorage
+        WeTrakrAuthStore.saveToken(
+            "test-access-token",
+            clientID: "test-client",
+            profileScope: profileID,
+            store: store,
+            tokenStorage: memoryStorage
+        )
+        WeTrakrAuthStore.saveUser(
+            username: "test-user",
+            displayName: "Test User",
+            accountID: accountID,
+            accountPlan: "vip",
+            avatarURL: nil,
+            store: store
+        )
+        TraktSettingsStore.watchProgressSource = .wetrakr
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WeTrakrFixtureURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        fixtureSession = session
+        WeTrakrProgressService.client = WeTrakrAPIClient(session: session)
+        return profileID
+    }
+
+    private func fixtureResponse(
+        _ object: Any,
+        status: Int = 200,
+        headers: [String: String] = [:]
+    ) -> WeTrakrFixtureURLProtocol.Response {
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed])) ?? Data()
+        return (status: status, headers: headers, body: data)
+    }
+
+    private func requestJSON(_ request: URLRequest) -> [String: Any]? {
+        guard let body = request.httpBody else { return nil }
+        return (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+    }
+
+    private func historyPageHeaders(page: Int, pageCount: Int, limit: Int = 100) -> [String: String] {
+        [
+            "X-Pagination-Page": String(page),
+            "X-Pagination-Page-Count": String(pageCount),
+            "X-Pagination-Limit": String(limit)
+        ]
+    }
+
+    private func completionMeta() -> NuvioMeta {
+        NuvioMeta(id: "tt13624718", name: "Arrival", type: "movie", year: 2016)
     }
 
     func testConfigAndCredentials() {
@@ -594,6 +770,530 @@ final class WeTrakrAuthServiceTests: XCTestCase {
         XCTAssertEqual(seasons?.first?["status"] as? String, "playing")
         let episodes = seasons?.first?["episodes"] as? [[String: Any]]
         XCTAssertEqual(episodes?.first?["status"] as? String, "playing")
+    }
+
+    func testFinalizerCancelsOwnedSessionThenAddsDatedHistoryWithoutScrobbleStop() async throws {
+        let profileID = prepareWeTrakrProfile()
+        let completionID = UUID().uuidString
+        let meta = completionMeta()
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: completionID,
+            source: .wetrakr,
+            completionAccounts: [TraktWatchProgressSource.wetrakr.rawValue: "account-1"]
+        ))
+
+        WeTrakrFixtureURLProtocol.install { request in
+            let path = request.url?.path ?? ""
+            if path == "/sync/tracking", request.httpMethod == "POST" {
+                let requestBody = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                let movie = (requestBody["movies"] as? [[String: Any]])?.first ?? [:]
+                let trackedAt = movie["tracked_at"] as? String ?? "2026-10-11T12:00:00.000Z"
+                let response: [String: Any] = [
+                    "added": ["plays": [[
+                        "type": "movie",
+                        "play_id": "wetrakr-play-1",
+                        "watched_at": trackedAt
+                    ]]]
+                ]
+                return (
+                    status: 200,
+                    headers: [:],
+                    body: (try? JSONSerialization.data(withJSONObject: response)) ?? Data()
+                )
+            }
+            return (status: 200, headers: [:], body: Data("{}".utf8))
+        }
+
+        let started = await WeTrakrProgressService.reportPlayback(
+            meta: meta,
+            position: 10,
+            duration: 100,
+            season: nil,
+            episode: nil,
+            action: .start,
+            expectedAccountID: "account-1",
+            playbackID: completionID,
+            profileId: profileID,
+            store: store
+        )
+        XCTAssertTrue(started)
+
+        let finished = await WeTrakrProgressService.finishPlaybackForHistory(
+            meta: meta,
+            position: 100,
+            duration: 100,
+            season: nil,
+            episode: nil,
+            store: store,
+            profileId: profileID,
+            completionID: completionID,
+            accountID: "account-1"
+        )
+        XCTAssertTrue(finished)
+
+        let requests = WeTrakrFixtureURLProtocol.capturedRequests()
+        XCTAssertEqual(requests.map { $0.url?.path }, ["/scrobble/start", "/scrobble/playing", "/sync/tracking"])
+        XCTAssertEqual(requests[0].httpMethod, "POST")
+        XCTAssertEqual(requests[1].httpMethod, "DELETE")
+        XCTAssertFalse(requests.contains { $0.url?.path == "/scrobble/stop" })
+        XCTAssertNotEqual(requests[1].value(forHTTPHeaderField: "Idempotency-Key"), completionID)
+
+        let addRequest = requests[2]
+        XCTAssertEqual(addRequest.value(forHTTPHeaderField: "Idempotency-Key"), completionID)
+        let addBody = requestJSON(addRequest)
+        XCTAssertEqual(addBody?["allow_rewatch"] as? Bool, true)
+        let movie = (addBody?["movies"] as? [[String: Any]])?.first
+        XCTAssertNotNil(movie?["tracked_at"] as? String)
+        XCTAssertNil(movie?["watched_at"])
+        XCTAssertTrue(WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileID).isEmpty)
+    }
+
+    func testNormalSyncCancelsMatchingLiveOwnerBeforeUploadingHistory() async throws {
+        let profileID = prepareWeTrakrProfile()
+        let completionID = UUID().uuidString
+        let meta = completionMeta()
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: completionID,
+            source: .wetrakr,
+            completionAccounts: [TraktWatchProgressSource.wetrakr.rawValue: "account-1"]
+        ))
+
+        WeTrakrFixtureURLProtocol.install { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/sync/tracking" {
+                let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                let movie = (body["movies"] as? [[String: Any]])?.first ?? [:]
+                let trackedAt = movie["tracked_at"] as? String ?? "2026-10-11T12:00:00.000Z"
+                let response: [String: Any] = [
+                    "added": ["plays": [["type": "movie", "play_id": "live-play", "watched_at": trackedAt]]]
+                ]
+                return (status: 200, headers: [:], body: (try? JSONSerialization.data(withJSONObject: response)) ?? Data())
+            }
+            if request.httpMethod == "GET", path == "/sync/tracking/watched/history/movies" {
+                let history: [[String: Any]] = [[
+                    "id": "live-play",
+                    "watched_at": "2026-10-11T12:00:00.000Z",
+                    "movie": ["id": 13624718, "title": "Arrival", "year": 2016, "ids": ["imdb": "tt13624718"]]
+                ]]
+                return (
+                    status: 200,
+                    headers: ["X-Pagination-Page": "1", "X-Pagination-Page-Count": "1", "X-Pagination-Limit": "100"],
+                    body: (try? JSONSerialization.data(withJSONObject: history)) ?? Data()
+                )
+            }
+            if request.httpMethod == "GET" {
+                return (
+                    status: 200,
+                    headers: ["X-Pagination-Page": "1", "X-Pagination-Page-Count": "1", "X-Pagination-Limit": "100"],
+                    body: Data("[]".utf8)
+                )
+            }
+            return (status: 200, headers: [:], body: Data("{}".utf8))
+        }
+
+        let started = await WeTrakrProgressService.reportPlayback(
+            meta: meta,
+            position: 10,
+            duration: 100,
+            season: nil,
+            episode: nil,
+            action: .start,
+            expectedAccountID: "account-1",
+            playbackID: completionID,
+            profileId: profileID,
+            store: store
+        )
+        XCTAssertTrue(started)
+
+        let synced = await WeTrakrProgressService.syncWatchedHistory(store: store)
+        XCTAssertTrue(synced)
+        let requests = WeTrakrFixtureURLProtocol.capturedRequests()
+        XCTAssertEqual(requests.prefix(3).map { $0.url?.path }, ["/scrobble/start", "/scrobble/playing", "/sync/tracking"])
+        XCTAssertFalse(requests.contains { $0.url?.path == "/scrobble/stop" })
+        XCTAssertEqual(requests[1].httpMethod, "DELETE")
+        XCTAssertTrue(WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileID).isEmpty)
+    }
+
+    func testCompletionRetryUsesStableTrackedAtAndTerminalDuplicateRefreshesCount() async throws {
+        let profileID = prepareWeTrakrProfile()
+        let meta = completionMeta()
+        let oldItem = WatchedStoreItem(
+            meta: meta,
+            watchedAt: Date().addingTimeInterval(-120),
+            sources: [TraktWatchProgressSource.wetrakr.rawValue],
+            watchCountsBySource: [TraktWatchProgressSource.wetrakr.rawValue: 1]
+        )
+        XCTAssertTrue(WatchedStore.mergeRemote(
+            [oldItem],
+            confirmsTombstoneDeletions: false,
+            profileId: profileID
+        ))
+
+        let completionID = UUID().uuidString
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: completionID,
+            source: .wetrakr,
+            completionAccounts: [TraktWatchProgressSource.wetrakr.rawValue: "account-1"]
+        ))
+        let optimisticCount = WatchedStore.items(profileId: profileID)
+            .first(where: { WatchedStore.sameContent($0.meta, meta) })?
+            .watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue]
+        XCTAssertEqual(optimisticCount, 2)
+
+        var addCount = 0
+        var retryTrackedAt = ""
+        WeTrakrFixtureURLProtocol.install { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/sync/tracking" {
+                addCount += 1
+                if addCount == 1 {
+                    return (status: 503, headers: [:], body: Data("{\"error\":\"temporarily unavailable\"}".utf8))
+                }
+                let requestBody = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+                let movie = (requestBody["movies"] as? [[String: Any]])?.first ?? [:]
+                retryTrackedAt = movie["tracked_at"] as? String ?? ""
+                let response: [String: Any] = [
+                    "errored": ["movies": [[
+                        "ids": ["imdb": "tt13624718"],
+                        "tracked_at": retryTrackedAt,
+                        "error": "Already added! A play within the hour counts as the same watch"
+                    ]]]
+                ]
+                return (
+                    status: 200,
+                    headers: [:],
+                    body: (try? JSONSerialization.data(withJSONObject: response)) ?? Data()
+                )
+            }
+
+            if request.httpMethod == "GET", path == "/sync/tracking/watched/history/movies" {
+                let history: [[String: Any]] = [[
+                    "id": "existing-play",
+                    "watched_at": retryTrackedAt,
+                    "movie": [
+                        "id": 13624718,
+                        "title": "Arrival",
+                        "year": 2016,
+                        "ids": ["imdb": "tt13624718"]
+                    ]
+                ]]
+                return (
+                    status: 200,
+                    headers: self.historyPageHeaders(page: 1, pageCount: 1),
+                    body: (try? JSONSerialization.data(withJSONObject: history)) ?? Data()
+                )
+            }
+            if request.httpMethod == "GET" {
+                return (
+                    status: 200,
+                    headers: self.historyPageHeaders(page: 1, pageCount: 1),
+                    body: Data("[]".utf8)
+                )
+            }
+            return (status: 500, headers: [:], body: Data())
+        }
+
+        let firstFlush = await WeTrakrProgressService.flushPendingPlaybackCompletions(
+            store: store,
+            profileId: profileID
+        )
+        XCTAssertFalse(firstFlush)
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileID).count, 1)
+
+        // A normal provider sync retries the durable event before reading the snapshot.
+        let syncSucceeded = await WeTrakrProgressService.syncWatchedHistory(store: store)
+        XCTAssertTrue(syncSucceeded)
+        XCTAssertEqual(WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileID).count, 0)
+
+        let addRequests = WeTrakrFixtureURLProtocol.capturedRequests().filter {
+            $0.httpMethod == "POST" && $0.url?.path == "/sync/tracking"
+        }
+        XCTAssertEqual(addRequests.count, 2)
+        XCTAssertEqual(addRequests[0].httpBody, addRequests[1].httpBody)
+        XCTAssertEqual(addRequests[0].value(forHTTPHeaderField: "Idempotency-Key"), completionID)
+        XCTAssertEqual(addRequests[1].value(forHTTPHeaderField: "Idempotency-Key"), completionID)
+        XCTAssertFalse(retryTrackedAt.isEmpty)
+        let body = requestJSON(addRequests[1])
+        XCTAssertEqual(body?["allow_rewatch"] as? Bool, true)
+        let movie = (body?["movies"] as? [[String: Any]])?.first
+        XCTAssertEqual(movie?["tracked_at"] as? String, retryTrackedAt)
+        XCTAssertNil(movie?["watched_at"])
+
+        let correctedCount = WatchedStore.items(profileId: profileID)
+            .first(where: { WatchedStore.sameContent($0.meta, meta) })?
+            .watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue]
+        XCTAssertEqual(correctedCount, 1)
+    }
+
+    func testHistoryPaginationCountsUniquePlayIDsAndSkipsPartialReconcile() async throws {
+        let profileID = prepareWeTrakrProfile()
+        var partialMode = false
+        let watchedAt = "2026-10-01T00:00:00.000Z"
+        let makeMoviePlay: (Int) -> [String: Any] = { index in
+            [
+                "id": "movie-play-\(index)",
+                "watched_at": watchedAt,
+                "movie": [
+                    "id": 10_000 + index,
+                    "title": "Catalog Movie \(index)",
+                    "year": 2020,
+                    "ids": ["tmdb": 10_000 + index]
+                ]
+            ]
+        }
+        let makeEpisodePlay: (Int) -> [String: Any] = { index in
+            [
+                "id": "episode-play-\(index)",
+                "watched_at": watchedAt,
+                "episode": [
+                    "id": 20_000 + index,
+                    "season_number": 1,
+                    "number": 1,
+                    "show": [
+                        "id": 7_777,
+                        "title": "Long Series",
+                        "year": 2021,
+                        "ids": ["imdb": "tt07654321", "tmdb": 7_777]
+                    ]
+                ]
+            ]
+        }
+
+        WeTrakrFixtureURLProtocol.install { request in
+            let path = request.url?.path ?? ""
+            let components = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+            let page = Int(components?.queryItems?.first(where: { $0.name == "page" })?.value ?? "1") ?? 1
+            let pageHeaders: (Int, Int, Int) -> [String: String] = { current, count, limit in
+                [
+                    "X-Pagination-Page": String(current),
+                    "X-Pagination-Page-Count": String(count),
+                    "X-Pagination-Limit": String(limit)
+                ]
+            }
+
+            if path == "/sync/tracking/watched/history/movies" {
+                if partialMode, page == 2 {
+                    return (status: 500, headers: [:], body: Data("{\"error\":\"later page failed\"}".utf8))
+                }
+                if partialMode {
+                    let rows = (0..<100).map(makeMoviePlay)
+                    return (
+                        status: 200,
+                        headers: pageHeaders(1, 2, 100),
+                        body: (try? JSONSerialization.data(withJSONObject: rows)) ?? Data()
+                    )
+                }
+                let pageCount = 6
+                let start = (page - 1) * 100
+                let end = min(start + 100, 501)
+                let rows = (start..<end).map(makeMoviePlay)
+                return (
+                    status: 200,
+                    headers: pageHeaders(page, pageCount, 100),
+                    body: (try? JSONSerialization.data(withJSONObject: rows)) ?? Data()
+                )
+            }
+
+            if path == "/sync/tracking/watched/movies" {
+                return (
+                    status: 200,
+                    headers: pageHeaders(page, 1, 100),
+                    body: Data("[]".utf8)
+                )
+            }
+
+            if path == "/sync/tracking/watched/history/episodes" {
+                if partialMode {
+                    return (
+                        status: 200,
+                        headers: pageHeaders(1, 1, 100),
+                        body: Data("[]".utf8)
+                    )
+                }
+                let indices: [Int]
+                switch page {
+                case 1:
+                    indices = Array(0..<100)
+                case 2:
+                    indices = [99] + Array(100..<199)
+                case 3...10:
+                    let start = 199 + (page - 3) * 100
+                    indices = Array(start..<(start + 100))
+                case 11:
+                    indices = [999, 1000]
+                default:
+                    indices = []
+                }
+                let rows = indices.map(makeEpisodePlay)
+                return (
+                    status: 200,
+                    headers: pageHeaders(page, 11, 100),
+                    body: (try? JSONSerialization.data(withJSONObject: rows)) ?? Data()
+                )
+            }
+            return (status: 500, headers: [:], body: Data())
+        }
+
+        let firstSync = await WeTrakrProgressService.syncWatchedHistory(store: store)
+        XCTAssertTrue(firstSync)
+        let fullSnapshot = WatchedStore.items(profileId: profileID)
+        let lastMovie = fullSnapshot.first(where: { $0.meta.tmdbId == 10_500 })
+        XCTAssertEqual(lastMovie?.watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue], 1)
+        let episode = fullSnapshot.first(where: {
+            $0.meta.imdbId == "tt07654321" && $0.season == 1 && $0.episode == 1
+        })
+        XCTAssertEqual(episode?.watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue], 1_001)
+
+        partialMode = true
+        let partialSync = await WeTrakrProgressService.syncWatchedHistory(store: store)
+        XCTAssertFalse(partialSync)
+        let retained = WatchedStore.items(profileId: profileID)
+        XCTAssertEqual(
+            retained.first(where: { $0.meta.tmdbId == 10_500 })?
+                .watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue],
+            1
+        )
+        XCTAssertEqual(
+            retained.first(where: { $0.meta.imdbId == "tt07654321" && $0.season == 1 && $0.episode == 1 })?
+                .watchCountsBySource[TraktWatchProgressSource.wetrakr.rawValue],
+            1_001
+        )
+    }
+
+    func testPartialPlaybackReportsPauseWithoutHistoryCompletion() async throws {
+        let profileID = prepareWeTrakrProfile()
+        let playbackID = UUID().uuidString
+        WeTrakrFixtureURLProtocol.install { _ in
+            (status: 200, headers: [:], body: Data("{}".utf8))
+        }
+
+        let paused = await WeTrakrProgressService.reportPlayback(
+            meta: completionMeta(),
+            position: 40,
+            duration: 100,
+            season: nil,
+            episode: nil,
+            action: .pause,
+            expectedAccountID: "account-1",
+            playbackID: playbackID,
+            profileId: profileID,
+            store: store
+        )
+        XCTAssertTrue(paused)
+        let requests = WeTrakrFixtureURLProtocol.capturedRequests()
+        XCTAssertEqual(requests.map { $0.url?.path }, ["/scrobble/pause"])
+        XCTAssertFalse(requests.contains { $0.url?.path == "/scrobble/stop" })
+        XCTAssertFalse(requests.contains { $0.url?.path == "/sync/tracking" })
+    }
+
+    func testAccountSwitchDuringCompletionRequestLeavesOriginalEventQueued() async throws {
+        let profileID = prepareWeTrakrProfile()
+        let meta = completionMeta()
+        let completionID = UUID().uuidString
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: completionID,
+            source: .wetrakr,
+            completionAccounts: [TraktWatchProgressSource.wetrakr.rawValue: "account-1"]
+        ))
+
+        WeTrakrFixtureURLProtocol.install { request in
+            let requestBody = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            let movie = (requestBody["movies"] as? [[String: Any]])?.first ?? [:]
+            let trackedAt = movie["tracked_at"] as? String ?? "2026-10-11T12:00:00.000Z"
+            WeTrakrAuthStore.saveUser(
+                username: "new-user",
+                displayName: "New User",
+                accountID: "account-2",
+                accountPlan: "vip",
+                avatarURL: nil,
+                store: self.store
+            )
+            let response: [String: Any] = [
+                "added": ["plays": [["type": "movie", "play_id": "server-play", "watched_at": trackedAt]]]
+            ]
+            return (
+                status: 200,
+                headers: [:],
+                body: (try? JSONSerialization.data(withJSONObject: response)) ?? Data()
+            )
+        }
+
+        let flushed = await WeTrakrProgressService.flushPendingPlaybackCompletions(
+            store: store,
+            profileId: profileID
+        )
+        XCTAssertFalse(flushed)
+        XCTAssertEqual(
+            WeTrakrProgressService.completionAccountID(
+                in: store,
+                profileId: profileID,
+                tokenStorage: memoryStorage
+            ),
+            "account-2"
+        )
+        let pending = WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileID)
+        XCTAssertEqual(pending.map(\.completionID), [completionID])
+        XCTAssertEqual(pending.first?.accountID, "account-1")
+        XCTAssertEqual(WeTrakrFixtureURLProtocol.capturedRequests().count, 1)
+    }
+
+    func testUnboundResetDoesNotBlockVerifiedCompletionUpload() async throws {
+        let profileID = prepareWeTrakrProfile(accountID: nil)
+        let show = NuvioMeta(id: "tt0903747", name: "Breaking Bad", type: "series", year: 2008)
+        XCTAssertTrue(WatchedStore.setSeasonWatched(meta: show, season: 1, episodes: [1], isWatched: true))
+        let unboundResets = WatchedStore.pendingProviderMutations(provider: .wetrakr, profileId: profileID)
+        XCTAssertEqual(unboundResets.count, 1)
+        XCTAssertNil(unboundResets.first?.accountID)
+
+        WeTrakrAuthStore.saveUser(
+            username: "test-user",
+            displayName: "Test User",
+            accountID: "account-1",
+            accountPlan: "vip",
+            avatarURL: nil,
+            store: store
+        )
+        let completionID = UUID().uuidString
+        let meta = completionMeta()
+        XCTAssertTrue(WatchedStore.recordPlaybackCompletion(
+            meta,
+            completionID: completionID,
+            source: .wetrakr,
+            completionAccounts: [TraktWatchProgressSource.wetrakr.rawValue: "account-1"]
+        ))
+
+        WeTrakrFixtureURLProtocol.install { request in
+            let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            let movie = (body["movies"] as? [[String: Any]])?.first ?? [:]
+            let trackedAt = movie["tracked_at"] as? String ?? "2026-10-11T12:00:00.000Z"
+            let response: [String: Any] = [
+                "added": ["plays": [["type": "movie", "play_id": "server-play", "watched_at": trackedAt]]]
+            ]
+            return (
+                status: 200,
+                headers: [:],
+                body: (try? JSONSerialization.data(withJSONObject: response)) ?? Data()
+            )
+        }
+
+        let flushed = await WeTrakrProgressService.flushPendingPlaybackCompletions(
+            store: store,
+            profileId: profileID
+        )
+        XCTAssertTrue(flushed)
+        let requests = WeTrakrFixtureURLProtocol.capturedRequests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.url?.path, "/sync/tracking")
+        let uploaded = requestJSON(requests[0])
+        XCTAssertEqual(uploaded?["allow_rewatch"] as? Bool, true)
+        XCTAssertNotNil((uploaded?["movies"] as? [[String: Any]])?.first)
+        XCTAssertNil(uploaded?["shows"])
+        XCTAssertEqual(WatchedStore.pendingProviderMutations(provider: .wetrakr, profileId: profileID).count, 1)
+        XCTAssertTrue(WatchedStore.pendingPlaybackCompletions(provider: .wetrakr, profileId: profileID).isEmpty)
     }
 }
 
