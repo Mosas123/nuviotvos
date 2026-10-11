@@ -337,6 +337,7 @@ struct ContentView: View {
     private static let profileGateMinimumDuration: TimeInterval = 1.2
     /// Watchdog for maximum profile loading time (capped at 3.0 seconds).
     private static let profileGateTimeout: TimeInterval = 3.0
+    @State private var isInitialHomeFocusPending = false
     @State private var selectedTab: TVTab = .home
     /// Series context for the current playback, captured at play time so the
     /// player can offer/auto-play the next episode. Empty for movies/trailers.
@@ -375,6 +376,8 @@ struct ContentView: View {
     /// this"). Empty means the current Details is the root of its chain and back
     /// belongs to its recorded return destination.
     @State private var detailsBackStack: [(id: String, type: String)] = []
+    @State private var nextDetailsPlaybackRequestID: UInt = 0
+    @State private var pendingDetailsPlaybackRequestID: UInt?
     /// Where the root Details screen should return. This is normally Home, but
     /// a title opened from a collection must return to that collection.
     @State private var detailsReturnDestination: DetailsReturnDestination = .main
@@ -513,13 +516,13 @@ struct ContentView: View {
         }
         // Backing out of the switch must not leave the cover behind.
         .onChange(of: isOnProfileSelection) { _, isSelecting in
-            if isSelecting, isPreparingProfile {
-                liftProfileGate()
+            if isSelecting, isPreparingProfile || isInitialHomeFocusPending {
+                cancelProfileGate()
             }
         }
         .onChange(of: selectedTab) { _, tab in
-            if isPreparingProfile, tab != .home {
-                liftProfileGate(generation: profileGateGeneration)
+            if tab != .home, isPreparingProfile || isInitialHomeFocusPending {
+                cancelProfileGate(generation: profileGateGeneration)
             }
         }
         .onChange(of: activeScreen) { oldScreen, newScreen in
@@ -798,6 +801,7 @@ struct ContentView: View {
     /// Backs out of Details to the title it was opened from (a "More like this"
     /// chain), or to the screen that opened the root Details.
     private func leaveDetails() {
+        pendingDetailsPlaybackRequestID = nil
         TVHomeDebugTrace.log(
             "details.leave backStackRemaining=\(detailsBackStack.count) returnDest=\(detailsReturnDestination)"
         )
@@ -822,13 +826,22 @@ struct ContentView: View {
     private func openDetailsRoot(
         id: String,
         type: String,
-        returnDestination: DetailsReturnDestination = .main
+        returnDestination: DetailsReturnDestination = .main,
+        startPlayback: Bool = false
     ) {
         TVHomeDebugTrace.log(
             "details.open.root id=\(id) type=\(type) returnDest=\(returnDestination)"
         )
         detailsBackStack.removeAll()
         detailsReturnDestination = returnDestination
+        if startPlayback {
+            nextDetailsPlaybackRequestID &+= 1
+            pendingDetailsPlaybackRequestID = nextDetailsPlaybackRequestID
+            reopenStreamPickerOnDetails = false
+            reopenStreamPickerEpisode = nil
+        } else {
+            pendingDetailsPlaybackRequestID = nil
+        }
         activeScreen = .details(id: id, type: type)
     }
 
@@ -1049,6 +1062,7 @@ struct ContentView: View {
         profileGateGeneration &+= 1
         profileGateReadinessIdentity = nil
         profileGateReadiness = .waiting(hasFocusableContent: false, targetSignature: nil)
+        isInitialHomeFocusPending = true
         isPreparingProfile = true
         profileGateStartedAt = Date()
         let generation = profileGateGeneration
@@ -1062,7 +1076,7 @@ struct ContentView: View {
                 return
             }
             TVHomeDebugTrace.log("⚠️ profileGate.watchdog FIRED after \(Self.profileGateTimeout)s timeout! Force lifting gate for gen=\(generation)")
-            liftProfileGate(generation: generation)
+            timeoutProfileGate(generation: generation)
         }
     }
 
@@ -1072,13 +1086,16 @@ struct ContentView: View {
         _ readiness: TVProfileGateReadiness
     ) {
         TVHomeDebugTrace.log("profileGate.readinessChanged identity=\(identity.profileId):\(identity.catalogRevision) gen=\(generation) curGen=\(profileGateGeneration) readiness=\(readiness)")
-        guard isPreparingProfile,
+        guard isInitialHomeFocusPending,
               generation == profileGateGeneration,
               identity == currentHomeContentIdentity else { return }
         profileGateReadinessIdentity = identity
         profileGateReadiness = readiness
         switch readiness {
-        case .ready, .empty, .overlay:
+        case .ready:
+            scheduleProfileGateLift(for: identity, generation: generation)
+        case .empty, .overlay:
+            isInitialHomeFocusPending = false
             scheduleProfileGateLift(for: identity, generation: generation)
         case .waiting:
             profileGateLiftTask?.cancel()
@@ -1087,9 +1104,9 @@ struct ContentView: View {
     }
 
     private func scheduleProfileGateLift(for identity: TVHomeContentIdentity, generation: UInt) {
-        guard isPreparingProfile else { return }
+        guard isPreparingProfile || isInitialHomeFocusPending else { return }
         let elapsed = Date().timeIntervalSince(profileGateStartedAt ?? Date())
-        let remaining = max(0, Self.profileGateMinimumDuration - elapsed)
+        let remaining = isPreparingProfile ? max(0, Self.profileGateMinimumDuration - elapsed) : 0
         TVHomeDebugTrace.log("profileGate.scheduleLift gen=\(generation) elapsed=\(String(format: "%.2f", elapsed))s remaining=\(String(format: "%.2f", remaining))s readiness=\(profileGateReadiness)")
         profileGateLiftTask?.cancel()
         profileGateLiftTask = Task { @MainActor in
@@ -1097,7 +1114,6 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             }
             guard !Task.isCancelled,
-                  isPreparingProfile,
                   generation == profileGateGeneration,
                   identity == currentHomeContentIdentity,
                   profileGateReadinessIdentity == identity else {
@@ -1111,9 +1127,29 @@ struct ContentView: View {
                 TVHomeDebugTrace.log("profileGate.liftTask aborted: readiness still waiting gen=\(generation)")
                 return
             }
+            isInitialHomeFocusPending = false
             TVHomeDebugTrace.log("profileGate.liftTask executing normal lift for gen=\(generation)")
             liftProfileGate(generation: generation)
         }
+    }
+
+    private func timeoutProfileGate(generation: UInt) {
+        guard generation == profileGateGeneration, isPreparingProfile else { return }
+        if profileGateReadinessIdentity == currentHomeContentIdentity {
+            switch profileGateReadiness {
+            case .ready, .empty, .overlay:
+                isInitialHomeFocusPending = false
+            case .waiting:
+                break
+            }
+        }
+        liftProfileGate(generation: generation)
+    }
+
+    private func cancelProfileGate(generation: UInt? = nil) {
+        if let generation, generation != profileGateGeneration { return }
+        isInitialHomeFocusPending = false
+        liftProfileGate(generation: generation)
     }
 
     /// Used when the user backs out or the scoped deadline reaches an empty load.
@@ -1793,11 +1829,12 @@ struct ContentView: View {
             homeCatalogRevision: syncManager.homeCatalogRevision,
             homeCollectionsRevision: syncManager.homeCollectionsRevision,
             isFullScreenOverlayPresented: fullScreenOverlayPresented,
+            isProfileGateCoverPresented: isPreparingProfile,
             detailsDidDisappearGeneration: detailsDidDisappearGeneration,
             accountEmail: authManager.currentEmail,
             isAuthenticated: authManager.isAuthenticated,
             sessionNeedsReauthentication: authManager.sessionNeedsReauthentication,
-            isProfileFocusPending: isPreparingProfile,
+            isProfileFocusPending: isInitialHomeFocusPending,
             profileGateGeneration: profileGateGeneration,
             onProfileGateReadinessChange: profileGateReadinessChanged,
             authManager: authManager,
@@ -1866,6 +1903,11 @@ struct ContentView: View {
                 // so every tab can now use the same presentation transaction.
                 withAnimation(.easeInOut(duration: 0.28)) {
                     openDetailsRoot(id: contentId, type: contentType)
+                }
+            },
+            onPlayTitle: { contentId, contentType in
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    openDetailsRoot(id: contentId, type: contentType, startPlayback: true)
                 }
             },
             onRequestAccountRefresh: { force in
@@ -1941,6 +1983,11 @@ struct ContentView: View {
             id: contentId,
             type: contentType,
             repository: CinemetaCatalogRepository(),
+            initialPlaybackRequestID: pendingDetailsPlaybackRequestID,
+            onInitialPlaybackRequestConsumed: { requestID in
+                guard pendingDetailsPlaybackRequestID == requestID else { return }
+                pendingDetailsPlaybackRequestID = nil
+            },
             initiallyPresentStreamPicker: reopenStreamPickerOnDetails,
             initialStreamPickerEpisode: reopenStreamPickerEpisode,
             onInitialStreamPickerPresented: {
@@ -2966,6 +3013,7 @@ private struct TVMainTabView: View {
     let homeCatalogRevision: UInt
     let homeCollectionsRevision: UInt
     let isFullScreenOverlayPresented: Bool
+    let isProfileGateCoverPresented: Bool
     let detailsDidDisappearGeneration: UInt
     let accountEmail: String?
     let isAuthenticated: Bool
@@ -2983,6 +3031,7 @@ private struct TVMainTabView: View {
     let onSignIn: () -> Void
     let onSignOut: () -> Void
     let onNavigateToDetails: (String, String) -> Void
+    let onPlayTitle: (String, String) -> Void
     let onRequestAccountRefresh: (Bool) -> Void
     let onOpenCollectionFolder: (TVCollectionFolderItem, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
@@ -3107,6 +3156,7 @@ private struct TVMainTabView: View {
                 collectionsRevision: homeCollectionsRevision,
                 sessionNeedsReauthentication: sessionNeedsReauthentication,
                 onNavigateToDetails: onNavigateToDetails,
+                onPlayTitle: onPlayTitle,
                 onOpenCollectionFolder: onOpenCollectionFolder,
                 onResumePlayback: onResumePlayback,
                 onPlayContinueWatchingManually: onPlayContinueWatchingManually,
@@ -3197,8 +3247,8 @@ private struct TVMainTabView: View {
                 syncManager.flushPendingPushes()
             }
             if tab == .profile {
-                if isProfileFocusPending {
-                    TVHomeDebugTrace.log("app.selectedTab reset from Profile to Home because isProfileFocusPending is true")
+                if isProfileGateCoverPresented {
+                    TVHomeDebugTrace.log("app.selectedTab reset from Profile to Home because profile gate cover is visible")
                     selectedTab = .home
                     return
                 }
@@ -3546,6 +3596,7 @@ struct TVHomeView: View {
     let collectionsRevision: UInt
     var sessionNeedsReauthentication: Bool = false
     let onNavigateToDetails: (String, String) -> Void
+    let onPlayTitle: (String, String) -> Void
     let onOpenCollectionFolder: (TVCollectionFolderItem, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
     var onPlayContinueWatchingManually: ((ContinueWatchingItem) -> Void)? = nil
@@ -4457,6 +4508,14 @@ struct TVHomeView: View {
                     if heroEnabled && !heroItems.isEmpty {
                         TVGridHeroSlideshowView(
                             items: heroItems,
+                            isPlaybackAllowed: isActive
+                                && isEnabled
+                                && !isFullScreenOverlayPresented
+                                && browsingSection == nil
+                                && !isProfileFocusPending,
+                            repository: repository,
+                            profileID: contentIdentity.profileId,
+                            catalogRevision: contentIdentity.catalogRevision,
                             selectedIndex: $gridHeroIndex,
                             focusRequestGeneration: gridHeroFocusRequestGeneration,
                             shouldRequestInitialFocus: store.lastFocusedCardID == nil
@@ -4465,6 +4524,9 @@ struct TVHomeView: View {
                             onInitialFocusRequested: {
                                 didRequestInitialGridHeroFocus = true
                                 didRequestInitialCardFocus = true
+                            },
+                            onPlay: { selectedMeta in
+                                playTitleFromHome(id: selectedMeta.id, type: selectedMeta.type)
                             },
                             backdropBleed: heroBleed,
                             onFocusChange: { isFocused in
@@ -4479,6 +4541,8 @@ struct TVHomeView: View {
                                         verticalScrollProxy.scrollTo("home-grid-hero-top", anchor: .top)
                                     }
                                 }
+                            },
+                            onNativeFocusChange: { isFocused in
                                 let wasHeroFocused = didNativeFocusGridHero
                                 didNativeFocusGridHero = isProfileFocusPending && isFocused
                                 if isProfileFocusPending && didNativeFocusGridHero != wasHeroFocused {
@@ -4983,6 +5047,9 @@ struct TVHomeView: View {
         if isFullScreenOverlayPresented { return .overlay }
         let target = profileGateStartupFocusTarget
         if let target {
+            guard hasNativeProfileFocus(for: target) else {
+                return .waiting(hasFocusableContent: true, targetSignature: target.signature)
+            }
             return .ready(
                 targetSignature: target.signature,
                 storeLoaded: store.isLoaded(for: contentIdentity)
@@ -5892,6 +5959,11 @@ struct TVHomeView: View {
     ) {
         prepareForOverlayPresentation(restoreCardID: restoreCardID)
         onNavigateToDetails(id, type)
+    }
+
+    private func playTitleFromHome(id: String, type: String) {
+        prepareForOverlayPresentation()
+        onPlayTitle(id, type)
     }
 
     private func openCollectionFolderFromHome(
@@ -9020,9 +9092,326 @@ private enum GridHeroFocusTarget: Hashable {
     case trailingTrap
 }
 
+private final class GridHeroNativeFocusTracker {
+    private(set) var currentTarget: GridHeroFocusTarget?
+    private var updateGeneration = 0
+
+    func update(
+        target: GridHeroFocusTarget,
+        isFocused: Bool,
+        onAnyFocusChange: ((Bool) -> Void)?
+    ) {
+        if isFocused {
+            updateGeneration &+= 1
+            currentTarget = target
+            onAnyFocusChange?(true)
+            return
+        }
+        guard currentTarget == target else { return }
+        updateGeneration &+= 1
+        let generation = updateGeneration
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.updateGeneration == generation,
+                  self.currentTarget == target else { return }
+            self.currentTarget = nil
+            onAnyFocusChange?(false)
+        }
+    }
+}
+
+#if os(tvOS)
+private enum GridHeroArrow: Equatable {
+    case left
+    case right
+}
+
+private final class GridHeroDirectionalPressTarget: NSObject {
+    var onRecognized: ((UITapGestureRecognizer) -> Void)?
+
+    @objc func recognized(_ recognizer: UITapGestureRecognizer) {
+        onRecognized?(recognizer)
+    }
+}
+
+private struct GridHeroActionFocusBoundary<Content: View>: UIViewControllerRepresentable {
+    private let content: Content
+    private let shouldConsumeArrow: (GridHeroArrow) -> Bool
+    private let onArrowPress: (GridHeroArrow) -> Void
+
+    init(
+        shouldConsumeArrow: @escaping (GridHeroArrow) -> Bool,
+        onArrowPress: @escaping (GridHeroArrow) -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.content = content()
+        self.shouldConsumeArrow = shouldConsumeArrow
+        self.onArrowPress = onArrowPress
+    }
+
+    func makeUIViewController(context: Context) -> GridHeroActionHostingController<Content> {
+        GridHeroActionHostingController(
+            rootView: content,
+            shouldConsumeArrow: shouldConsumeArrow,
+            onArrowPress: onArrowPress
+        )
+    }
+
+    func updateUIViewController(
+        _ controller: GridHeroActionHostingController<Content>,
+        context: Context
+    ) {
+        controller.update(
+            rootView: content,
+            shouldConsumeArrow: shouldConsumeArrow,
+            onArrowPress: onArrowPress
+        )
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiViewController: GridHeroActionHostingController<Content>,
+        context: Context
+    ) -> CGSize? {
+        uiViewController.sizeThatFits(in: CGSize(
+            width: proposal.width ?? UIView.layoutFittingExpandedSize.width,
+            height: proposal.height ?? UIView.layoutFittingExpandedSize.height
+        ))
+    }
+}
+
+private final class GridHeroActionHostingController<Content: View>: UIHostingController<Content>, UIGestureRecognizerDelegate {
+    private var shouldConsumeArrow: (GridHeroArrow) -> Bool
+    private var onArrowPress: (GridHeroArrow) -> Void
+    private var consumingArrowPress: GridHeroArrow?
+    private let directionalPressTarget = GridHeroDirectionalPressTarget()
+    private var leftEdgePressRecognizer: UITapGestureRecognizer?
+    private var rightEdgePressRecognizer: UITapGestureRecognizer?
+
+    init(
+        rootView: Content,
+        shouldConsumeArrow: @escaping (GridHeroArrow) -> Bool,
+        onArrowPress: @escaping (GridHeroArrow) -> Void
+    ) {
+        self.shouldConsumeArrow = shouldConsumeArrow
+        self.onArrowPress = onArrowPress
+        super.init(rootView: rootView)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        view.clipsToBounds = false
+
+        directionalPressTarget.onRecognized = { [weak self] recognizer in
+            self?.handleRecognizedEdgePress(recognizer)
+        }
+        let leftRecognizer = makeEdgePressRecognizer(for: .left)
+        let rightRecognizer = makeEdgePressRecognizer(for: .right)
+        leftEdgePressRecognizer = leftRecognizer
+        rightEdgePressRecognizer = rightRecognizer
+        view.addGestureRecognizer(leftRecognizer)
+        view.addGestureRecognizer(rightRecognizer)
+    }
+
+    func update(
+        rootView: Content,
+        shouldConsumeArrow: @escaping (GridHeroArrow) -> Bool,
+        onArrowPress: @escaping (GridHeroArrow) -> Void
+    ) {
+        self.shouldConsumeArrow = shouldConsumeArrow
+        self.onArrowPress = onArrowPress
+        self.rootView = rootView
+    }
+
+    override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
+        let previousIsHosted = isHostedFocusItem(context.previouslyFocusedItem)
+            || context.previouslyFocusedView.map { isHostedView($0) } == true
+        let nextIsHosted = isHostedFocusItem(context.nextFocusedItem)
+            || context.nextFocusedView.map { isHostedView($0) } == true
+        traceInput(
+            "focus prev=\(focusItemType(context.previouslyFocusedItem)) next=\(focusItemType(context.nextFocusedItem)) " +
+                "hosted=\(previousIsHosted)/\(nextIsHosted) heading=\(context.focusHeading.rawValue)"
+        )
+        let isLeftExit = context.focusHeading.contains(.left)
+        let isRightExit = context.focusHeading.contains(.right) && shouldConsumeArrow(.right)
+        if (isLeftExit || isRightExit), previousIsHosted, !nextIsHosted {
+            return false
+        }
+        return super.shouldUpdateFocus(in: context)
+    }
+
+    // Consume remote and hardware-keyboard edge arrows before the sidebar can handle them.
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let consumedArrow = presses
+            .compactMap { arrowDirection(for: $0) }
+            .first(where: shouldConsumeArrow)
+        traceInput("responder began \(pressDescription(presses)) gate=\(consumedArrow != nil)")
+        if let consumedArrow {
+            consumingArrowPress = consumedArrow
+            let otherPresses = excluding(consumedArrow, from: presses)
+            if !otherPresses.isEmpty { super.pressesBegan(otherPresses, with: event) }
+            return
+        }
+        super.pressesBegan(presses, with: event)
+    }
+
+    override func pressesChanged(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        traceInput("responder changed \(pressDescription(presses)) consumed=\(String(describing: consumingArrowPress))")
+        if let consumedArrow = consumingArrowPress,
+           presses.contains(where: { arrowDirection(for: $0) == consumedArrow }) {
+            let otherPresses = excluding(consumedArrow, from: presses)
+            if !otherPresses.isEmpty { super.pressesChanged(otherPresses, with: event) }
+            return
+        }
+        super.pressesChanged(presses, with: event)
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        traceInput("responder ended \(pressDescription(presses)) consumed=\(String(describing: consumingArrowPress))")
+        if let consumedArrow = consumingArrowPress,
+           presses.contains(where: { arrowDirection(for: $0) == consumedArrow }) {
+            consumingArrowPress = nil
+            onArrowPress(consumedArrow)
+            let otherPresses = excluding(consumedArrow, from: presses)
+            if !otherPresses.isEmpty { super.pressesEnded(otherPresses, with: event) }
+            return
+        }
+        super.pressesEnded(presses, with: event)
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        traceInput("responder cancelled \(pressDescription(presses)) consumed=\(String(describing: consumingArrowPress))")
+        if let consumedArrow = consumingArrowPress,
+           presses.contains(where: { arrowDirection(for: $0) == consumedArrow }) {
+            consumingArrowPress = nil
+            let otherPresses = excluding(consumedArrow, from: presses)
+            if !otherPresses.isEmpty { super.pressesCancelled(otherPresses, with: event) }
+            return
+        }
+        super.pressesCancelled(presses, with: event)
+    }
+
+    private func isHostedView(_ candidate: UIView) -> Bool {
+        guard let hostedView = viewIfLoaded else { return false }
+        return candidate === hostedView || candidate.isDescendant(of: hostedView)
+    }
+
+    private func isHostedFocusItem(_ candidate: UIFocusItem?) -> Bool {
+        guard let candidate else { return false }
+        var environment: any UIFocusEnvironment = candidate
+        while true {
+            if environment === self { return true }
+            guard let parent = environment.parentFocusEnvironment else { return false }
+            environment = parent
+        }
+    }
+
+    private func excluding(_ arrow: GridHeroArrow, from presses: Set<UIPress>) -> Set<UIPress> {
+        Set(presses.filter { arrowDirection(for: $0) != arrow })
+    }
+
+    private func arrowDirection(for press: UIPress) -> GridHeroArrow? {
+        if press.type == .leftArrow || press.key?.keyCode == .keyboardLeftArrow { return .left }
+        if press.type == .rightArrow || press.key?.keyCode == .keyboardRightArrow { return .right }
+        return nil
+    }
+
+    private func makeEdgePressRecognizer(for arrow: GridHeroArrow) -> UITapGestureRecognizer {
+        let recognizer = UITapGestureRecognizer(
+            target: directionalPressTarget,
+            action: #selector(GridHeroDirectionalPressTarget.recognized(_:))
+        )
+        let pressType: UIPress.PressType = arrow == .left ? .leftArrow : .rightArrow
+        recognizer.allowedPressTypes = [NSNumber(value: pressType.rawValue)]
+        recognizer.allowedTouchTypes = []
+        recognizer.delaysTouchesBegan = true
+        recognizer.delaysTouchesEnded = true
+        recognizer.cancelsTouchesInView = true
+        recognizer.delegate = self
+        return recognizer
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive press: UIPress) -> Bool {
+        guard let arrow = edgeArrow(for: gestureRecognizer) else { return false }
+        let allowed = arrowDirection(for: press) == arrow && shouldConsumeArrow(arrow)
+        traceInput("gesture receive press=\(pressDescription(press)) arrow=\(arrow) gate=\(allowed)")
+        return allowed
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        false
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        guard let arrow = edgeArrow(for: gestureRecognizer),
+              !isEdgePressRecognizer(otherGestureRecognizer),
+              shouldConsumeArrow(arrow) else { return false }
+        return true
+    }
+
+    private func handleRecognizedEdgePress(_ recognizer: UITapGestureRecognizer) {
+        guard let arrow = edgeArrow(for: recognizer) else { return }
+        traceInput("gesture recognized arrow=\(arrow)")
+        // Recognition cancels the delayed responder press; clear its fallback so it cannot advance twice.
+        consumingArrowPress = nil
+        onArrowPress(arrow)
+    }
+
+    private func edgeArrow(for recognizer: UIGestureRecognizer) -> GridHeroArrow? {
+        if recognizer === leftEdgePressRecognizer { return .left }
+        if recognizer === rightEdgePressRecognizer { return .right }
+        return nil
+    }
+
+    private func isEdgePressRecognizer(_ recognizer: UIGestureRecognizer) -> Bool {
+        recognizer === leftEdgePressRecognizer || recognizer === rightEdgePressRecognizer
+    }
+
+    private var isInputTraceEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("-TVGridHeroInputTrace")
+    }
+
+    private func traceInput(_ message: @autoclosure () -> String) {
+        guard isInputTraceEnabled else { return }
+        print("[GridHeroInput] \(message())")
+    }
+
+    private func pressDescription(_ press: UIPress) -> String {
+        "type=\(press.type.rawValue) key=\(String(describing: press.key?.keyCode))"
+    }
+
+    private func pressDescription(_ presses: Set<UIPress>) -> String {
+        presses.map { pressDescription($0) }.sorted().joined(separator: ",")
+    }
+
+    private func focusItemType(_ item: UIFocusItem?) -> String {
+        guard let item else { return "nil" }
+        return String(reflecting: type(of: item))
+    }
+}
+#endif
+
 private struct TvHeroActionButtonStyle: ButtonStyle {
+    var onNativeFocusChange: ((Bool) -> Void)? = nil
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            #if os(tvOS)
+            .background {
+                if let onNativeFocusChange {
+                    TVNativeFocusObserver(onFocusChange: onNativeFocusChange)
+                }
+            }
+            #endif
             #if os(tvOS)
             .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
             #else
@@ -9039,8 +9428,13 @@ private struct AppleTvPageSlider: View {
     let totalCount: Int
     let selectedIndex: Int
     var isFocused: Bool = false
+    var progress: Double = 0
 
     var body: some View {
+        let trackWidth: CGFloat = isFocused ? 46 : 40
+        let clampedProgress = CGFloat(min(max(progress, 0), 1))
+        let fillWidth = 14 + (trackWidth - 14) * clampedProgress
+
         HStack(spacing: 10) {
             ForEach(0..<totalCount, id: \.self) { dotIndex in
                 if dotIndex == selectedIndex {
@@ -9048,11 +9442,11 @@ private struct AppleTvPageSlider: View {
                     ZStack(alignment: .leading) {
                         Capsule()
                             .fill(Color.white.opacity(0.28))
-                            .frame(width: isFocused ? 46 : 40, height: 8)
+                            .frame(width: trackWidth, height: 8)
 
                         Capsule()
                             .fill(Color.white)
-                            .frame(width: 14, height: 8)
+                            .frame(width: fillWidth, height: 8)
                     }
                     .transition(.opacity)
                 } else {
@@ -9066,15 +9460,12 @@ private struct AppleTvPageSlider: View {
         .padding(.vertical, 9)
         .background(
             Capsule()
-                .fill(Color(red: 0.16, green: 0.17, blue: 0.20).opacity(0.88))
-        )
-        .overlay(
-            Capsule()
-                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                .fill(Color.black.opacity(0.45))
         )
         .shadow(color: .black.opacity(0.45), radius: 10, y: 5)
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: selectedIndex)
         .animation(.easeOut(duration: 0.15), value: isFocused)
+        .animation(.linear(duration: 0.25), value: progress)
     }
 
     private func dotSize(for dotIndex: Int) -> CGFloat {
@@ -9104,19 +9495,41 @@ private struct AppleTvPageSlider: View {
 /// and native Apple TV page slider pill.
 private struct TVGridHeroSlideshowView: View {
     let items: [NuvioMeta]
+    let isPlaybackAllowed: Bool
+    let repository: CatalogRepository
+    let profileID: String
+    let catalogRevision: UInt
     @Binding var selectedIndex: Int
     let focusRequestGeneration: Int
     let shouldRequestInitialFocus: Bool
     let onInitialFocusRequested: () -> Void
+    let onPlay: (NuvioMeta) -> Void
     var backdropBleed: CGFloat = 0
     var onFocusChange: ((Bool) -> Void)? = nil
+    var onNativeFocusChange: ((Bool) -> Void)? = nil
     let onSelect: (NuvioMeta) -> Void
 
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
+    @AppStorage(SettingsKey.trailerDelay) private var trailerDelay = 7
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.resetFocus) private var resetFocus
+    @Namespace private var heroFocusScope
     @FocusState private var focusedTarget: GridHeroFocusTarget?
     @State private var isInLibraryCache = false
     @State private var lastFocusChangeTime: CFTimeInterval = 0
+    @State private var activeTrailerPreviewIdentity: String?
+    @State private var finishedTrailerPreviewIdentity: String?
+    @State private var unavailableTrailerPreviewIdentity: String?
+    @State private var readyTrailerPreviewIdentity: String?
+    @State private var trailerPlaybackProgress = 0.0
+    @State private var fallbackCountdownProgress = 0.0
+    @State private var nativeFocusTracker = GridHeroNativeFocusTracker()
+    @State private var resolvedSeriesMetadata: NuvioMeta?
+    @State private var resolvedSeriesMetadataIdentity: String?
+    @State private var resolvedPlayTarget: TvDetailsPlayTarget?
+    @State private var resolvedPlayTargetIdentity: String?
 
     private var index: Int {
         guard !items.isEmpty else { return 0 }
@@ -9131,6 +9544,145 @@ private struct TVGridHeroSlideshowView: View {
         focusedTarget != nil
     }
 
+    private var currentPlayTargetIdentity: String? {
+        activeItem.map { playTargetIdentity(for: $0) }
+    }
+
+    private var playTargetTaskIdentity: String {
+        "\(currentPlayTargetIdentity ?? "none")\u{1f}\(catalogRevision)\u{1f}\(isPlaybackAllowed && scenePhase == .active)"
+    }
+
+    private var currentPlayTarget: TvDetailsPlayTarget? {
+        guard let identity = currentPlayTargetIdentity,
+              resolvedPlayTargetIdentity == identity else { return nil }
+        return resolvedPlayTarget
+    }
+
+    private func playTargetIdentity(for meta: NuvioMeta) -> String {
+        "\(profileID)\u{1f}\(meta.type)\u{1f}\(meta.id)"
+    }
+
+    private var currentTrailerPreviewIdentity: String? {
+        activeItem.map { "\(index)\u{1f}\(trailerPreviewIdentity(for: $0))" }
+    }
+
+    private var isTrailerPreviewEligible: Bool {
+        isPlaybackAllowed && isAnyFocused && scenePhase == .active && trailersEnabled
+    }
+
+    private var trailerPreviewTaskIdentity: String {
+        "\(currentTrailerPreviewIdentity ?? "none")\u{1f}\(isTrailerPreviewEligible)\u{1f}\(max(0, trailerDelay))\u{1f}\(unavailableTrailerPreviewIdentity ?? "none")"
+    }
+
+    private var isFallbackCountdownEligible: Bool {
+        isPlaybackAllowed && scenePhase == .active && items.count > 1
+            && (!trailersEnabled || !isAnyFocused
+                || unavailableTrailerPreviewIdentity == currentTrailerPreviewIdentity)
+    }
+
+    private var fallbackCountdownTaskIdentity: String {
+        "\(index)\u{1f}\(currentTrailerPreviewIdentity ?? "none")\u{1f}\(isFallbackCountdownEligible)\u{1f}\(unavailableTrailerPreviewIdentity ?? "none")"
+    }
+
+    private var sliderProgress: Double {
+        if isTrailerPreviewEligible, activeTrailerPreviewIdentity == currentTrailerPreviewIdentity {
+            return trailerPlaybackProgress
+        }
+        if isFallbackCountdownEligible { return fallbackCountdownProgress }
+        return 0
+    }
+
+    private func trailerPreviewIdentity(for item: NuvioMeta) -> String {
+        "\(item.type)\u{1f}\(item.id)\u{1f}\(item.trailerYtIds?.joined(separator: ",") ?? "")"
+    }
+
+    private func currentContinueWatchingItem(for meta: NuvioMeta) -> ContinueWatchingItem? {
+        if RemoteTrackingState.isProgressSourceAuthenticated {
+            return TraktProgressService.currentContinueWatchingItem(for: meta)
+        }
+        return ContinueWatchingStore.item(for: meta.id)
+    }
+
+    private func refreshHeroPlayTargetFromCurrentData() {
+        guard let item = activeItem else {
+            resolvedSeriesMetadata = nil
+            resolvedSeriesMetadataIdentity = nil
+            resolvedPlayTarget = nil
+            resolvedPlayTargetIdentity = nil
+            return
+        }
+
+        let identity = playTargetIdentity(for: item)
+        if resolvedPlayTargetIdentity != identity {
+            resolvedSeriesMetadata = nil
+            resolvedSeriesMetadataIdentity = nil
+        }
+        let targetMeta: NuvioMeta
+        let episodes: [NuvioVideo]
+        if item.isSeries,
+           resolvedSeriesMetadataIdentity == identity,
+           let resolvedSeriesMetadata {
+            targetMeta = resolvedSeriesMetadata
+            episodes = TvDetailsPlayTargetBuilder.orderedEpisodes(resolvedSeriesMetadata.videos ?? [])
+        } else {
+            targetMeta = item
+            episodes = []
+        }
+        let watchedKeys = WatchedStore.currentSnapshot().watchedEpisodeKeys(meta: targetMeta)
+        resolvedPlayTarget = TvDetailsPlayTargetBuilder.makePlayTarget(
+            episodes: episodes,
+            continueItem: currentContinueWatchingItem(for: targetMeta),
+            watchedKeys: watchedKeys
+        )
+        resolvedPlayTargetIdentity = identity
+    }
+
+    @MainActor
+    private func resolveCurrentHeroPlayTarget() async {
+        refreshHeroPlayTargetFromCurrentData()
+        guard isPlaybackAllowed,
+              scenePhase == .active,
+              let item = activeItem,
+              item.isSeries else { return }
+
+        let requestedIdentity = playTargetIdentity(for: item)
+        let requestedProfileID = profileID
+        do {
+            let fullMetadata = try await repository.getMetadata(id: item.id, type: item.type)
+            guard !Task.isCancelled,
+                  isPlaybackAllowed,
+                  scenePhase == .active,
+                  profileID == requestedProfileID,
+                  currentPlayTargetIdentity == requestedIdentity,
+                  fullMetadata.id == item.id,
+                  fullMetadata.type == item.type else { return }
+            resolvedSeriesMetadata = fullMetadata
+            resolvedSeriesMetadataIdentity = requestedIdentity
+            refreshHeroPlayTargetFromCurrentData()
+
+            guard let tmdbEpisodes = await TmdbDetailsService.fetchEpisodes(for: fullMetadata),
+                  !tmdbEpisodes.isEmpty else { return }
+            guard !Task.isCancelled,
+                  isPlaybackAllowed,
+                  scenePhase == .active,
+                  profileID == requestedProfileID,
+                  currentPlayTargetIdentity == requestedIdentity,
+                  fullMetadata.id == item.id,
+                  fullMetadata.type == item.type else { return }
+            let mergedEpisodes = DetailsViewModel.mergeEpisodes(
+                existing: fullMetadata.videos,
+                fromTmdb: tmdbEpisodes,
+                parentId: fullMetadata.id
+            )
+            guard let mergedEpisodes, !mergedEpisodes.isEmpty else { return }
+            resolvedSeriesMetadata = fullMetadata.withVideos(mergedEpisodes)
+            resolvedSeriesMetadataIdentity = requestedIdentity
+            refreshHeroPlayTargetFromCurrentData()
+        } catch {
+            // Keep the generic Play/Resume target when full series metadata is unavailable.
+        }
+    }
+
     @ViewBuilder
     private func artLayer(_ item: NuvioMeta) -> some View {
         let background = Color.nuvioBackground(amoled: amoled, body: bodyColor)
@@ -9141,6 +9693,49 @@ private struct TVGridHeroSlideshowView: View {
                 placeholder: background,
                 alignment: .top
             )
+
+            #if os(tvOS)
+            let previewIdentity = currentTrailerPreviewIdentity ?? trailerPreviewIdentity(for: item)
+            if isTrailerPreviewEligible,
+               activeTrailerPreviewIdentity == previewIdentity,
+               finishedTrailerPreviewIdentity != previewIdentity {
+                TrailerPreviewPlayer(
+                    meta: item,
+                    isActive: true,
+                    onPlaybackReady: {
+                        guard isTrailerPreviewEligible,
+                              currentTrailerPreviewIdentity == previewIdentity,
+                              activeTrailerPreviewIdentity == previewIdentity else { return }
+                        readyTrailerPreviewIdentity = previewIdentity
+                    },
+                    onPlaybackFinished: {
+                        guard isTrailerPreviewEligible,
+                              currentTrailerPreviewIdentity == previewIdentity,
+                              activeTrailerPreviewIdentity == previewIdentity else { return }
+                        finishedTrailerPreviewIdentity = previewIdentity
+                        activeTrailerPreviewIdentity = nil
+                        readyTrailerPreviewIdentity = nil
+                        trailerPlaybackProgress = 1
+                        if items.count > 1 {
+                            setIndex((index + 1) % items.count)
+                        }
+                    },
+                    onPlaybackProgress: { elapsed, duration in
+                        guard isTrailerPreviewEligible,
+                              currentTrailerPreviewIdentity == previewIdentity,
+                              activeTrailerPreviewIdentity == previewIdentity else { return }
+                        trailerPlaybackProgress = min(max(elapsed / duration, 0), 1)
+                    },
+                    onPlaybackUnavailable: {
+                        markTrailerPreviewUnavailable(previewIdentity)
+                    }
+                )
+                .id(previewIdentity)
+                .task(id: "\(previewIdentity)|\(readyTrailerPreviewIdentity == previewIdentity)") {
+                    await enforceTrailerRenderReadinessTimeout(for: previewIdentity)
+                }
+            }
+            #endif
 
             // Leading horizontal gradient for text legibility (soft, focused behind text)
             LinearGradient(
@@ -9190,7 +9785,8 @@ private struct TVGridHeroSlideshowView: View {
                 AppleTvPageSlider(
                     totalCount: items.count,
                     selectedIndex: index,
-                    isFocused: isAnyFocused
+                    isFocused: isAnyFocused,
+                    progress: sliderProgress
                 )
                 .offset(y: 20)
             }
@@ -9244,24 +9840,139 @@ private struct TVGridHeroSlideshowView: View {
         }
         .onChange(of: index) { _, _ in
             updateLibraryStatus()
+            trailerPlaybackProgress = 0
+            fallbackCountdownProgress = 0
         }
         .onReceive(NotificationCenter.default.publisher(for: LibraryStore.changedNotification)) { _ in
             updateLibraryStatus()
         }
         .focusSection()
-        .task(id: "\(items.map(\.id).joined(separator: "|"))|\(isAnyFocused)") {
-            guard items.count > 1 else { return }
-            try? await Task.sleep(nanoseconds: 20_000_000_000)
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                guard !Task.isCancelled else { return }
-                if !isAnyFocused { setIndex((index + 1) % items.count) }
-            }
+        .task(id: playTargetTaskIdentity) {
+            await resolveCurrentHeroPlayTarget()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: WatchedStore.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshHeroPlayTargetFromCurrentData()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TraktAuthStore.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshHeroPlayTargetFromCurrentData()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ContinueWatchingStore.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshHeroPlayTargetFromCurrentData()
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: TraktSettingsStore.continueWatchingChangedNotification)
+                .receive(on: RunLoop.main)
+        ) { _ in
+            refreshHeroPlayTargetFromCurrentData()
+        }
+        .onChange(of: currentTrailerPreviewIdentity) { _, _ in
+            activeTrailerPreviewIdentity = nil
+            finishedTrailerPreviewIdentity = nil
+            unavailableTrailerPreviewIdentity = nil
+            readyTrailerPreviewIdentity = nil
+            trailerPlaybackProgress = 0
+            fallbackCountdownProgress = 0
+        }
+        .onChange(of: isTrailerPreviewEligible) { _, eligible in
+            guard !eligible else { return }
+            activeTrailerPreviewIdentity = nil
+            finishedTrailerPreviewIdentity = nil
+            unavailableTrailerPreviewIdentity = nil
+            readyTrailerPreviewIdentity = nil
+            trailerPlaybackProgress = 0
+            fallbackCountdownProgress = 0
+        }
+        .task(id: trailerPreviewTaskIdentity) {
+            await activateTrailerPreviewAfterDelay()
+        }
+        .task(id: fallbackCountdownTaskIdentity) {
+            await runFallbackCountdown()
         }
         .onChange(of: items.count) { _, count in
             if count == 0 { selectedIndex = 0 }
             else if selectedIndex >= count { selectedIndex = count - 1 }
+            trailerPlaybackProgress = 0
+            fallbackCountdownProgress = 0
         }
+    }
+
+    @MainActor
+    private func activateTrailerPreviewAfterDelay() async {
+        activeTrailerPreviewIdentity = nil
+        guard let identity = currentTrailerPreviewIdentity,
+              isTrailerPreviewEligible,
+              finishedTrailerPreviewIdentity != identity,
+              unavailableTrailerPreviewIdentity != identity else { return }
+
+        let delay = max(0, trailerDelay)
+        if delay > 0 {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+            } catch {
+                return
+            }
+        }
+
+        guard !Task.isCancelled,
+              isTrailerPreviewEligible,
+              currentTrailerPreviewIdentity == identity,
+              finishedTrailerPreviewIdentity != identity,
+              unavailableTrailerPreviewIdentity != identity else { return }
+        activeTrailerPreviewIdentity = identity
+    }
+
+    @MainActor
+    private func runFallbackCountdown() async {
+        fallbackCountdownProgress = 0
+        guard isFallbackCountdownEligible else { return }
+
+        let startTime = CACurrentMediaTime()
+        while !Task.isCancelled {
+            let elapsed = max(0, CACurrentMediaTime() - startTime)
+            fallbackCountdownProgress = min(elapsed / 10, 1)
+            guard elapsed < 10 else {
+                guard !Task.isCancelled, isFallbackCountdownEligible else { return }
+                setIndex((index + 1) % items.count)
+                return
+            }
+
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
+        }
+    }
+
+    @MainActor
+    private func enforceTrailerRenderReadinessTimeout(for identity: String) async {
+        guard readyTrailerPreviewIdentity != identity,
+              activeTrailerPreviewIdentity == identity,
+              isTrailerPreviewEligible else { return }
+
+        do {
+            try await Task.sleep(nanoseconds: 15_000_000_000)
+        } catch {
+            return
+        }
+
+        guard !Task.isCancelled,
+              readyTrailerPreviewIdentity != identity,
+              activeTrailerPreviewIdentity == identity,
+              currentTrailerPreviewIdentity == identity,
+              isTrailerPreviewEligible else { return }
+        markTrailerPreviewUnavailable(identity)
+    }
+
+    private func markTrailerPreviewUnavailable(_ identity: String) {
+        guard isTrailerPreviewEligible,
+              currentTrailerPreviewIdentity == identity,
+              activeTrailerPreviewIdentity == identity else { return }
+        unavailableTrailerPreviewIdentity = identity
+        finishedTrailerPreviewIdentity = identity
+        readyTrailerPreviewIdentity = nil
+        activeTrailerPreviewIdentity = nil
+        trailerPlaybackProgress = 0
     }
 
     @ViewBuilder
@@ -9302,8 +10013,42 @@ private struct TVGridHeroSlideshowView: View {
             }
 
             // 4. Apple TV Action Buttons Row (Mounted without dynamic ID so focus is preserved)
-            heroActionButtons(item)
+            #if os(tvOS)
+            GridHeroActionFocusBoundary(
+                shouldConsumeArrow: { arrow in
+                    let target = nativeFocusTracker.currentTarget ?? focusedTarget
+                    switch arrow {
+                    case .left:
+                        return target == .play
+                            || target == .leadingTrap
+                            || (target == .watchlist && currentPlayTarget?.isPlayable == false)
+                    case .right:
+                        return (target == .next || target == .trailingTrap) && items.count > 1
+                    }
+                },
+                onArrowPress: { arrow in
+                    switch arrow {
+                    case .left:
+                        if items.count > 1 {
+                            setIndex((index - 1 + items.count) % items.count)
+                        }
+                        focusedTarget = items.count == 1 && currentPlayTarget?.isPlayable == false
+                            ? .watchlist
+                            : .play
+                    case .right:
+                        guard items.count > 1 else { return }
+                        setIndex((index + 1) % items.count)
+                        focusedTarget = .next
+                    }
+                }
+            ) {
+                heroActionButtons(item, playTarget: currentPlayTarget)
+            }
                 .padding(.top, 4)
+            #else
+            heroActionButtons(item, playTarget: currentPlayTarget)
+                .padding(.top, 4)
+            #endif
 
             // 5. Subtitle info under primary button
             if let subtitle = heroSubtitleText(item) {
@@ -9378,18 +10123,18 @@ private struct TVGridHeroSlideshowView: View {
     }
 
     @ViewBuilder
-    private func heroActionButtons(_ item: NuvioMeta) -> some View {
+    private func heroActionButtons(_ item: NuvioMeta, playTarget: TvDetailsPlayTarget?) -> some View {
         HStack(spacing: 26) {
             // Primary Button (Watch Now / Play)
             Button {
-                onSelect(item)
+                onPlay(item)
             } label: {
                 HStack(spacing: 16) {
                     Image(systemName: "play.fill")
                         .font(.system(size: 30, weight: .bold))
                         .accessibilityHidden(true)
 
-                    Text(L10n.string("details_watch_now", fallback: "Watch Now"))
+                    Text(playTarget?.label ?? L10n.string("action_play", fallback: "Play"))
                         .font(.system(size: 32, weight: .medium))
                         .lineLimit(1)
                         .accessibilityHidden(true)
@@ -9405,7 +10150,14 @@ private struct TVGridHeroSlideshowView: View {
                     y: 8
                 )
             }
-            .buttonStyle(TvHeroActionButtonStyle())
+            .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
+                nativeFocusTracker.update(
+                    target: .play,
+                    isFocused: isFocused,
+                    onAnyFocusChange: onNativeFocusChange
+                )
+            }))
+            .disabled(playTarget?.isPlayable == false)
             .focused($focusedTarget, equals: .play)
             .focusEffectDisabledIfAvailable()
             .scaleEffect(focusedTarget == .play ? 1.08 : 1)
@@ -9438,7 +10190,13 @@ private struct TVGridHeroSlideshowView: View {
                         y: 8
                     )
             }
-            .buttonStyle(TvHeroActionButtonStyle())
+            .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
+                nativeFocusTracker.update(
+                    target: .watchlist,
+                    isFocused: isFocused,
+                    onAnyFocusChange: onNativeFocusChange
+                )
+            }))
             .focused($focusedTarget, equals: .watchlist)
             .focusEffectDisabledIfAvailable()
             .scaleEffect(focusedTarget == .watchlist ? 1.08 : 1)
@@ -9459,7 +10217,13 @@ private struct TVGridHeroSlideshowView: View {
                         y: 8
                     )
             }
-            .buttonStyle(TvHeroActionButtonStyle())
+            .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
+                nativeFocusTracker.update(
+                    target: .info,
+                    isFocused: isFocused,
+                    onAnyFocusChange: onNativeFocusChange
+                )
+            }))
             .focused($focusedTarget, equals: .info)
             .focusEffectDisabledIfAvailable()
             .scaleEffect(focusedTarget == .info ? 1.08 : 1)
@@ -9481,7 +10245,13 @@ private struct TVGridHeroSlideshowView: View {
                             y: 8
                         )
                 }
-                .buttonStyle(TvHeroActionButtonStyle())
+                .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
+                    nativeFocusTracker.update(
+                        target: .next,
+                        isFocused: isFocused,
+                        onAnyFocusChange: onNativeFocusChange
+                    )
+                }))
                 .focused($focusedTarget, equals: .next)
                 .focusEffectDisabledIfAvailable()
                 .scaleEffect(focusedTarget == .next ? 1.08 : 1)

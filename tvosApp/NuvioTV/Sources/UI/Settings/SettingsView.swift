@@ -2987,7 +2987,7 @@ private struct LayoutDiscoverySettingsView: View {
     @AppStorage(SettingsKey.detailsActionsBelowInfo) private var detailsActionsBelowInfo = false
 
     /// Classic was never a distinct layout (behaved like Modern).
-    private let layouts = ["Modern", "Compact", "Grid View"]
+    private let layouts = ["Modern", "Grid View", "Compact"]
     // Search is the only screen that currently hosts the full Discover surface.
     // Do not offer Home/Library as dead selections that merely hide Discover.
     private let discoverLocations = ["Search", "Off"]

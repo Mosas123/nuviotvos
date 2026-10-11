@@ -99,4 +99,17 @@ final class TrailerSettingsTests: XCTestCase {
         profile1Defaults.removePersistentDomain(forName: "TrailerProfile1Suite")
         profile2Defaults.removePersistentDomain(forName: "TrailerProfile2Suite")
     }
+
+    @MainActor
+    func testBackgroundTrailerRequiresSettingRegardlessOfHandoff() {
+        testDefaults.set(false, forKey: SettingsKey.backgroundTrailersEnabled)
+        testDefaults.set(true, forKey: SettingsKey.trailersEnabled)
+
+        TrailerPlaybackHandoff.shared.recordHandoff(metaId: "test_meta_123", time: 12.0)
+        let handoff = TrailerPlaybackHandoff.shared.takeHandoff(for: "test_meta_123")
+        XCTAssertNotNil(handoff)
+
+        let bgEnabled = testDefaults.bool(forKey: SettingsKey.backgroundTrailersEnabled)
+        XCTAssertFalse(bgEnabled, "Background trailers setting must remain disabled regardless of handoff")
+    }
 }
