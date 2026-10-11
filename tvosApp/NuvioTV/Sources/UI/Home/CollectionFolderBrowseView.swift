@@ -51,7 +51,6 @@ struct CollectionFolderBrowseView: View {
     @FocusState private var isLoadingFocusActive: Bool
     @State private var lastFocusedItemID: String?
     @State private var focusRestoreGeneration = 0
-    @State private var watchedTitleKeys: Set<String> = []
     @State private var cachedCollectionMetadata: [String: NuvioMeta] = [:]
     @State private var collectionEnrichmentTask: Task<Void, Never>?
     @Environment(\.isEnabled) private var isEnabled
@@ -143,13 +142,9 @@ struct CollectionFolderBrowseView: View {
             collectionEnrichmentTask = nil
         }
         .task {
-            refreshWatchedTitles()
             async let addonCatalogNames: Void = loadAddonCatalogNames()
             await load()
             await addonCatalogNames
-        }
-        .onReceive(NotificationCenter.default.publisher(for: WatchedStore.changedNotification).receive(on: RunLoop.main)) { _ in
-            refreshWatchedTitles()
         }
         .onChange(of: focusedItemID) { _, newValue in
             if let newValue { lastFocusedItemID = newValue }
@@ -258,7 +253,6 @@ struct CollectionFolderBrowseView: View {
                                 layoutMode: collectionRowLayoutMode,
                                 showPosterLabels: posterLabels,
                                 externalFocus: $focusedItemID,
-                                watchedTitleKeys: watchedTitleKeys,
                                 onFocus: enrichCollectionItemIfNeeded,
                                 onApproachEnd: { item in
                                     loadMoreRowIfNeeded(rowId: row.id, currentItem: item)
@@ -467,7 +461,6 @@ struct CollectionFolderBrowseView: View {
                                 layoutMode: collectionRowLayoutMode,
                                 showPosterLabels: posterLabels,
                                 externalFocus: $focusedItemID,
-                                watchedTitleKeys: watchedTitleKeys,
                                 onFocus: enrichCollectionItemIfNeeded,
                                 onApproachEnd: { item in
                                     loadMoreRowIfNeeded(rowId: row.id, currentItem: item)
@@ -495,7 +488,6 @@ struct CollectionFolderBrowseView: View {
                     CollectionFolderResultCard(
                         meta: item,
                         externalFocus: $focusedItemID,
-                        isWatched: isTitleWatched(item),
                         onLongPress: { onLongPress(item) }
                     ) {
                         onSelect(item)
@@ -532,26 +524,6 @@ struct CollectionFolderBrowseView: View {
             return "\(row.id)\u{1}\(item.id)"
         }
         return displayedGridItems.first?.id
-    }
-
-    private func refreshWatchedTitles() {
-        watchedTitleKeys = WatchedStore.visibleWholeTitleIdentityKeys()
-    }
-
-    private func isTitleWatched(_ meta: NuvioMeta) -> Bool? {
-        let titleWatched = !watchedTitleKeys.isDisjoint(
-            with: WatchedStore.catalogTitleIdentityKeys(for: meta)
-        )
-        guard !["series", "tv", "show", "tvshow"].contains(meta.type.lowercased()) else {
-            if titleWatched {
-                return true
-            }
-            if !WatchedStore.hasWatchedAnyEpisodes(for: meta) {
-                return false
-            }
-            return nil
-        }
-        return titleWatched
     }
 
     @MainActor
@@ -838,7 +810,6 @@ private struct CollectionFolderHomeStyleRow: View {
     var layoutMode: String = "Modern"
     var showPosterLabels: Bool = false
     var externalFocus: FocusState<String?>.Binding? = nil
-    let watchedTitleKeys: Set<String>
     let onFocus: (NuvioMeta) -> Void
     let onApproachEnd: (NuvioMeta) -> Void
     let onLongPress: (NuvioMeta) -> Void
@@ -951,8 +922,7 @@ private struct CollectionFolderHomeStyleRow: View {
                         layoutMode: rowHomeLayout,
                         showPosterLabels: rowPosterLabels,
                         smoothFocusAnimations: rowSmoothFocus,
-                        focusHighlighterEnabled: rowFocusHighlighter,
-                        isWatched: isTitleWatched(item)
+                        focusHighlighterEnabled: rowFocusHighlighter
                     ) {
                         onSelect(item)
                     }
@@ -979,22 +949,6 @@ private struct CollectionFolderHomeStyleRow: View {
             .animation(rowSmoothFocus && !rowFastNavigation ? TVHomeLayout.scrollAnimation : nil, value: landscapeFocusedId)
         }
         .frame(height: stripHeight)
-    }
-
-    private func isTitleWatched(_ meta: NuvioMeta) -> Bool? {
-        let titleWatched = !watchedTitleKeys.isDisjoint(
-            with: WatchedStore.catalogTitleIdentityKeys(for: meta)
-        )
-        guard !["series", "tv", "show", "tvshow"].contains(meta.type.lowercased()) else {
-            if titleWatched {
-                return true
-            }
-            if !WatchedStore.hasWatchedAnyEpisodes(for: meta) {
-                return false
-            }
-            return nil
-        }
-        return titleWatched
     }
 
     /// Wait for the configured backdrop delay before expanding the settled
@@ -1042,7 +996,6 @@ extension CollectionFolderHomeStyleRow: Equatable {
             && lhs.isLoadingMore == rhs.isLoadingMore
             && lhs.layoutMode == rhs.layoutMode
             && lhs.showPosterLabels == rhs.showPosterLabels
-            && lhs.watchedTitleKeys == rhs.watchedTitleKeys
     }
 }
 
@@ -1156,11 +1109,7 @@ struct CollectionFolderResultCard: View {
                     )
                 )
                 .overlay(alignment: .topTrailing) {
-                    if let isWatched {
-                        if isWatched { WatchedCheckmarkIcon() }
-                    } else {
-                        WatchedCheckmarkBadge(meta: meta)
-                    }
+                    WatchedCheckmarkBadge(meta: meta)
                 }
                 .overlay(
                     shape.stroke(

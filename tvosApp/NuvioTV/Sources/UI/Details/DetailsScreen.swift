@@ -15,6 +15,8 @@ import AVKit
 struct DetailsScreen: View {
     let id: String
     let type: String
+    let initialPlaybackRequestID: UInt?
+    let onInitialPlaybackRequestConsumed: ((UInt) -> Void)?
     /// (streamURL, httpHeaders, meta, episodeSubtitleLine, streamSubtitles, currentEpisode, orderedEpisodes).
     /// The last two carry series context for the player's next-episode auto-play;
     /// (streamURL, httpHeaders, meta, episodeSubtitleLine, streamSubtitles, currentEpisode, orderedEpisodes, player, cacheFileIdentity, filename, videoSize, videoHash, resumeFrom).
@@ -50,6 +52,11 @@ struct DetailsScreen: View {
     @State private var isStreamPickerPresented = false
     @State private var isSmartPlaybackPending = false
     @State private var isPreparingPlayback = false
+    @State private var isPreparingInitialPlayback = false
+    @State private var pendingInitialPlaybackRequestID: UInt?
+    @State private var readyInitialPlaybackRequestID: UInt?
+    @State private var initialPlaybackPreparationTask: Task<Void, Never>?
+    @State private var initialPlaybackPreparationError: String?
     @State private var streamPickerAvailabilityMessage: String?
     /// Episode line shown under the title in the player ("" for movies).
     @State private var pendingEpisodeSubtitle = ""
@@ -95,6 +102,8 @@ struct DetailsScreen: View {
         id: String,
         type: String,
         repository: CatalogRepository,
+        initialPlaybackRequestID: UInt? = nil,
+        onInitialPlaybackRequestConsumed: ((UInt) -> Void)? = nil,
         initiallyPresentStreamPicker: Bool = false,
         initialStreamPickerEpisode: NuvioVideo? = nil,
         onInitialStreamPickerPresented: (() -> Void)? = nil,
@@ -120,6 +129,8 @@ struct DetailsScreen: View {
     ) {
         self.id = id
         self.type = type
+        self.initialPlaybackRequestID = initialPlaybackRequestID
+        self.onInitialPlaybackRequestConsumed = onInitialPlaybackRequestConsumed
         self.onPlayClick = onPlayClick
         self.onBack = onBack
         self.onOpenTitle = onOpenTitle
@@ -128,6 +139,7 @@ struct DetailsScreen: View {
         self.initiallyPresentStreamPicker = initiallyPresentStreamPicker
         self.initialStreamPickerEpisode = initialStreamPickerEpisode
         self.onInitialStreamPickerPresented = onInitialStreamPickerPresented
+        _isPreparingInitialPlayback = State(initialValue: initialPlaybackRequestID != nil)
         _viewModel = StateObject(wrappedValue: DetailsViewModel(repository: repository))
         TVHomeDebugTrace.log("details.init id=\(id) type=\(type)")
     }
@@ -148,13 +160,23 @@ struct DetailsScreen: View {
             } else if let error = viewModel.uiState.error {
                 ErrorView(
                     error: error,
-                    onRetry: { viewModel.loadDetails(id: id, type: type) },
+                    onRetry: retryDetailsLoad,
+                    onBack: handleBack
+                )
+            } else if let error = initialPlaybackPreparationError {
+                ErrorView(
+                    error: error,
+                    onRetry: retryDetailsLoad,
                     onBack: handleBack
                 )
             } else if viewModel.uiState.meta != nil {
                 #if os(tvOS)
                 TvDetailsContent(
                     uiState: viewModel.uiState,
+                    initialPlayRequestID: readyInitialPlaybackRequestID,
+                    onInitialPlayRequestConsumed: { requestID in
+                        finishInitialPlaybackRequest(requestID)
+                    },
                     onPlayClick: {
                         // Movie (or a series with no episode list): make sure streams
                         // are loaded for the canonical title id, then either auto-select
@@ -215,7 +237,7 @@ struct DetailsScreen: View {
                 // While the stream picker is open it sits on top as a full-screen
                 // overlay; disable the details content so the focus engine can't
                 // route focus to the (hidden) buttons behind it.
-                .disabled(isStreamPickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback)
+                .disabled(isStreamPickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
                 #else
                 MobileDetailsContent(
                     uiState: viewModel.uiState,
@@ -244,7 +266,7 @@ struct DetailsScreen: View {
             }
 
             if let meta = viewModel.uiState.meta,
-               (isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback) && !isStreamPickerPresented {
+               (isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback) && !isStreamPickerPresented {
                 PlayerLoadingOverlay(
                     backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
                     logoUrl: meta.logoUrl,
@@ -255,6 +277,9 @@ struct DetailsScreen: View {
                         isSmartPlaybackPending = false
                         isResolvingDebrid = false
                         isPreparingPlayback = false
+                        if let requestID = pendingInitialPlaybackRequestID {
+                            finishInitialPlaybackRequest(requestID)
+                        }
                     }
                 )
                 .transition(.opacity)
@@ -328,6 +353,10 @@ struct DetailsScreen: View {
                 isEpisodeMenuPresented = false
             } else if expandedComment != nil {
                 expandedComment = nil
+            } else if isPreparingInitialPlayback {
+                if let requestID = pendingInitialPlaybackRequestID {
+                    finishInitialPlaybackRequest(requestID)
+                }
             } else if isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback {
                 PlaybackStartupTiming.cancel()
                 isSmartPlaybackPending = false
@@ -353,6 +382,14 @@ struct DetailsScreen: View {
                 presentInitialStreamPickerIfNeeded()
             }
         }
+        .onChange(of: initialPlaybackRequestID) { oldRequestID, newRequestID in
+            if let newRequestID {
+                beginInitialPlaybackPreparation(requestID: newRequestID)
+            } else if let oldRequestID,
+                      pendingInitialPlaybackRequestID == oldRequestID {
+                finishInitialPlaybackRequest(oldRequestID)
+            }
+        }
         .onAppear {
             PlaybackStartupTiming.cancel()
             isSmartPlaybackPending = false
@@ -366,7 +403,9 @@ struct DetailsScreen: View {
             }
             #endif
             TVHomeDebugTrace.log("details.appear id=\(id) type=\(type)")
-            if viewModel.uiState.meta == nil || viewModel.uiState.meta?.id != id {
+            if let initialPlaybackRequestID {
+                beginInitialPlaybackPreparation(requestID: initialPlaybackRequestID)
+            } else if viewModel.uiState.meta == nil || viewModel.uiState.meta?.id != id {
                 viewModel.loadDetails(id: id, type: type)
             } else {
                 viewModel.refreshWatchlistAndWatchedStatus()
@@ -375,6 +414,12 @@ struct DetailsScreen: View {
         }
         .onDisappear {
             TVHomeDebugTrace.log("details.disappear id=\(id) type=\(type)")
+            if let requestID = pendingInitialPlaybackRequestID {
+                finishInitialPlaybackRequest(requestID)
+            } else {
+                initialPlaybackPreparationTask?.cancel()
+                initialPlaybackPreparationTask = nil
+            }
             viewModel.cancelAllTasks()
             isPreparingPlayback = false
         }
@@ -386,11 +431,66 @@ struct DetailsScreen: View {
     private func handleBack() {
         PlaybackStartupTiming.cancel()
         TVHomeDebugTrace.log("details.back.cancelTasks id=\(id)")
+        if let requestID = pendingInitialPlaybackRequestID {
+            finishInitialPlaybackRequest(requestID)
+        }
         viewModel.cancelAllTasks()
         isSmartPlaybackPending = false
         isResolvingDebrid = false
         isPreparingPlayback = false
         onBack()
+    }
+
+    private func retryDetailsLoad() {
+        initialPlaybackPreparationError = nil
+        let detailsTask = viewModel.loadDetails(id: id, type: type)
+        if let requestID = pendingInitialPlaybackRequestID {
+            waitForInitialPlaybackMetadata(detailsTask, requestID: requestID)
+        }
+    }
+
+    private func beginInitialPlaybackPreparation(requestID: UInt) {
+        guard pendingInitialPlaybackRequestID != requestID ||
+                (!isPreparingInitialPlayback && readyInitialPlaybackRequestID != requestID) else {
+            return
+        }
+        let detailsTask = viewModel.loadDetails(id: id, type: type)
+        pendingInitialPlaybackRequestID = requestID
+        readyInitialPlaybackRequestID = nil
+        initialPlaybackPreparationError = nil
+        waitForInitialPlaybackMetadata(detailsTask, requestID: requestID)
+    }
+
+    private func waitForInitialPlaybackMetadata(_ detailsTask: Task<Void, Never>, requestID: UInt) {
+        initialPlaybackPreparationTask?.cancel()
+        isPreparingInitialPlayback = true
+        initialPlaybackPreparationTask = Task { @MainActor in
+            await detailsTask.value
+            guard !Task.isCancelled,
+                  pendingInitialPlaybackRequestID == requestID else { return }
+            initialPlaybackPreparationTask = nil
+            isPreparingInitialPlayback = false
+            if let error = viewModel.metadataLoadError {
+                initialPlaybackPreparationError = error
+                return
+            }
+            guard viewModel.didLoadMetadataSuccessfully else { return }
+            guard viewModel.uiState.error == nil,
+                  !viewModel.uiState.isLoading,
+                  viewModel.uiState.meta?.id == id else { return }
+            readyInitialPlaybackRequestID = requestID
+        }
+    }
+
+    private func finishInitialPlaybackRequest(_ requestID: UInt) {
+        guard pendingInitialPlaybackRequestID == requestID else { return }
+        initialPlaybackPreparationTask?.cancel()
+        initialPlaybackPreparationTask = nil
+        pendingInitialPlaybackRequestID = nil
+        readyInitialPlaybackRequestID = nil
+        isPreparingInitialPlayback = false
+        initialPlaybackPreparationError = nil
+        onInitialPlaybackRequestConsumed?(requestID)
     }
 
     private func submitMdbListRating(_ rating: Int?) {
@@ -574,7 +674,7 @@ struct DetailsScreen: View {
 
                 if debrid.isEnabled,
                    SmartPlaybackSelector.effectiveCachedOnly(true, contentType: meta.type) {
-                    return tags.isCached && res >= targetRes
+                    return (stream.isLikelyCached || tags.isCached) && res >= targetRes
                 }
                 return res >= targetRes
             }()
@@ -2019,7 +2119,7 @@ enum SmartPlaybackSelector {
             let qualityScore = score(resolution: resolution, preference: qualityPreference)
             let featureScore = featureBoost(tags: tags, preference: qualityPreference)
             let resumeScore = preferredTags.map { tags.matchScore(against: $0) } ?? 0
-            let cachedBoost = tags.isCached ? 15_000 : 0
+            let cachedBoost = (stream.isLikelyCached || tags.isCached) ? 15_000 : 0
             let lowQualityPenalty: Int = {
                 if isLowQualityOrTicketStream(stream) || resolution == 0 {
                     return -300_000
@@ -2548,6 +2648,8 @@ private enum TvDetailsFocusSection: Hashable {
 
 struct TvDetailsContent: View {
     let uiState: DetailsUiState
+    var initialPlayRequestID: UInt? = nil
+    var onInitialPlayRequestConsumed: ((UInt) -> Void)? = nil
     let onPlayClick: () -> Void
     var onPlayManually: (() -> Void)? = nil
     let onEpisodeSelected: (NuvioVideo) -> Void
@@ -2574,6 +2676,7 @@ struct TvDetailsContent: View {
     /// The section that currently owns focus. Other sections expose only their
     /// remembered entry anchor, matching Settings' pre-spatial focus lock.
     @State private var focusedDetailsSection: TvDetailsFocusSection = .actions
+    @State private var consumedInitialPlayRequestID: UInt?
     @State private var detailsFocusMoveGeneration = 0
     @State private var pendingPlayFocusGeneration: Int?
     /// Episode control to re-focus once the stream picker closes, captured when
@@ -2605,16 +2708,19 @@ struct TvDetailsContent: View {
     @State private var reentryProgressRefreshPending = false
     @StateObject private var episodeCache = TvDetailsEpisodeCache()
 
-    private func isBackgroundTrailerAllowed(hasHandoff: Bool) -> Bool {
-        guard trailersEnabled && !didStopTrailerManually && isEnabled else { return false }
-        return backgroundTrailersEnabled || hasHandoff
+    private func isBackgroundTrailerAllowed(hasHandoff: Bool = false) -> Bool {
+        guard trailersEnabled && backgroundTrailersEnabled && !didStopTrailerManually && isEnabled else { return false }
+        return true
     }
 
     private func scheduleBackgroundTrailer(for meta: NuvioMeta) {
         trailerTask?.cancel()
         let handoff = TrailerPlaybackHandoff.shared.takeHandoff(for: meta.id)
         let hasHandoff = handoff != nil
-        guard isBackgroundTrailerAllowed(hasHandoff: hasHandoff) else { return }
+        guard isBackgroundTrailerAllowed(hasHandoff: hasHandoff) else {
+            stopBackgroundTrailer(manual: false)
+            return
+        }
 
         trailerTask = Task { @MainActor in
             if !hasHandoff {
@@ -2687,7 +2793,7 @@ struct TvDetailsContent: View {
             isFullscreenTrailerPresented = false
         }
         applySoundPreference(trailerPreviewSound)
-        if !backgroundTrailersEnabled && !trailersEnabled {
+        if !isBackgroundTrailerAllowed() {
             stopBackgroundTrailer(manual: false)
         }
         DispatchQueue.main.async {
@@ -2889,7 +2995,7 @@ struct TvDetailsContent: View {
                 progressRevision: progressRevision,
                 continueItemProvider: { currentContinueWatchingItem(for: meta) },
                 playTargetBuilder: { episodes, continueItem, watchedKeys in
-                    makePlayTarget(
+                    TvDetailsPlayTargetBuilder.makePlayTarget(
                         episodes: episodes,
                         continueItem: continueItem,
                         watchedKeys: watchedKeys
@@ -3331,6 +3437,15 @@ struct TvDetailsContent: View {
             ) { _ in
                 progressRevision &+= 1
             }
+            #if os(tvOS)
+            .onChange(of: initialPlayRequestID, initial: true) { _, requestID in
+                guard let requestID,
+                      consumedInitialPlayRequestID != requestID else { return }
+                consumedInitialPlayRequestID = requestID
+                onInitialPlayRequestConsumed?(requestID)
+                handlePlayClick(playTarget: playTarget)
+            }
+            #endif
         } else {
             EmptyView()
         }
@@ -3441,84 +3556,6 @@ struct TvDetailsContent: View {
     // Give series more horizontal room so the episode cards aren't cramped.
     private func detailsWidth(_ proxy: GeometryProxy, hasEpisodes: Bool) -> CGFloat {
         hasEpisodes ? min(proxy.size.width - 96, 2200) : min(proxy.size.width * 0.64, 1180)
-    }
-
-    private func firstPlayableEpisode(_ episodes: [NuvioVideo]) -> NuvioVideo? {
-        // Prefer a real season over season 0 specials.
-        episodes.first(where: { $0.season > 0 }) ?? episodes.first
-    }
-
-    /// Primary-button target: resume the in-progress episode, advance to the
-    /// next one after a finished episode, or start from the first playable one.
-    /// Movies have no episode; the label alone flips between Play and Resume.
-    private func makePlayTarget(
-        episodes: [NuvioVideo],
-        continueItem: ContinueWatchingItem?,
-        watchedKeys: Set<String>
-    ) -> TvDetailsPlayTarget {
-        guard !episodes.isEmpty else {
-            return TvDetailsPlayTarget(
-                episode: nil,
-                label: continueItem == nil
-                    ? L10n.string("action_play", fallback: "Play")
-                    : L10n.string("action_resume", fallback: "Resume"),
-                isPlayable: true
-            )
-        }
-
-        if let continueItem,
-           let numbers = continueItem.episodeNumbers,
-           let target = episodes.first(where: { $0.season == numbers.season && $0.episode == numbers.episode }) {
-            if continueItem.isUpNextEntry, !continueItem.hasAired {
-                let label = continueItem.airDateText.map { L10n.format("details_airs_date", fallback: "Airs %@", $0) } ?? L10n.string("details_upcoming", fallback: "Upcoming")
-                return TvDetailsPlayTarget(episode: target, label: label, isPlayable: false)
-            }
-            let verb = continueItem.isUpNextEntry ? L10n.string("details_next", fallback: "Next") : L10n.string("action_resume", fallback: "Resume")
-            return TvDetailsPlayTarget(
-                episode: target,
-                label: "\(verb) S\(target.season) E\(target.episode)",
-                isPlayable: true
-            )
-        }
-
-        // No progress entry (e.g. the episode just finished): continue with the
-        // episode after the furthest completed/watched episode, ignoring earlier skipped episodes.
-        let watched = watchedKeys
-        if !watched.isEmpty {
-            let watchedPairs: [(season: Int, episode: Int)] = watched.compactMap { key in
-                let parts = key.split(separator: ":").compactMap { Int($0) }
-                guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return nil }
-                return (parts[0], parts[1])
-            }
-            if let latestWatched = watchedPairs.max(by: { ($0.season, $0.episode) < ($1.season, $1.episode) }),
-               let next = episodes.first(where: {
-                   $0.season > 0
-                       && ($0.season, $0.episode) > (latestWatched.season, latestWatched.episode)
-                       && !watched.contains("\($0.season):\($0.episode)")
-               }) {
-                let verb = EpisodeReleasePolicy.hasAired(next.released) ? L10n.string("details_next", fallback: "Next") : L10n.string("details_upcoming", fallback: "Upcoming")
-                return TvDetailsPlayTarget(
-                    episode: next,
-                    label: "\(verb) S\(next.season) E\(next.episode)",
-                    isPlayable: EpisodeReleasePolicy.hasAired(next.released)
-                )
-            }
-            if let firstUnwatched = episodes.first(where: { $0.season > 0 && !watched.contains("\($0.season):\($0.episode)") }) {
-                return TvDetailsPlayTarget(
-                    episode: firstUnwatched,
-                    label: "\(L10n.string("details_next", fallback: "Next")) S\(firstUnwatched.season) E\(firstUnwatched.episode)",
-                    isPlayable: true
-                )
-            }
-        }
-
-        let first = firstPlayableEpisode(episodes)
-        return TvDetailsPlayTarget(
-            episode: first,
-            label: first.map { "\(L10n.string("action_play", fallback: "Play")) S\($0.season) E\($0.episode)" }
-                ?? L10n.string("action_play", fallback: "Play"),
-            isPlayable: true
-        )
     }
 
     private func currentContinueWatchingItem(
@@ -4991,7 +5028,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
                         showControls = true
                     }
                     focusedControl = .timeline
-                    scheduleControlsHide()
+                    scheduleControlsHide(after: 5.0)
                 } label: {
                     Color.clear
                 }
@@ -5004,7 +5041,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
                         showControls = true
                     }
                     focusedControl = .timeline
-                    scheduleControlsHide()
+                    scheduleControlsHide(after: 5.0)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -5017,7 +5054,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
                         Spacer()
                         bottomControls
                     }
-                    .onExitCommand(perform: onDismiss)
+                    .onExitCommand(perform: handleControlsExit)
                 }
                 .background(
                     LinearGradient(
@@ -5045,23 +5082,32 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
                 onTrailerReady()
             }
             showControls = true
-            scheduleControlsHide()
+            scheduleControlsHide(after: 5.0)
             DispatchQueue.main.async {
                 focusedControl = .timeline
             }
         }
+        .onChange(of: isPlaying) { _, playing in
+            if playing && showControls && !controlsAutoHideSuspended {
+                scheduleControlsHide(after: focusedControl == .timeline ? 5.0 : 10.0)
+            }
+        }
+        .onChange(of: isSurfaceReady) { _, ready in
+            if ready && showControls && isPlaying && !controlsAutoHideSuspended {
+                scheduleControlsHide(after: focusedControl == .timeline ? 5.0 : 10.0)
+            }
+        }
         .onChange(of: focusedControl) { oldControl, newControl in
-            let onTimeline = (newControl == .timeline)
-            if onTimeline {
+            if newControl == .timeline {
                 controlsAutoHideSuspended = false
                 scheduleControlsHide(after: 5.0)
             } else if newControl == .subtitles || newControl == .audio {
-                controlsAutoHideSuspended = true
-                controlsHideTask?.cancel()
+                controlsAutoHideSuspended = false
+                scheduleControlsHide(after: 10.0)
             } else if newControl != nil {
                 controlsAutoHideSuspended = false
                 scheduleControlsHide(after: 10.0)
-            } else if let old = oldControl, old == .subtitles || old == .audio {
+            } else {
                 controlsAutoHideSuspended = true
                 controlsHideTask?.cancel()
             }
@@ -5069,7 +5115,13 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
         .onDisappear {
             teardownTimeObserver()
         }
-        .onExitCommand(perform: onDismiss)
+        .onExitCommand {
+            if showControls {
+                handleControlsExit()
+            } else {
+                onDismiss()
+            }
+        }
         .onPlayPauseCommand(perform: togglePlayPause)
         .onReceive(
             NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime).receive(on: RunLoop.main)
@@ -5154,6 +5206,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
             .equatable()
             .focused($focusedControl, equals: .subtitles)
             .disabled(!isTransportButtonFocusable(.subtitles))
+            .onExitCommand(perform: handleControlsExit)
             .onMoveCommand { direction in
                 handleMove(direction, from: .subtitles)
             }
@@ -5168,10 +5221,12 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
             .equatable()
             .focused($focusedControl, equals: .audio)
             .disabled(!isTransportButtonFocusable(.audio))
+            .onExitCommand(perform: handleControlsExit)
             .onMoveCommand { direction in
                 handleMove(direction, from: .audio)
             }
         }
+        .onExitCommand(perform: handleControlsExit)
         .shadow(color: .black.opacity(0.74), radius: 20, x: 0, y: 8)
     }
 
@@ -5185,7 +5240,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
     ) -> some View {
         Button {
             focusedControl = focusKey
-            scheduleControlsHide()
+            scheduleControlsHide(after: 10.0)
             action()
         } label: {
             icon()
@@ -5202,7 +5257,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
         .focused($focusedControl, equals: focusKey)
         .disabled(!isTransportButtonFocusable(focusKey))
         .nuvioFocusEffectDisabledIfAvailable()
-        .onExitCommand(perform: onDismiss)
+        .onExitCommand(perform: handleControlsExit)
         .onMoveCommand { direction in
             handleMove(direction, from: focusKey)
         }
@@ -5285,7 +5340,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
         .focusable(showControls)
         .focused($focusedControl, equals: .timeline)
         .nuvioFocusEffectDisabledIfAvailable()
-        .onExitCommand(perform: onDismiss)
+        .onExitCommand(perform: handleControlsExit)
         .onTapGesture {
             if pendingSeekDelta != 0 {
                 commitPendingSeek()
@@ -5304,7 +5359,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
     // MARK: - Actions & Focus Navigation
 
     private func handleMove(_ direction: MoveCommandDirection, from origin: TvDetailsTrailerControlFocus) {
-        scheduleControlsHide()
+        scheduleControlsHide(after: origin == .timeline ? 5.0 : 10.0)
         switch direction {
         case .up:
             if origin == .timeline {
@@ -5332,7 +5387,7 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
     }
 
     private func handleSeekStep(delta: Double) {
-        scheduleControlsHide()
+        scheduleControlsHide(after: 5.0)
         let current = player.currentTime().seconds
         guard !current.isNaN, !current.isInfinite else { return }
         let baseTime = current + pendingSeekDelta
@@ -5379,12 +5434,12 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 showControls = true
             }
-            scheduleControlsHide()
+            scheduleControlsHide(after: focusedControl == .timeline ? 5.0 : 10.0)
         }
     }
 
     private func togglePictureInPicture() {
-        scheduleControlsHide()
+        scheduleControlsHide(after: 10.0)
         guard let pipController else { return }
         if pipController.isPictureInPictureActive {
             pipController.stopPictureInPicture()
@@ -5473,12 +5528,38 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
         scheduleControlsHide(after: 10.0)
     }
 
+    private func handleControlsExit() {
+        if pendingSeekDelta != 0 {
+            cancelPendingSeek()
+            scheduleControlsHide(after: 5.0)
+        } else {
+            hideControls()
+        }
+    }
+
+    private func cancelPendingSeek() {
+        seekDebounceTask?.cancel()
+        seekDebounceTask = nil
+        pendingSeekDelta = 0
+    }
+
+    private func hideControls() {
+        controlsHideTask?.cancel()
+        controlsHideTask = nil
+        controlsAutoHideSuspended = false
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showControls = false
+        }
+    }
+
     private func scheduleControlsHide(after seconds: Double = 5.0) {
         controlsHideTask?.cancel()
-        guard isPlaying, !controlsAutoHideSuspended else { return }
+        guard !controlsAutoHideSuspended else { return }
         controlsHideTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            if !Task.isCancelled && isPlaying && pendingSeekDelta == 0 && !controlsAutoHideSuspended {
+            guard !Task.isCancelled, !controlsAutoHideSuspended, pendingSeekDelta == 0 else { return }
+            let playing = player.timeControlStatus == .playing || player.rate > 0
+            if playing {
                 withAnimation(.easeInOut(duration: 0.25)) {
                     showControls = false
                 }
@@ -5513,7 +5594,9 @@ private struct TvDetailsFullscreenTrailerOverlay: View {
                 }
             }
             let playing = player.timeControlStatus == .playing || player.rate > 0
-            isPlaying = playing
+            if isPlaying != playing {
+                isPlaying = playing
+            }
             if playing && !isSurfaceReady {
                 withAnimation(.easeOut(duration: 0.2)) {
                     isSurfaceReady = true
@@ -5734,24 +5817,19 @@ private struct TvEpisodeGuide {
         self.metaID = metaID
         self.revision = revision
 
-        let ordered = videos.sorted {
-            (Self.seasonSortKey($0.season), $0.episode)
-                < (Self.seasonSortKey($1.season), $1.episode)
-        }
+        let ordered = TvDetailsPlayTargetBuilder.orderedEpisodes(videos)
         var grouped: [Int: [NuvioVideo]] = [:]
+        var orderedSeasons: [Int] = []
         for episode in ordered {
+            if grouped[episode.season] == nil {
+                orderedSeasons.append(episode.season)
+            }
             grouped[episode.season, default: []].append(episode)
         }
 
         episodes = ordered
         episodesBySeason = grouped
-        seasons = grouped.keys.sorted {
-            (Self.seasonSortKey($0), $0) < (Self.seasonSortKey($1), $1)
-        }
-    }
-
-    private static func seasonSortKey(_ season: Int) -> Int {
-        season <= 0 ? Int.max : season
+        seasons = orderedSeasons
     }
 
     func defaultSeason() -> Int {
@@ -5785,10 +5863,98 @@ private struct TvEpisodeGuide {
     }
 }
 
-private struct TvDetailsPlayTarget {
+struct TvDetailsPlayTarget {
     let episode: NuvioVideo?
     let label: String
     let isPlayable: Bool
+}
+
+enum TvDetailsPlayTargetBuilder {
+    static func orderedEpisodes(_ videos: [NuvioVideo]) -> [NuvioVideo] {
+        videos.sorted {
+            (seasonSortKey($0.season), $0.episode)
+                < (seasonSortKey($1.season), $1.episode)
+        }
+    }
+
+    static func makePlayTarget(
+        episodes: [NuvioVideo],
+        continueItem: ContinueWatchingItem?,
+        watchedKeys: Set<String>
+    ) -> TvDetailsPlayTarget {
+        guard !episodes.isEmpty else {
+            return TvDetailsPlayTarget(
+                episode: nil,
+                label: continueItem == nil
+                    ? L10n.string("action_play", fallback: "Play")
+                    : L10n.string("action_resume", fallback: "Resume"),
+                isPlayable: true
+            )
+        }
+
+        if let continueItem,
+           let numbers = continueItem.episodeNumbers,
+           let target = episodes.first(where: { $0.season == numbers.season && $0.episode == numbers.episode }) {
+            if continueItem.isUpNextEntry, !continueItem.hasAired {
+                let label = continueItem.airDateText.map { L10n.format("details_airs_date", fallback: "Airs %@", $0) }
+                    ?? L10n.string("details_upcoming", fallback: "Upcoming")
+                return TvDetailsPlayTarget(episode: target, label: label, isPlayable: false)
+            }
+            let verb = continueItem.isUpNextEntry
+                ? L10n.string("details_next", fallback: "Next")
+                : L10n.string("action_resume", fallback: "Resume")
+            return TvDetailsPlayTarget(
+                episode: target,
+                label: "\(verb) S\(target.season) E\(target.episode)",
+                isPlayable: true
+            )
+        }
+
+        let watched = watchedKeys
+        if !watched.isEmpty {
+            let watchedPairs: [(season: Int, episode: Int)] = watched.compactMap { key in
+                let parts = key.split(separator: ":").compactMap { Int($0) }
+                guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return nil }
+                return (parts[0], parts[1])
+            }
+            if let latestWatched = watchedPairs.max(by: { ($0.season, $0.episode) < ($1.season, $1.episode) }),
+               let next = episodes.first(where: {
+                   $0.season > 0
+                       && ($0.season, $0.episode) > (latestWatched.season, latestWatched.episode)
+                       && !watched.contains("\($0.season):\($0.episode)")
+               }) {
+                let verb = EpisodeReleasePolicy.hasAired(next.released)
+                    ? L10n.string("details_next", fallback: "Next")
+                    : L10n.string("details_upcoming", fallback: "Upcoming")
+                return TvDetailsPlayTarget(
+                    episode: next,
+                    label: "\(verb) S\(next.season) E\(next.episode)",
+                    isPlayable: EpisodeReleasePolicy.hasAired(next.released)
+                )
+            }
+            if let firstUnwatched = episodes.first(where: {
+                $0.season > 0 && !watched.contains("\($0.season):\($0.episode)")
+            }) {
+                return TvDetailsPlayTarget(
+                    episode: firstUnwatched,
+                    label: "\(L10n.string("details_next", fallback: "Next")) S\(firstUnwatched.season) E\(firstUnwatched.episode)",
+                    isPlayable: true
+                )
+            }
+        }
+
+        let first = episodes.first(where: { $0.season > 0 }) ?? episodes.first
+        return TvDetailsPlayTarget(
+            episode: first,
+            label: first.map { "\(L10n.string("action_play", fallback: "Play")) S\($0.season) E\($0.episode)" }
+                ?? L10n.string("action_play", fallback: "Play"),
+            isPlayable: true
+        )
+    }
+
+    private static func seasonSortKey(_ season: Int) -> Int {
+        season <= 0 ? Int.max : season
+    }
 }
 
 private struct TvDetailsEpisodeInitialState {
@@ -5797,6 +5963,7 @@ private struct TvDetailsEpisodeInitialState {
     let seasonEpisodeIndexByID: [String: Int]
     let episodeScrollIndex: Int
     let watchedEpisodeKeys: Set<String>
+    let episodeWatchCounts: [String: Int]
     let watchedSummary: WatchedEpisodeSummary?
     let seasonIsWatched: Bool
 }
@@ -5847,7 +6014,9 @@ private final class TvDetailsEpisodeCache: ObservableObject {
                 ? TvEpisodeGuide(metaID: input.metaID, videos: input.videos, revision: guideRevision)
                 : presentation!.guide
             let continueItem = continueItemProvider()
-            let watchedKeys = WatchedStore.watchedEpisodeKeys(meta: meta)
+            let watchedSnapshot = WatchedStore.currentSnapshot()
+            let watchedKeys = watchedSnapshot.watchedEpisodeKeys(meta: meta)
+            let episodeWatchCounts = watchedSnapshot.catalogEpisodeWatchCounts(meta: meta)
             let initialEpisode = guide.initialEpisode(
                 continueItem: continueItem,
                 watchedKeys: watchedKeys
@@ -5869,6 +6038,7 @@ private final class TvDetailsEpisodeCache: ObservableObject {
                 seasonEpisodeIndexByID: seasonEpisodeIndexByID,
                 episodeScrollIndex: episodeScrollIndex,
                 watchedEpisodeKeys: watchedKeys,
+                episodeWatchCounts: episodeWatchCounts,
                 watchedSummary: WatchedEpisodeSummary.make(
                     videos: guide.episodes,
                     watchedEpisodeKeys: watchedKeys
@@ -5922,6 +6092,7 @@ private struct TvDetailsEpisodes: View {
     @State private var seasonEpisodeIndexByID: [String: Int]
     @State private var episodeScrollIndex: Int
     @State private var watchedEpisodeKeys: Set<String>
+    @State private var episodeWatchCounts: [String: Int]
     @State private var watchedSummary: WatchedEpisodeSummary?
     @State private var seasonIsWatched: Bool
     @State private var userDidSelectSeason = false
@@ -5967,6 +6138,7 @@ private struct TvDetailsEpisodes: View {
         _seasonEpisodeIndexByID = State(initialValue: initialState.seasonEpisodeIndexByID)
         _episodeScrollIndex = State(initialValue: initialState.episodeScrollIndex)
         _watchedEpisodeKeys = State(initialValue: initialState.watchedEpisodeKeys)
+        _episodeWatchCounts = State(initialValue: initialState.episodeWatchCounts)
         _watchedSummary = State(initialValue: initialState.watchedSummary)
         _seasonIsWatched = State(initialValue: initialState.seasonIsWatched)
     }
@@ -5994,7 +6166,10 @@ private struct TvDetailsEpisodes: View {
             if oldRevision.selection != newRevision.selection {
                 refreshEpisodeGuideState()
             } else {
-                refreshWatchedState(using: initialState.watchedEpisodeKeys)
+                refreshWatchedState(
+                    using: initialState.watchedEpisodeKeys,
+                    episodeWatchCounts: initialState.episodeWatchCounts
+                )
             }
         }
         .onChange(of: selectedSeason) { _, newSeason in
@@ -6005,6 +6180,7 @@ private struct TvDetailsEpisodes: View {
     private func refreshEpisodeGuideState() {
         let watchedKeys = initialState.watchedEpisodeKeys
         watchedEpisodeKeys = watchedKeys
+        episodeWatchCounts = initialState.episodeWatchCounts
         watchedSummary = initialState.watchedSummary
         if !userDidSelectSeason || !episodeGuide.seasons.contains(selectedSeason) {
             selectedSeason = initialState.selectedSeason
@@ -6019,12 +6195,19 @@ private struct TvDetailsEpisodes: View {
     }
 
     private func refreshWatchedState() {
-        let watchedKeys = WatchedStore.watchedEpisodeKeys(meta: meta)
-        refreshWatchedState(using: watchedKeys)
+        let snapshot = WatchedStore.currentSnapshot()
+        refreshWatchedState(
+            using: snapshot.watchedEpisodeKeys(meta: meta),
+            episodeWatchCounts: snapshot.catalogEpisodeWatchCounts(meta: meta)
+        )
     }
 
-    private func refreshWatchedState(using watchedKeys: Set<String>) {
+    private func refreshWatchedState(
+        using watchedKeys: Set<String>,
+        episodeWatchCounts: [String: Int]
+    ) {
         watchedEpisodeKeys = watchedKeys
+        self.episodeWatchCounts = episodeWatchCounts
         watchedSummary = WatchedEpisodeSummary.make(
             videos: episodeGuide.episodes,
             watchedEpisodeKeys: watchedKeys
@@ -6121,11 +6304,15 @@ private struct TvDetailsEpisodes: View {
             HStack(alignment: .bottom, spacing: TvEpisodeCardLayout.spacing) {
                 ForEach(materializedEpisodes) { video in
                     let itemIndex = seasonEpisodeIndexByID[video.id] ?? 0
+                    let watchKey = "\(video.season):\(video.episode)"
+                    let episodeWatchCount = episodeWatchCounts[watchKey]
+                        ?? (watchedEpisodeKeys.contains(watchKey) ? 1 : 0)
                     TvEpisodeCard(
                         video: video,
                         fallbackRating: seriesRating,
                         continueProgress: continueProgress(for: video),
-                        isWatched: watchedEpisodeKeys.contains("\(video.season):\(video.episode)"),
+                        isWatched: watchedEpisodeKeys.contains(watchKey),
+                        watchCount: episodeWatchCount,
                         isSeasonWatched: isSeasonWatched,
                         onFocus: {
                             episodeScrollIndex = itemIndex
@@ -6307,6 +6494,7 @@ private struct TvEpisodeCard: View {
     let fallbackRating: Double?
     let continueProgress: Double?
     let isWatched: Bool
+    let watchCount: Int
     let isSeasonWatched: Bool
     let onFocus: () -> Void
     let onToggleWatched: () -> Void
@@ -6445,8 +6633,8 @@ private struct TvEpisodeCard: View {
                     )
                 )
                 .overlay(alignment: .topTrailing) {
-                    if isWatched {
-                        WatchedCheckmarkIcon()
+                    if watchCount > 0 {
+                        WatchedCheckmarkIcon(watchCount: watchCount)
                     }
                 }
                 .overlay(

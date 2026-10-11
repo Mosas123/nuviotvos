@@ -407,13 +407,7 @@ struct PosterCard: View {
             }
             .overlay(alignment: .topTrailing) {
                 if showsWatchedBadge {
-                    if let isWatched {
-                        if isWatched {
-                            WatchedCheckmarkIcon()
-                        }
-                    } else {
-                        WatchedCheckmarkBadge(meta: meta)
-                    }
+                    WatchedCheckmarkBadge(meta: meta)
                 }
             }
             // Mask the complete card interior after composing both the trailer
@@ -1083,21 +1077,24 @@ struct TrailerPlayerSurface: UIViewRepresentable {
     }
 }
 
-/// Video preview for a settled, landscape Home card. The player is
-/// created only after the configured trailer delay and is released as soon as
-/// focus leaves, so scrolling never leaves background trailer audio or decoders.
-private struct TrailerPreviewPlayer: View {
+/// Shared video preview for Home cards and the focused Grid hero.
+struct TrailerPreviewPlayer: View {
     let meta: NuvioMeta
     /// Resolution begins as soon as the card gains focus; playback waits for
     /// Home's configured delay to promote the card to landscape.
     let isActive: Bool
     let onPlaybackReady: () -> Void
     let onPlaybackFinished: () -> Void
+    var onPlaybackProgress: ((Double, Double) -> Void)? = nil
+    var onPlaybackUnavailable: (() -> Void)? = nil
 
     @State private var player = AVPlayer()
     @State private var isRenderReady = false
     @State private var currentPlaybackSource: TrailerPlaybackSource?
     @State private var timeObserverToken: Any?
+    @State private var itemStatusObserver: NSKeyValueObservation?
+    @State private var failedToEndObserver: NSObjectProtocol?
+    @State private var didReportUnavailable = false
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
     private let resolver = YouTubeTrailerResolver.shared
 
@@ -1140,6 +1137,7 @@ private struct TrailerPreviewPlayer: View {
         .onDisappear {
             isRenderReady = false
             cleanupTimeObserver()
+            cleanupFailureObservers()
             let seconds = player.currentTime().seconds
             if seconds > 0.1 && !seconds.isNaN && !seconds.isInfinite {
                 TrailerPlaybackHandoff.shared.recordHandoff(
@@ -1161,12 +1159,22 @@ private struct TrailerPreviewPlayer: View {
         isActive && isRenderReady
     }
 
+    @MainActor
     private func startPreview() async {
         isRenderReady = false
+        didReportUnavailable = false
 
-        guard let playbackSource = await resolver.resolvePreview(for: meta),
-              let url = URL(string: playbackSource.videoUrl),
-              !Task.isCancelled else {
+        guard let playbackSource = await resolver.resolvePreview(for: meta) else {
+            guard !Task.isCancelled else { return }
+            reportPlaybackUnavailable()
+            return
+        }
+        guard let url = URL(string: playbackSource.videoUrl) else {
+            guard !Task.isCancelled else { return }
+            reportPlaybackUnavailable()
+            return
+        }
+        guard !Task.isCancelled else {
             return
         }
 
@@ -1186,6 +1194,7 @@ private struct TrailerPreviewPlayer: View {
         item.preferredPeakBitRate = 0
         item.preferredMaximumResolution = .zero
         player.replaceCurrentItem(with: item)
+        observePlaybackFailure(for: item)
         applySoundPreference(trailerPreviewSound)
         setupTimeObserver()
         if isActive {
@@ -1197,19 +1206,56 @@ private struct TrailerPreviewPlayer: View {
         cleanupTimeObserver()
         let metaId = meta.id
         let source = currentPlaybackSource
+        let previewPlayer = player
+        let progressCallback = onPlaybackProgress
         timeObserverToken = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main
         ) { time in
             let seconds = time.seconds
-            if seconds > 0.1 && !seconds.isNaN && !seconds.isInfinite {
+            let duration = progressCallback == nil
+                ? .nan
+                : previewPlayer.currentItem?.duration.seconds ?? .nan
+            let shouldReportProgress = progressCallback != nil && seconds.isFinite && seconds >= 0
+                && duration.isFinite && duration > 0
+            let shouldRecordHandoff = seconds > 0.1 && seconds.isFinite
+            if shouldReportProgress || shouldRecordHandoff {
                 MainActor.assumeIsolated {
-                    TrailerPlaybackHandoff.shared.recordHandoff(
-                        metaId: metaId,
-                        time: seconds,
-                        playbackSource: source
-                    )
+                    if shouldReportProgress {
+                        progressCallback?(seconds, duration)
+                    }
+                    if shouldRecordHandoff {
+                        TrailerPlaybackHandoff.shared.recordHandoff(
+                            metaId: metaId,
+                            time: seconds,
+                            playbackSource: source
+                        )
+                    }
                 }
+            }
+        }
+    }
+
+    private func observePlaybackFailure(for item: AVPlayerItem) {
+        guard onPlaybackUnavailable != nil else { return }
+        itemStatusObserver?.invalidate()
+        let previewPlayer = player
+        itemStatusObserver = item.observe(\.status, options: [.initial, .new]) { observedItem, _ in
+            guard observedItem.status == .failed else { return }
+            Task { @MainActor in
+                guard observedItem == previewPlayer.currentItem else { return }
+                self.reportPlaybackUnavailable()
+            }
+        }
+        failedToEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { notification in
+            guard let failedItem = notification.object as? AVPlayerItem,
+                  failedItem == previewPlayer.currentItem else { return }
+            Task { @MainActor in
+                self.reportPlaybackUnavailable()
             }
         }
     }
@@ -1219,6 +1265,22 @@ private struct TrailerPreviewPlayer: View {
             player.removeTimeObserver(token)
             timeObserverToken = nil
         }
+    }
+
+    private func cleanupFailureObservers() {
+        itemStatusObserver?.invalidate()
+        itemStatusObserver = nil
+        if let failedToEndObserver {
+            NotificationCenter.default.removeObserver(failedToEndObserver)
+            self.failedToEndObserver = nil
+        }
+    }
+
+    @MainActor
+    private func reportPlaybackUnavailable() {
+        guard let onPlaybackUnavailable, !didReportUnavailable else { return }
+        didReportUnavailable = true
+        onPlaybackUnavailable()
     }
 
     private func applySoundPreference(_ soundEnabled: Bool) {
@@ -1305,11 +1367,7 @@ struct PosterGridCard: View {
                 )
             )
             .overlay(alignment: .topTrailing) {
-                if let isWatched {
-                    if isWatched { WatchedCheckmarkIcon() }
-                } else {
-                    WatchedCheckmarkBadge(meta: meta)
-                }
+                WatchedCheckmarkBadge(meta: meta)
             }
             .overlay(
                 shape.stroke(
@@ -2225,7 +2283,7 @@ final class CatalogWatchedMetadataCache {
     private let repository = CinemetaCatalogRepository()
     private var metadataByKey: [String: NuvioMeta] = [:]
     private var inFlightByKey: [String: Task<NuvioMeta?, Never>] = [:]
-    private var decisionsByKey: [String: Bool] = [:]
+    private var decisionsByKey: [String: Int] = [:]
 
     init() {
         NotificationCenter.default.addObserver(
@@ -2239,12 +2297,12 @@ final class CatalogWatchedMetadataCache {
         }
     }
 
-    func cachedDecision(for key: String) -> Bool? {
+    func cachedDecision(for key: String) -> Int? {
         decisionsByKey[key]
     }
 
-    func setDecision(_ isWatched: Bool, for key: String) {
-        decisionsByKey[key] = isWatched
+    func setDecision(_ watchCount: Int, for key: String) {
+        decisionsByKey[key] = max(0, watchCount)
     }
 
     func fullMetadata(metaId: String, type: String, preview: NuvioMeta?) async -> NuvioMeta? {
@@ -2274,22 +2332,83 @@ final class CatalogWatchedMetadataCache {
 
 struct WatchedCheckmarkIcon: View {
     var size: CGFloat = 38
+    var watchCount: Int = 1
+
+    private var presentation: WatchedCheckmarkPresentation {
+        WatchedCheckmarkPresentation(watchCount: watchCount)
+    }
 
     var body: some View {
-        Image(systemName: "checkmark")
-            .font(.system(size: size * 0.48, weight: .bold))
-            .foregroundColor(.white)
-            .frame(width: size, height: size)
-            .background(
-                Circle()
-                    .fill(Color(red: 0.10, green: 0.68, blue: 0.34))
+        Group {
+            switch presentation.content {
+            case .checkmark:
+                Image(systemName: "checkmark")
+                    .font(.system(size: size * 0.48, weight: .bold))
+            case let .count(count):
+                Text("\(count)")
+                    .font(.system(size: size * 0.43, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.48)
+                    .frame(width: size * 0.84, height: size)
+            }
+        }
+        .foregroundColor(.white)
+        .frame(width: size, height: size)
+        .background(
+            Circle()
+                .fill(Color(red: 0.10, green: 0.68, blue: 0.34))
+        )
+        .overlay(
+            Circle()
+                .stroke(Color.white.opacity(0.45), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+        .padding(12)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(presentation.accessibilityLabel)
+        .accessibilityHidden(watchCount <= 0)
+    }
+}
+
+struct WatchedCheckmarkPresentation: Equatable {
+    enum Content: Equatable {
+        case checkmark
+        case count(Int)
+    }
+
+    let content: Content
+
+    init(watchCount: Int) {
+        content = watchCount > 1 ? .count(watchCount) : .checkmark
+    }
+
+    var accessibilityLabel: String {
+        switch content {
+        case .checkmark:
+            return L10n.string("watched_accessibility", fallback: "Watched")
+        case let .count(count):
+            return L10n.format(
+                "watched_repeat_count_accessibility",
+                fallback: "Watched %d times",
+                count
             )
-            .overlay(
-                Circle()
-                    .stroke(Color.white.opacity(0.45), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-            .padding(12)
+        }
+    }
+}
+
+enum CatalogWatchedBadgeCountResolver {
+    static func movieWatchCount(
+        snapshot: WatchedSnapshot,
+        metaId: String,
+        type: String,
+        resolvedMeta: NuvioMeta? = nil
+    ) -> Int {
+        let identityMeta = NuvioMeta(id: metaId, name: "", type: type)
+        guard let resolvedMeta else {
+            return snapshot.watchCount(meta: identityMeta)
+        }
+        return snapshot.watchCount(meta: resolvedMeta, additionalMeta: identityMeta)
     }
 }
 
@@ -2299,7 +2418,7 @@ struct WatchedCheckmarkBadge: View {
     let meta: NuvioMeta?
     var size: CGFloat = 38
 
-    @State private var isWatched = false
+    @State private var watchCount = 0
     @State private var refreshVersion = 0
     @Environment(\.isEnabled) private var isEnabled
 
@@ -2320,10 +2439,10 @@ struct WatchedCheckmarkBadge: View {
     var body: some View {
         // Keep the badge mounted while unwatched. Search remains alive behind
         // the Details overlay, and an EmptyView branch can miss the store
-        // notification that should reveal the checkmark when Details closes.
-        WatchedCheckmarkIcon(size: size)
-            .opacity(isWatched ? 1 : 0)
-            .accessibilityHidden(!isWatched)
+        // notification that should reveal or update the count when Details closes.
+        WatchedCheckmarkIcon(size: size, watchCount: watchCount)
+            .opacity(watchCount > 0 ? 1 : 0)
+            .accessibilityHidden(watchCount <= 0)
             .task(id: refreshTaskIdentity) {
                 await refresh()
             }
@@ -2360,64 +2479,105 @@ struct WatchedCheckmarkBadge: View {
     @MainActor
     private func refresh() async {
         if let cached = CatalogWatchedMetadataCache.shared.cachedDecision(for: refreshIdentity) {
-            isWatched = cached
+            watchCount = cached
             return
         }
 
         let snapshot = WatchedStore.currentSnapshot()
         let isSeries = meta?.isSeries ?? NuvioMeta.isSeriesType(type)
+        let titleWasWatched = meta.map { snapshot.containsCatalogTitle(meta: $0) }
+            ?? snapshot.contains(metaId: metaId, type: type)
+
         guard isSeries else {
-            let result = meta.map { snapshot.contains(meta: $0) }
-                ?? snapshot.contains(metaId: metaId, type: type)
-            isWatched = result
+            if let meta {
+                let result = snapshot.watchCount(meta: meta)
+                watchCount = result
+                CatalogWatchedMetadataCache.shared.setDecision(result, for: refreshIdentity)
+                return
+            }
+
+            let knownCount = CatalogWatchedBadgeCountResolver.movieWatchCount(
+                snapshot: snapshot,
+                metaId: metaId,
+                type: type
+            )
+            watchCount = knownCount
+
+            guard titleWasWatched || knownCount > 0 else {
+                watchCount = 0
+                CatalogWatchedMetadataCache.shared.setDecision(0, for: refreshIdentity)
+                return
+            }
+
+            let fullMeta = await CatalogWatchedMetadataCache.shared.fullMetadata(
+                metaId: metaId,
+                type: type,
+                preview: nil
+            )
+            guard !Task.isCancelled else { return }
+
+            let result: Int
+            if let fullMeta {
+                let freshSnapshot = WatchedStore.currentSnapshot()
+                let resolvedCount = CatalogWatchedBadgeCountResolver.movieWatchCount(
+                    snapshot: freshSnapshot,
+                    metaId: metaId,
+                    type: type,
+                    resolvedMeta: fullMeta
+                )
+                result = max(resolvedCount, titleWasWatched ? 1 : 0)
+            } else {
+                result = max(knownCount, titleWasWatched ? 1 : 0)
+            }
+            watchCount = result
             CatalogWatchedMetadataCache.shared.setDecision(result, for: refreshIdentity)
             return
         }
 
-        if meta.map({ snapshot.containsCatalogTitle(meta: $0) })
-            ?? snapshot.contains(metaId: metaId, type: type) {
-            isWatched = true
-            CatalogWatchedMetadataCache.shared.setDecision(true, for: refreshIdentity)
+        // A whole-title marker is a legacy one-watch fallback, but episode
+        // counts can represent a higher completed-season repeat count. Resolve
+        // the guide before caching the fallback whenever episode history exists.
+        let previewEpisodeCounts = meta.map { snapshot.catalogEpisodeWatchCounts(meta: $0) } ?? [:]
+        let hasEpisodeHistory = !previewEpisodeCounts.isEmpty
+            || !snapshot.watchedEpisodeKeys(metaId: metaId).isEmpty
+        let previewCount = meta.map { snapshot.catalogWatchCount(meta: $0) } ?? 0
+
+        guard hasEpisodeHistory else {
+            let result = max(previewCount, titleWasWatched ? 1 : 0)
+            watchCount = result
+            CatalogWatchedMetadataCache.shared.setDecision(result, for: refreshIdentity)
             return
         }
 
-        // No watched episodes means this cannot be a completed series, and it
-        // also lets untouched catalog cards avoid a metadata network request.
-        let previewWatchedKeys = meta.map { snapshot.catalogWatchedEpisodeKeys(meta: $0) }
-            ?? snapshot.watchedEpisodeKeys(metaId: metaId)
-        guard !previewWatchedKeys.isEmpty else {
-            isWatched = false
-            CatalogWatchedMetadataCache.shared.setDecision(false, for: refreshIdentity)
-            return
+        let suppliedGuide = meta?.videos?.isEmpty == false
+        let fullMeta: NuvioMeta?
+        if suppliedGuide {
+            fullMeta = meta
+        } else {
+            fullMeta = await CatalogWatchedMetadataCache.shared.fullMetadata(
+                metaId: metaId,
+                type: type,
+                preview: meta
+            )
         }
-
-        // Search enrichment can carry the complete episode guide on the card.
-        // Resolve it synchronously from that already-loaded data instead of
-        // starting a second /meta request for every search result.
-        if let videos = meta?.videos,
-           CatalogWatchedPolicy.hasWatchedAllAiredEpisodes(
-               videos: videos,
-               watchedEpisodeKeys: previewWatchedKeys
-           ) {
-            isWatched = true
-            CatalogWatchedMetadataCache.shared.setDecision(true, for: refreshIdentity)
-            return
-        }
-
-        guard let fullMeta = await CatalogWatchedMetadataCache.shared.fullMetadata(
-            metaId: metaId,
-            type: type,
-            preview: meta
-        ), !Task.isCancelled else { return }
+        guard !Task.isCancelled else { return }
 
         let freshSnapshot = WatchedStore.currentSnapshot()
-        let resolved = freshSnapshot.containsCatalogTitle(meta: fullMeta)
-            || CatalogWatchedPolicy.hasWatchedAllAiredEpisodes(
-                videos: fullMeta.videos,
-                watchedEpisodeKeys: freshSnapshot.catalogWatchedEpisodeKeys(meta: fullMeta)
-            )
-        isWatched = resolved
-        CatalogWatchedMetadataCache.shared.setDecision(resolved, for: refreshIdentity)
+        let resolvedCount: Int
+        if let fullMeta, fullMeta.videos?.isEmpty == false {
+            resolvedCount = freshSnapshot.catalogWatchCount(meta: fullMeta)
+        } else if let meta {
+            // Preserve a model-derived count if metadata is unavailable; an
+            // explicit title watch still supplies the legacy checkmark.
+            resolvedCount = snapshot.catalogWatchCount(meta: meta)
+        } else {
+            resolvedCount = 0
+        }
+        let hasTitleMarker = (fullMeta.map { freshSnapshot.containsCatalogTitle(meta: $0) } ?? false)
+            || titleWasWatched
+        let result = max(resolvedCount, hasTitleMarker ? 1 : 0)
+        watchCount = result
+        CatalogWatchedMetadataCache.shared.setDecision(result, for: refreshIdentity)
     }
 }
 

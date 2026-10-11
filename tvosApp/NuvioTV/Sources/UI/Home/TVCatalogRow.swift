@@ -436,22 +436,6 @@ struct TVCatalogRow: View {
         return imageHeight + (posterLabels ? 48 : 0) + TVHomeLayout.stripVerticalPadding * 2
     }
 
-    private func isWatched(_ item: NuvioMeta) -> Bool? {
-        let titleWatched = !watchedTitleKeys.isDisjoint(
-            with: WatchedStore.catalogTitleIdentityKeys(for: item)
-        )
-        guard item.isSeries else {
-            return titleWatched
-        }
-        if titleWatched {
-            return true
-        }
-        if !WatchedStore.hasWatchedAnyEpisodes(for: item) {
-            return false
-        }
-        return nil
-    }
-
     private var defaultFocusCardKey: String? {
         if let initialFocusCardKey {
             if initialFocusCardKey.hasPrefix("\(id)\u{1}") {
@@ -616,8 +600,7 @@ struct TVCatalogRow: View {
                     focusHighlighterEnabled: rowFocusHighlighter,
                     retainFocusAppearance: retainFocusAppearanceForCardKey == cardKey,
                     allowsFocus: true,
-                    onMove: onMove,
-                    isWatched: isWatched(item)
+                    onMove: onMove
                 ) {
                     onSelect(item)
                 }
@@ -711,8 +694,7 @@ extension TVCatalogRow: Equatable {
             return false
         }
 
-        guard lhs.progressByItemId == rhs.progressByItemId,
-              lhs.watchedTitleKeys == rhs.watchedTitleKeys
+        guard lhs.progressByItemId == rhs.progressByItemId
         else {
             return false
         }
@@ -761,22 +743,6 @@ enum TVHomeGridLayout {
         )
     }
 
-    static func isWatched(_ item: NuvioMeta, watchedTitleKeys: Set<String>) -> Bool? {
-        let type = item.type.lowercased()
-        let titleWatched = !watchedTitleKeys.isDisjoint(
-            with: WatchedStore.catalogTitleIdentityKeys(for: item)
-        )
-        guard ["series", "tv", "show", "tvshow"].contains(type) else {
-            return titleWatched
-        }
-        if titleWatched {
-            return true
-        }
-        if !WatchedStore.hasWatchedAnyEpisodes(for: item) {
-            return false
-        }
-        return nil
-    }
 }
 
 struct TVHomeCatalogGridSection: View {
@@ -852,7 +818,6 @@ struct TVHomeCatalogGridSection: View {
                         externalFocus: externalFocus,
                         focusValue: cardKey,
                         retainFocusAppearance: (retainFocusAppearanceForCardKey ?? restrictFocusToCardKey) == cardKey,
-                        isWatched: TVHomeGridLayout.isWatched(item, watchedTitleKeys: watchedTitleKeys),
                         shouldRequestInitialFocus: shouldRequestInitialFocus,
                         onInitialFocusRequested: shouldRequestInitialFocus ? onInitialFocusRequested : nil,
                         onFocus: { onFocus($0) },

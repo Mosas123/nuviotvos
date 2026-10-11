@@ -12,6 +12,102 @@ final class HomeLayoutSettingsTests: XCTestCase {
         return try JSONDecoder().decode(NuvioMeta.self, from: data)
     }
 
+    func testWatchedBadgeUsesCheckmarkForFirstWatchAndCountsForRepeats() {
+        L10n.reload(languageTag: "en")
+
+        let firstWatch = WatchedCheckmarkPresentation(watchCount: 1)
+        XCTAssertEqual(firstWatch.content, .checkmark)
+        XCTAssertEqual(firstWatch.accessibilityLabel, "Watched")
+
+        let secondWatch = WatchedCheckmarkPresentation(watchCount: 2)
+        XCTAssertEqual(secondWatch.content, .count(2))
+        XCTAssertEqual(secondWatch.accessibilityLabel, "Watched 2 times")
+
+        let thirdWatch = WatchedCheckmarkPresentation(watchCount: 3)
+        XCTAssertEqual(thirdWatch.content, .count(3))
+        XCTAssertEqual(thirdWatch.accessibilityLabel, "Watched 3 times")
+
+        let doubleDigitCount = WatchedCheckmarkPresentation(watchCount: 12)
+        XCTAssertEqual(doubleDigitCount.content, .count(12))
+        XCTAssertEqual(doubleDigitCount.accessibilityLabel, "Watched 12 times")
+    }
+
+    @MainActor
+    func testWatchedBadgeDecisionCacheCanReplaceCheckmarkCountWithoutBooleanChange() {
+        let cache = CatalogWatchedMetadataCache.shared
+        let key = "badge-count-test-\(UUID().uuidString)"
+
+        cache.setDecision(1, for: key)
+        XCTAssertEqual(cache.cachedDecision(for: key), 1)
+
+        cache.setDecision(2, for: key)
+        XCTAssertEqual(cache.cachedDecision(for: key), 2)
+    }
+
+    func testIDOnlyMovieBadgePreservesKnownRepeatCountWithoutMetadata() throws {
+        let movie = try title("raw-movie-id")
+        let source = TraktWatchProgressSource.nuvioSync.rawValue
+        let snapshot = WatchedSnapshot(
+            items: [
+                WatchedStoreItem(
+                    meta: movie,
+                    watchedAt: Date(timeIntervalSince1970: 1),
+                    sources: [source],
+                    watchCountsBySource: [source: 2]
+                )
+            ],
+            source: .nuvioSync
+        )
+
+        let count = CatalogWatchedBadgeCountResolver.movieWatchCount(
+            snapshot: snapshot,
+            metaId: movie.id,
+            type: movie.type,
+            resolvedMeta: nil
+        )
+
+        XCTAssertEqual(count, 2)
+    }
+
+    func testIDOnlyMovieBadgeSelectsActiveCountAfterCombiningResolvedAliases() {
+        let rawMovie = NuvioMeta(id: "raw-movie-id", name: "Raw Movie", type: "movie")
+        let resolvedMovie = NuvioMeta(
+            id: "canonical-movie-id",
+            name: "Canonical Movie",
+            imdbId: "tt1234567",
+            type: "movie"
+        )
+        let trakt = TraktWatchProgressSource.trakt.rawValue
+        let nuvio = TraktWatchProgressSource.nuvioSync.rawValue
+        let snapshot = WatchedSnapshot(
+            items: [
+                WatchedStoreItem(
+                    meta: rawMovie,
+                    watchedAt: Date(timeIntervalSince1970: 1),
+                    sources: [trakt],
+                    watchCountsBySource: [trakt: 5]
+                ),
+                WatchedStoreItem(
+                    meta: resolvedMovie,
+                    watchedAt: Date(timeIntervalSince1970: 2),
+                    sources: [nuvio],
+                    watchCountsBySource: [nuvio: 2]
+                )
+            ],
+            source: .nuvioSync,
+            additionalVisibleSources: [.trakt]
+        )
+
+        let count = CatalogWatchedBadgeCountResolver.movieWatchCount(
+            snapshot: snapshot,
+            metaId: rawMovie.id,
+            type: rawMovie.type,
+            resolvedMeta: resolvedMovie
+        )
+
+        XCTAssertEqual(count, 2)
+    }
+
     private func activateHomeVisibilityProfile() -> (id: String, suite: UserDefaults) {
         let id = "home-visibility-\(UUID().uuidString)"
         let suiteName = "nuvio.tv.profile.settings.\(id)"

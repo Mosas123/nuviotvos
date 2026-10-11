@@ -22,6 +22,8 @@ class DetailsViewModel: ObservableObject {
     typealias EnrichmentStarter = @MainActor (NuvioMeta, UInt64) -> Void
 
     @Published private(set) var uiState = DetailsUiState()
+    private(set) var didLoadMetadataSuccessfully = false
+    private(set) var metadataLoadError: String?
 
     private let repository: CatalogRepository
     private let streamDiscoveryMode: DetailsStreamDiscoveryMode
@@ -56,6 +58,8 @@ class DetailsViewModel: ObservableObject {
     @discardableResult
     func loadDetails(id: String, type: String) -> Task<Void, Never> {
         TVHomeDebugTrace.log("details.load.begin id=\(id) type=\(type)")
+        didLoadMetadataSuccessfully = false
+        metadataLoadError = nil
         metadataTask?.cancel()
         deferredLoadTask?.cancel()
         streamObserveTask?.cancel()
@@ -94,6 +98,8 @@ class DetailsViewModel: ObservableObject {
                 let meta = try await repository.getMetadata(id: id, type: type)
                 guard !Task.isCancelled,
                       self.detailsRequestGeneration == requestGeneration else { return }
+                self.didLoadMetadataSuccessfully = true
+                self.metadataLoadError = nil
                 
                 let resolvedMeta = meta.preservingEnrichment(from: self.uiState.meta)
                 var primaryState = self.uiState
@@ -139,6 +145,8 @@ class DetailsViewModel: ObservableObject {
             } catch {
                 guard !Task.isCancelled,
                       self.detailsRequestGeneration == requestGeneration else { return }
+                self.didLoadMetadataSuccessfully = false
+                self.metadataLoadError = error.localizedDescription
                 if self.uiState.meta == nil {
                     self.uiState.isLoading = false
                     self.uiState.error = error.localizedDescription
