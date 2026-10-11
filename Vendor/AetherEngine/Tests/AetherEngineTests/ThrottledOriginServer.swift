@@ -33,10 +33,13 @@ final class ThrottledOriginServer: @unchecked Sendable {
         /// Audit DMX-5: a 206 that starts `start` rather than where it was asked, the way an edge
         /// that aligns ranges to its own chunk boundary answers. The body is that range's.
         case serve206From(start: Int64)
+        /// Audit DMX-101: a server that cannot address bytes. Whatever range was asked for, the
+        /// answer is a 200 with the whole source from byte 0 and its full Content-Length.
+        case serve200
     }
 
     let port: UInt16
-    private let listenFD: Int32
+    private let listener: LoopbackListener
     /// #551: a var only so a test can make the origin's stated total CHANGE between two requests,
     /// which is the one shape that proves the reader rechecks a warm's size against the connection
     /// that is actually serving it. Every other test leaves it at its init value.
@@ -158,42 +161,13 @@ final class ThrottledOriginServer: @unchecked Sendable {
         self.firstByteDelayUs = firstByteDelayUs
         self.respond = respond
 
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let bindResult = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
         // #450: a backlog of 4 is a ceiling of this harness's own, and the suite that reads
         // this origin's request log is measuring how many concurrent readers get on the link.
         // A harness that brings its own version of the cause cannot measure it.
-        guard bindResult == 0, listen(fd, 32) == 0 else {
-            close(fd)
-            return nil
-        }
-        var bound = sockaddr_in()
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let nameResult = withUnsafeMutablePointer(to: &bound) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                getsockname(fd, $0, &len)
-            }
-        }
-        guard nameResult == 0 else {
-            close(fd)
-            return nil
-        }
-        self.listenFD = fd
-        self.port = UInt16(bigEndian: bound.sin_port)
-
-        Thread.detachNewThread { [self] in acceptLoop() }
+        guard let listener = LoopbackListener(backlog: 32) else { return nil }
+        self.listener = listener
+        self.port = listener.port
+        listener.start { [self] fd in admit(fd) }
     }
 
     func stop() {
@@ -210,8 +184,7 @@ final class ThrottledOriginServer: @unchecked Sendable {
         for fd in fds { shutdown(fd, SHUT_RDWR) }
         lock.unlock()
         guard !alreadyStopped else { return }
-        shutdown(listenFD, SHUT_RDWR)
-        close(listenFD)
+        listener.stop()
     }
 
     /// The one place a connection fd is closed. Deregistering and closing under the lock is
@@ -223,23 +196,18 @@ final class ThrottledOriginServer: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func acceptLoop() {
-        while true {
-            let fd = accept(listenFD, nil, nil)
-            if fd < 0 { return }
-            var one: Int32 = 1
-            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-            lock.lock()
-            if _stopped {
-                lock.unlock()
-                shutdown(fd, SHUT_RDWR)
-                close(fd)
-                return
-            }
-            _connFDs.append(fd)
+    private func admit(_ fd: Int32) -> Bool {
+        lock.lock()
+        if _stopped {
             lock.unlock()
-            Thread.detachNewThread { [self] in serve(fd) }
+            shutdown(fd, SHUT_RDWR)
+            close(fd)
+            return false
         }
+        _connFDs.append(fd)
+        lock.unlock()
+        Thread.detachNewThread { [self] in serve(fd) }
+        return true
     }
 
     /// One connection, many requests: a bounded-range reader issues the next range on the
@@ -314,9 +282,13 @@ final class ThrottledOriginServer: @unchecked Sendable {
 
         var silentAfter: Int64? = nil
         var dropAfter: Int64? = nil
+        var answersWholeSource = false
         switch respond(requestIndex, offset, path) {
         case .serve206:
             break
+        case .serve200:
+            answersWholeSource = true
+            offset = 0
         case .serve206From(let start):
             offset = max(0, min(start, totalSize - 1))
         case .serveThenGoSilent(let afterBytes):
@@ -348,15 +320,19 @@ final class ThrottledOriginServer: @unchecked Sendable {
             pendingDelay -= slice
         }
 
-        let last = (ignoreRangeEnd ? nil : rangeEnd) ?? (totalSize - 1)
+        let last = answersWholeSource ? totalSize - 1 : (ignoreRangeEnd ? nil : rangeEnd) ?? (totalSize - 1)
         let remaining = last - offset + 1
         // Keep-alive, not close: a bounded range that tears the socket down would make every
         // refill a fresh connection and would hide exactly the pooling question under test.
-        let header = "HTTP/1.1 206 Partial Content\r\n"
-            + "Content-Range: bytes \(offset)-\(last)/\(totalSize)\r\n"
-            + "Content-Length: \(remaining)\r\n"
-            + "Accept-Ranges: bytes\r\n"
-            + "Connection: keep-alive\r\n\r\n"
+        let header = answersWholeSource
+            ? "HTTP/1.1 200 OK\r\n"
+                + "Content-Length: \(remaining)\r\n"
+                + "Connection: keep-alive\r\n\r\n"
+            : "HTTP/1.1 206 Partial Content\r\n"
+                + "Content-Range: bytes \(offset)-\(last)/\(totalSize)\r\n"
+                + "Content-Length: \(remaining)\r\n"
+                + "Accept-Ranges: bytes\r\n"
+                + "Connection: keep-alive\r\n\r\n"
         guard writeFully(fd, Array(header.utf8)) else { return false }
 
         let chunk = [UInt8](repeating: 0x55, count: chunkBytes)

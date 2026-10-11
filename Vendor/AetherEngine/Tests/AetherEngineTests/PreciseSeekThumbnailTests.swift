@@ -47,8 +47,9 @@ struct PreciseSeekThumbnailTests {
         try context.ensureOpen()
         let image = try #require(context.decodeFrame(
             at: offset, mode: .snapshot, targetWidth: 32,
-            maxSize: CGSize(width: 32, height: 32), isCancelled: { false },
-            relativeToFirstFrame: true))
+            maxSize: CGSize(width: 32, height: 32),
+            relativeToFirstFrame: true,
+            isCancelled: { false }))
         return try #require(image.dataProvider?.data) as Data
     }
 

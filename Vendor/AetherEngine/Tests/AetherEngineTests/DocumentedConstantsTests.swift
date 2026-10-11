@@ -216,6 +216,19 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("Two channels or fewer have no surround to carry", docs)
     }
 
+    // MARK: - The Atmos rendition's CHANNELS value
+
+    /// docs/formats.md and docs/architecture.md both print the CHANNELS value a stream-copied
+    /// E-AC-3 JOC rendition is advertised with, and the object count in it is the part a reader
+    /// checks against Dolby's delivery kit. If the engine ever sources it from the `dec3` box's
+    /// `complexity_index_type_a` instead of stating it, both sentences stop being true at once.
+    func testAtmosRenditionChannelsValueIsWhatTheDocsSay() throws {
+        let docs = try documentation()
+        XCTAssertEqual(VideoSegmentProvider.atmosChannelsAttribute, "16/JOC",
+                       "documented as the object count, a slash, then JOC")
+        assertDocumented(#"`CHANNELS="16/JOC"`"#, docs)
+    }
+
     // MARK: - External subtitle ids
 
     /// A host tells its own tracks from the engine's by this base, and docs/api.md prints the number.
@@ -281,6 +294,22 @@ final class DocumentedConstantsTests: XCTestCase {
             \(newestRelease ?? "nothing"). Both move in the release prep commit, together with the \
             README install snippets.
             """)
+    }
+
+    /// The README's Swift and Xcode rows are the toolchain CI builds and tests with, not a taste
+    /// (audit OPS-103): every macOS job runs on the `xcode-27` image and none selects another Xcode.
+    /// Moving CI to another image without the rows, or the rows without CI, fails here.
+    func testToolchainRowsAreTheOnesCITestsWith() throws {
+        let ci = try sourceFile(".github/workflows/ci.yml")
+        let macOSJobs = ci.components(separatedBy: "runs-on: ").dropFirst()
+            .map { entry in entry.prefix { !$0.isNewline } }
+            .filter { !$0.hasPrefix("ubuntu") }
+        XCTAssertFalse(macOSJobs.isEmpty, "ci.yml has no macOS job")
+        XCTAssertTrue(macOSJobs.allSatisfy { $0 == "xcode-27" }, "macOS jobs run on \(macOSJobs)")
+        XCTAssertFalse(ci.contains("xcode-version:"), "a job selects its own Xcode instead of the image's")
+        let docs = try documentation()
+        assertDocumented("| Xcode | 27.0 |", docs)
+        assertDocumented("| Swift | 6.4 |", docs)
     }
 
     /// The docs corpus is README + docs/; a claim living in a source docstring is read straight.
