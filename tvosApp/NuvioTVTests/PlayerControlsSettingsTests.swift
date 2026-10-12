@@ -1159,6 +1159,30 @@ extension PlayerControlsSettingsTests {
     }
 
     @MainActor
+    func testStartupBenchmarkOwnerIsForwardedAndReplacedOnCoordinatorRetry() {
+        let firstOwner = UUID()
+        let retryOwner = UUID()
+        var dispatchedOwners: [UUID?] = []
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { request, _, _ in
+                dispatchedOwners.append(request.startupBenchmarkToken)
+            }
+        )
+        defer { coordinator.stopAll() }
+
+        coordinator.load(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.com/video.mp4")!,
+            startupBenchmarkToken: firstOwner
+        ))
+        coordinator.retryLastLoad(startupBenchmarkToken: retryOwner)
+
+        XCTAssertEqual(dispatchedOwners, [firstOwner, retryOwner])
+        XCTAssertEqual(coordinator.lastRequest?.startupBenchmarkToken, retryOwner)
+    }
+
+    @MainActor
     func testPlayerViewModelAspectModeSwitching() {
         let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
         let model = PlayerViewModel(

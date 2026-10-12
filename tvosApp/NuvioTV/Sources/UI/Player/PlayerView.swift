@@ -38,11 +38,12 @@ struct PlayerView: View {
     /// Episode context for the in-player Next Episode card. Empty for movies/trailers.
     var episodes: [NuvioVideo] = []
     var currentEpisode: NuvioVideo? = nil
+    var initialStartupBenchmarkToken: UUID? = nil
     var autoPlayNextEnabled: Bool = true
     var autoPlayNextCountdownSeconds: Int = 10
     /// Resolves a next episode into a ready-to-play stream (add-on fetch + smart
     /// selection), supplied by the app layer. Nil disables auto-advance.
-    var resolveNextStream: ((NuvioVideo) async -> PreparedNextStream?)? = nil
+    var resolveNextStream: ((NuvioVideo, UUID?) async -> PreparedNextStream?)? = nil
     /// Re-resolves a fresh stream for the *current* title/episode, used to
     /// recover from an expired link, load timeout, or playback error.
     /// The first argument is the episode currently playing; `excludedURLs` are
@@ -54,7 +55,8 @@ struct PlayerView: View {
     var resolvePlaybackStream: ((
         _ stream: NuvioStream,
         _ contentId: String,
-        _ subtitleLine: String
+        _ subtitleLine: String,
+        _ startupToken: UUID?
     ) async -> PreparedNextStream?)? = nil
     var onRequestSources: (() -> Void)? = nil
     var onFinished: (() -> Void)? = nil
@@ -131,6 +133,14 @@ struct PlayerView: View {
 
     func focusSkipSegment() {
         DispatchQueue.main.async {
+            guard viewModel.showSkipSegmentCard,
+                  !viewModel.postPlayState.isVisible,
+                  !viewModel.showSettingsPanel,
+                  viewModel.sidePanel == nil,
+                  !viewModel.isScrubbing,
+                  !viewModel.isHoldingSeek,
+                  viewModel.currentErrorDiagnostic == nil,
+                  !isWakingFromBackground else { return }
             skipSegmentFocused = true
         }
     }

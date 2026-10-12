@@ -9,6 +9,7 @@ extension PlayerView {
             .animation(.playerControls, value: viewModel.showSettingsPanel)
             .animation(.playerControls, value: viewModel.showNextEpisodeCard)
             .animation(.playerControls, value: viewModel.showSkipSegmentCard)
+            .animation(.playerControls, value: viewModel.postPlayState.isVisible)
             .animation(.easeOut(duration: 0.16), value: viewModel.isScrubbing)
             .animation(.easeOut(duration: 0.16), value: viewModel.isHoldingSeek)
             .animation(.easeOut(duration: 0.2), value: viewModel.isSwitchingSource)
@@ -26,6 +27,7 @@ extension PlayerView {
                 PlaybackWakeLock.acquire()
                 syncPlaybackWakeLock()
                 focusRemoteInput()
+                viewModel.adoptStartupBenchmarkToken(initialStartupBenchmarkToken)
                 let cachedBinge = BingeGroupStore.load(seriesId: meta.id)
                 viewModel.reloadCurrentStream = reloadCurrentStream
                 viewModel.fetchPlaybackSources = fetchPlaybackSources
@@ -69,7 +71,7 @@ extension PlayerView {
             }
             .onDisappear {
                 TVHomeDebugTrace.log("player.disappear meta=\(meta.id)")
-                PlaybackStartupTiming.cancel()
+                viewModel.cancelStartupBenchmark()
                 if subtitle == PlaybackMarkers.trailerSubtitle {
                     let pos = viewModel.clock.position
                     if pos > 0.1 && !pos.isNaN && !pos.isInfinite {
@@ -105,7 +107,7 @@ extension PlayerView {
                    !viewModel.isAdvancingEpisode,
                    !didReportPlaybackStarted {
                     didReportPlaybackStarted = true
-                    PlaybackStartupTiming.complete()
+                    viewModel.completeStartupBenchmark()
                     if !viewModel.showControls {
                         focusRemoteInput()
                     }
@@ -129,7 +131,7 @@ extension PlayerView {
                    !viewModel.isAdvancingEpisode,
                    !didReportPlaybackStarted {
                     didReportPlaybackStarted = true
-                    PlaybackStartupTiming.complete()
+                    viewModel.completeStartupBenchmark()
                     if !viewModel.showControls {
                         focusRemoteInput()
                     }
@@ -139,14 +141,12 @@ extension PlayerView {
             .onChange(of: viewModel.isSwitchingSource) { _, isSwitching in
                 syncPlaybackWakeLock()
                 if isSwitching {
-                    PlaybackStartupTiming.start()
                     didReportPlaybackStarted = false
                 }
             }
             .onChange(of: viewModel.isAdvancingEpisode) { _, isAdvancing in
                 syncPlaybackWakeLock()
                 if isAdvancing {
-                    PlaybackStartupTiming.start(title: meta.name)
                     didReportPlaybackStarted = false
                 }
             }
@@ -155,7 +155,6 @@ extension PlayerView {
             }
             .onChange(of: viewModel.didDetectReplacementStream) { _, isReplacement in
                 if isReplacement {
-                    PlaybackStartupTiming.start()
                     didReportPlaybackStarted = false
                 }
             }
@@ -234,10 +233,19 @@ extension PlayerView {
                     }
                 } else {
                     postPlayFocus = nil
+                    focusRemoteInput()
                 }
             }
             .onChange(of: viewModel.sidePanel) { _, panel in
                 if panel != nil {
+                    remoteInputFocused = false
+                    nextEpisodeFocused = false
+                    cancelAutoPlayFocused = false
+                    skipSegmentFocused = false
+                }
+            }
+            .onChange(of: viewModel.showSettingsPanel) { _, isPresented in
+                if isPresented {
                     remoteInputFocused = false
                     nextEpisodeFocused = false
                     cancelAutoPlayFocused = false
@@ -265,7 +273,7 @@ extension PlayerView {
                 }
             }
             .onChange(of: viewModel.showNextEpisodeCard) { _, visible in
-                guard !viewModel.showControls else { return }
+                guard !viewModel.showControls, !viewModel.postPlayState.isVisible, !viewModel.showSettingsPanel, viewModel.sidePanel == nil else { return }
                 if visible {
                     focusNextEpisode()
                 } else if viewModel.showSkipSegmentCard {
@@ -286,7 +294,7 @@ extension PlayerView {
                 }
             }
             .onChange(of: viewModel.showSkipSegmentCard) { _, visible in
-                guard !viewModel.showControls, !viewModel.showNextEpisodeCard else { return }
+                guard !viewModel.showControls, !viewModel.showNextEpisodeCard, !viewModel.postPlayState.isVisible, !viewModel.showSettingsPanel, viewModel.sidePanel == nil else { return }
                 if visible {
                     focusSkipSegment()
                 } else {

@@ -427,7 +427,7 @@ extension PlayerView {
 
     @ViewBuilder
     var skipSegmentLayer: some View {
-        if viewModel.showSkipSegmentCard && !viewModel.isScrubbing && !viewModel.isHoldingSeek, let interval = viewModel.activeSkipInterval {
+        if viewModel.showSkipSegmentCard && !viewModel.postPlayState.isVisible && !viewModel.showSettingsPanel && viewModel.sidePanel == nil && !viewModel.isScrubbing && !viewModel.isHoldingSeek, let interval = viewModel.activeSkipInterval {
             Button(action: {
                 guard !isWakingFromBackground else { return }
                 viewModel.skipActiveInterval()
@@ -471,7 +471,7 @@ extension PlayerView {
     var nextEpisodeLayer: some View {
         // Next-episode prompt, shown near the end. Auto-play occurs only
         // after the current episode reaches genuine end-of-media.
-        if viewModel.showNextEpisodeCard && !viewModel.isScrubbing && !viewModel.isHoldingSeek, let next = viewModel.nextEpisode {
+        if viewModel.showNextEpisodeCard && !viewModel.postPlayState.isVisible && !viewModel.showSettingsPanel && viewModel.sidePanel == nil && !viewModel.isScrubbing && !viewModel.isHoldingSeek, let next = viewModel.nextEpisode {
             VStack(spacing: 8) {
                 Button(action: {
                     guard !isWakingFromBackground else { return }
@@ -607,7 +607,7 @@ extension PlayerView {
                 viewModel.showSettingsPanel = false
             }
             .transition(.opacity)
-            .zIndex(2)
+            .zIndex(15)
         }
     }
 

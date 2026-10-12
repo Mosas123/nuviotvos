@@ -143,11 +143,23 @@ class PlayerViewModel: ObservableObject {
     /// Active Reduce Loud Sounds toggle state.
     @Published var isReduceLoudSoundsActive: Bool = false
     /// Full-screen settings panel (subtitles / audio / speed) visibility.
-    @Published var showSettingsPanel: Bool = false
+    @Published var showSettingsPanel: Bool = false {
+        didSet {
+            if showSettingsPanel {
+                clearNextEpisodeCard()
+            }
+        }
+    }
     /// Active audio route name (e.g. HomePod, TV Speakers, AirPods).
     @Published var currentAudioRouteDescription: String = PlaybackSystemMonitor.currentAudioOutputTitle()
     /// In-player side sheet (episodes / sources).
-    @Published var sidePanel: PlayerSidePanel? = nil
+    @Published var sidePanel: PlayerSidePanel? = nil {
+        didSet {
+            if sidePanel != nil {
+                clearNextEpisodeCard()
+            }
+        }
+    }
     /// Alternate streams for the current title (Sources panel).
     @Published private(set) var availableSources: [NuvioStream] = []
     @Published private(set) var isLoadingSources = false
@@ -191,7 +203,7 @@ class PlayerViewModel: ObservableObject {
     @Published var skipSegmentCountdown: Int?
 
     var showSkipSegmentCard: Bool {
-        guard activeSkipInterval != nil, !showSettingsPanel, !showScenePanel, !isSceneDetailVisible else { return false }
+        guard activeSkipInterval != nil, !showSettingsPanel, !showScenePanel, !isSceneDetailVisible, !postPlayState.isVisible, sidePanel == nil else { return false }
         if activeSkipInterval?.id == autoHiddenSkipIntervalId, !showControls { return false }
         return showControls || skipSegmentCountdown != nil
     }
@@ -201,7 +213,8 @@ class PlayerViewModel: ObservableObject {
     private var currentEpisodeVideo: NuvioVideo?
     /// Resolves a next episode into a ready-to-play stream, provided by the app
     /// layer (reuses the details screen's add-on fetch + smart selection).
-    private var resolveNextStream: ((NuvioVideo) async -> PreparedNextStream?)?
+    private var resolveNextStream: ((NuvioVideo, UUID?) async -> PreparedNextStream?)?
+    private(set) var startupBenchmarkToken: UUID?
 
     // MARK: - Post-Play Recommendations
     @Published var postPlayState = PostPlayRecommendationUiState()
@@ -407,7 +420,8 @@ class PlayerViewModel: ObservableObject {
     var resolvePlaybackStream: ((
         _ stream: NuvioStream,
         _ contentId: String,
-        _ subtitleLine: String
+        _ subtitleLine: String,
+        _ startupToken: UUID?
     ) async -> PreparedNextStream?)?
     private var reloadAttempts = 0
     @Published private(set) var isReloadingStream = false
@@ -465,7 +479,14 @@ class PlayerViewModel: ObservableObject {
         postPlayController.$uiState
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
-                self?.postPlayState = state
+                guard let self else { return }
+                self.postPlayState = state
+                if state.isVisible {
+                    self.clearNextEpisodeCard()
+                    if self.activeSkipInterval != nil { self.activeSkipInterval = nil }
+                    if self.skipSegmentCountdown != nil { self.skipSegmentCountdown = nil }
+                    self.skipSegmentAutoHideDeadline = nil
+                }
             }
             .store(in: &cancellables)
         NotificationCenter.default.addObserver(
@@ -639,9 +660,13 @@ class PlayerViewModel: ObservableObject {
     func retryPlaybackStartup() {
         guard !didShutdown else { return }
         playbackStartupError = nil
-        sessionCoordinator.retryLastLoad()
+        let startupToken = beginStartupBenchmark(title: activeMeta?.name ?? "")
+        sessionCoordinator.retryLastLoad(startupBenchmarkToken: startupToken)
         activeEngineKind = sessionCoordinator.activeBackend
-        guard sessionCoordinator.lastLoadError == nil else { return }
+        guard sessionCoordinator.lastLoadError == nil else {
+            cancelStartupBenchmark(token: startupToken)
+            return
+        }
         status = .buffering
         isAwaitingStreamStart = true
         hasProducedMidFilePosition = false
@@ -649,6 +674,32 @@ class PlayerViewModel: ObservableObject {
         startPolling()
         startLoadWatchdog()
         hdrModeToast = sessionCoordinator.statusToast
+    }
+
+    func adoptStartupBenchmarkToken(_ token: UUID?) {
+        startupBenchmarkToken = PlaybackStartupTiming.isActive(token: token) ? token : nil
+    }
+
+    @discardableResult
+    private func beginStartupBenchmark(title: String = "") -> UUID {
+        let token = PlaybackStartupTiming.start(title: title)
+        startupBenchmarkToken = token
+        return token
+    }
+
+    func completeStartupBenchmark() -> TimeInterval? {
+        guard let token = startupBenchmarkToken else { return nil }
+        let total = PlaybackStartupTiming.complete(token: token)
+        if startupBenchmarkToken == token, !PlaybackStartupTiming.isActive(token: token) {
+            startupBenchmarkToken = nil
+        }
+        return total
+    }
+
+    func cancelStartupBenchmark(token explicitToken: UUID? = nil) {
+        guard let token = explicitToken ?? startupBenchmarkToken else { return }
+        PlaybackStartupTiming.cancel(token: token)
+        if startupBenchmarkToken == token { startupBenchmarkToken = nil }
     }
 
     func retryCurrentPlayback() {
@@ -763,6 +814,7 @@ class PlayerViewModel: ObservableObject {
             let title = meta.name
             let year = meta.year.map(String.init)
             let resolver = trailerResolver
+            let startupToken = startupBenchmarkToken
 
             trailerResolveTask?.cancel()
             trailerResolveTask = Task { [weak self] in
@@ -778,7 +830,12 @@ class PlayerViewModel: ObservableObject {
                 guard !Task.isCancelled else { return }
 
                 await MainActor.run {
-                    guard let self else { return }
+                    guard let self, !Task.isCancelled else { return }
+                    let stillOwnsStartup = startupToken == nil
+                        ? self.startupBenchmarkToken == nil
+                        : self.startupBenchmarkToken == startupToken
+                            && PlaybackStartupTiming.isActive(token: startupToken)
+                    guard stillOwnsStartup else { return }
                     guard let playbackSource = resolvedUrl else {
                         self.status = .error("No playable trailer stream was found for this title.")
                         return
@@ -810,7 +867,8 @@ class PlayerViewModel: ObservableObject {
                         aspectMode: self.aspectMode,
                         streamName: title.isEmpty ? nil : title,
                         streamDescription: PlaybackMarkers.trailerSubtitle,
-                        artworkURL: self.resolveArtworkURL(for: meta, episode: nil, isTrailer: true)
+                        artworkURL: self.resolveArtworkURL(for: meta, episode: nil, isTrailer: true),
+                        startupBenchmarkToken: startupToken
                     )
                     self.sessionCoordinator.load(request)
                     self.activeEngineKind = self.sessionCoordinator.activeBackend
@@ -913,7 +971,8 @@ class PlayerViewModel: ObservableObject {
             canonicalMediaKey: canonicalKey,
             cacheFileIdentity: cacheFileIdentity ?? activeCacheFileIdentity,
             trickplayURL: activeTrickplayURL,
-            artworkURL: resolvedArtwork
+            artworkURL: resolvedArtwork,
+            startupBenchmarkToken: startupBenchmarkToken
         )
         sessionCoordinator.load(
             request,
@@ -1362,7 +1421,7 @@ class PlayerViewModel: ObservableObject {
         current: NuvioVideo?,
         autoPlayEnabled: Bool,
         autoPlayCountdownSeconds: Int,
-        resolver: @escaping (NuvioVideo) async -> PreparedNextStream?
+        resolver: @escaping (NuvioVideo, UUID?) async -> PreparedNextStream?
     ) {
         seriesEpisodes = episodes
         if currentEpisodeVideo?.id != current?.id {
@@ -1431,7 +1490,10 @@ class PlayerViewModel: ObservableObject {
               !isAwaitingStreamStart,
               hasRenderedFirstFrame,
               status == .playing || status == .paused,
-              time.duration >= 60 else {
+              time.duration >= 60,
+              !postPlayState.isVisible,
+              !showSettingsPanel,
+              sidePanel == nil else {
             clearNextEpisodeCard()
             return
         }
@@ -1480,7 +1542,10 @@ class PlayerViewModel: ObservableObject {
     /// Prefer IntroDB ending start so Next Episode and Skip Ending appear together.
     /// Without an ending marker, fall back to the fixed lead-before-end window.
     private var shouldPresentNextEpisodeCard: Bool {
-        guard hasRenderedFirstFrame,
+        guard !postPlayState.isVisible,
+              !showSettingsPanel,
+              sidePanel == nil,
+              hasRenderedFirstFrame,
               !isAdvanceInFlight,
               !isAdvancingEpisode,
               !isAwaitingStreamStart,
@@ -1589,13 +1654,26 @@ class PlayerViewModel: ObservableObject {
         guard !skipIntervals.isEmpty,
               time.current > 0,
               status != .ended,
-              subtitle != PlaybackMarkers.trailerSubtitle else {
+              subtitle != PlaybackMarkers.trailerSubtitle,
+              !postPlayState.isVisible,
+              !showSettingsPanel,
+              sidePanel == nil else {
             if activeSkipInterval != nil { activeSkipInterval = nil }
             if skipSegmentCountdown != nil { skipSegmentCountdown = nil }
+            skipSegmentAutoHideDeadline = nil
             return
         }
 
         let current = time.current
+        for segment in skipIntervals {
+            if current < max(segment.startTime - 0.35, 0) {
+                dismissedSkipIntervalIds.remove(segment.id)
+                if autoHiddenSkipIntervalId == segment.id {
+                    autoHiddenSkipIntervalId = nil
+                }
+            }
+        }
+
         let interval = skipIntervals.first { segment in
             current >= max(segment.startTime - 0.35, 0) && current < segment.endTime - 0.25
         }
@@ -1609,15 +1687,28 @@ class PlayerViewModel: ObservableObject {
 
         // A skip command is asynchronous. Polling can still observe the old
         // playhead for a few ticks, but a deliberately skipped segment must not
-        // be armed again during this playback session.
+        // be armed again during clean playback. If controls are pulled up, allow
+        // the button to be presented.
         if dismissedSkipIntervalIds.contains(interval.id) {
-            if activeSkipInterval != nil { activeSkipInterval = nil }
-            if skipSegmentCountdown != nil { skipSegmentCountdown = nil }
-            skipSegmentAutoHideDeadline = nil
-            return
+            if !showControls {
+                if activeSkipInterval != nil { activeSkipInterval = nil }
+                if skipSegmentCountdown != nil { skipSegmentCountdown = nil }
+                skipSegmentAutoHideDeadline = nil
+                return
+            } else {
+                if activeSkipInterval?.id != interval.id {
+                    activeSkipInterval = interval
+                }
+                skipSegmentCountdown = nil
+                skipSegmentAutoHideDeadline = nil
+                return
+            }
         }
 
         if autoHiddenSkipIntervalId == interval.id, !showControls {
+            if activeSkipInterval?.id != interval.id {
+                activeSkipInterval = interval
+            }
             if skipSegmentCountdown != nil { skipSegmentCountdown = nil }
             skipSegmentAutoHideDeadline = nil
             return
@@ -1684,6 +1775,7 @@ class PlayerViewModel: ObservableObject {
         lastAdvancedEpisodeId = next.id
         advanceGeneration &+= 1
         let gen = advanceGeneration
+        let startupToken = beginStartupBenchmark(title: activeMeta?.name ?? "")
         isAdvanceInFlight = true
         isAdvancingEpisode = true
         loadingStepMessage = L10n.string("player_searching_sources", fallback: "Searching sources…")
@@ -1715,9 +1807,21 @@ class PlayerViewModel: ObservableObject {
         }
 
         Task { @MainActor [weak self] in
-            guard let self, self.advanceGeneration == gen else { return }
-            let prepared = await resolver(next)
-            guard self.advanceGeneration == gen else { return }
+            guard let self else {
+                PlaybackStartupTiming.cancel(token: startupToken)
+                return
+            }
+            guard self.advanceGeneration == gen else {
+                self.cancelStartupBenchmark(token: startupToken)
+                return
+            }
+            let prepared = await resolver(next, startupToken)
+            guard !Task.isCancelled,
+                  self.advanceGeneration == gen,
+                  PlaybackStartupTiming.isActive(token: startupToken) else {
+                self.cancelStartupBenchmark(token: startupToken)
+                return
+            }
             guard let prepared else {
                 // Couldn't resolve a stream for the next episode: disarm so the
                 // ended handler doesn't retry, and fall back to the normal
@@ -1725,6 +1829,7 @@ class PlayerViewModel: ObservableObject {
                 self.isAdvanceInFlight = false
                 self.isAdvancingEpisode = false
                 self.lastAdvancedEpisodeId = nil
+                self.cancelStartupBenchmark(token: startupToken)
                 self.status = .ended
                 return
             }
@@ -1920,6 +2025,7 @@ class PlayerViewModel: ObservableObject {
             status = .error(reason)
             return
         }
+        let startupToken = beginStartupBenchmark(title: activeMeta?.name ?? "")
 
         if let meta = activeMeta {
             let numbers = resolvedEpisodeNumbers
@@ -1964,15 +2070,38 @@ class PlayerViewModel: ObservableObject {
 
         let excluded = decision.exclusions
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self else {
+                PlaybackStartupTiming.cancel(token: startupToken)
+                return
+            }
             defer {
                 self.isFailingOver = false
                 // isSwitchingSource cleared in replaceStream / error paths
             }
-            guard let prepared = await reloadCurrentStream(currentEpisodeVideo, excluded) else {
+            let result = await reloadCurrentStream(currentEpisodeVideo, excluded)
+            guard self.startupBenchmarkToken == startupToken,
+                  PlaybackStartupTiming.isActive(token: startupToken) else {
+                self.cancelStartupBenchmark(token: startupToken)
+                return
+            }
+            guard !Task.isCancelled else {
+                self.cancelStartupBenchmark(token: startupToken)
+                self.isFailingOver = false
+                self.isReloadingStream = false
+                self.isSwitchingSource = false
+                self.isAwaitingStreamStart = false
+                return
+            }
+            guard let prepared = result else {
+                self.cancelStartupBenchmark(token: startupToken)
                 self.isReloadingStream = false
                 self.isSwitchingSource = false
                 self.status = .error(reason)
+                return
+            }
+            guard !Task.isCancelled,
+                  PlaybackStartupTiming.isActive(token: startupToken) else {
+                self.cancelStartupBenchmark(token: startupToken)
                 return
             }
             // Don't mark the new URL failed yet — the watchdog / error path will
@@ -2888,8 +3017,12 @@ class PlayerViewModel: ObservableObject {
         let target = duration > 0
             ? min(max(seconds, 0), max(duration - 0.25, 0))
             : max(seconds, 0)
+        let prevCurrent = time.current
         print("[SeekWatchdog][PlayerVM] 👆 User seek to \(String(format: "%.3f", seconds))s (target: \(String(format: "%.3f", target))s, current: \(String(format: "%.3f", time.current))s, duration: \(String(format: "%.3f", duration))s)")
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] seek(to: \(seconds)) called: target=\(target), prevCurrent=\(time.current), duration=\(duration)")
+        if target < prevCurrent - 0.5 {
+            handleRewind(from: prevCurrent, to: target)
+        }
         engine.seekToMs(Int64(target * 1000))
         if let source = activeStreamURL.flatMap(URL.init(string:)) {
             let generation = sessionCoordinator.loadGeneration
@@ -2966,13 +3099,29 @@ class PlayerViewModel: ObservableObject {
         scheduleControlsHide()
     }
 
+    private func handleRewind(from prevCurrent: Double, to target: Double) {
+        // Reset auto-hidden or dismissed skip intervals only when rewinding before their start
+        for segment in skipIntervals {
+            if target < max(segment.startTime - 0.35, 0) {
+                dismissedSkipIntervalIds.remove(segment.id)
+                if autoHiddenSkipIntervalId == segment.id {
+                    autoHiddenSkipIntervalId = nil
+                }
+            }
+        }
+        if !shouldPresentNextEpisodeCard {
+            autoHiddenNextEpisodeCard = false
+            nextEpisodeAutoHideDeadline = nil
+            isAutoPlayCancelled = false
+        }
+        updateSkipIntervalState()
+    }
+
     func dismissActiveInterval() {
         guard let interval = activeSkipInterval else { return }
-        dismissedSkipIntervalIds.insert(interval.id)
         autoHiddenSkipIntervalId = interval.id
         skipSegmentCountdown = nil
         skipSegmentAutoHideDeadline = nil
-        activeSkipInterval = nil
     }
 
     func skipForward() {
@@ -4535,15 +4684,26 @@ class PlayerViewModel: ObservableObject {
         let resume = lastStablePlaybackTime?.current
             ?? (time.current > 10 ? time.current : nil)
         let subtitleLine = panelSourceSubtitleLine
-        beginSourceSwitch(message: "Switching source…")
+        let startupToken = beginSourceSwitch(message: "Switching source…")
         // Drop the panel now, not after the resolve: it covers the whole screen,
         // so leaving it up hides the spinner for the entire round trip.
         closeSidePanel()
 
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.isSwitchingSource = false }
-            guard var prepared = await resolvePlaybackStream(stream, contentId, subtitleLine) else {
+            guard let self else {
+                PlaybackStartupTiming.cancel(token: startupToken)
+                return
+            }
+            let result = await resolvePlaybackStream(stream, contentId, subtitleLine, startupToken)
+            guard !Task.isCancelled,
+                  self.startupBenchmarkToken == startupToken,
+                  PlaybackStartupTiming.isActive(token: startupToken) else {
+                self.cancelStartupBenchmark(token: startupToken)
+                return
+            }
+            guard var prepared = result else {
+                self.cancelStartupBenchmark(token: startupToken)
+                self.isSwitchingSource = false
                 self.showPlayerToast("Couldn't open this source")
                 self.isAwaitingStreamStart = false
                 self.status = .paused
@@ -4579,7 +4739,8 @@ class PlayerViewModel: ObservableObject {
     /// Shared entry for a user-initiated switch: park the engine and put the
     /// player into a labelled loading state that stays up until the new stream
     /// actually starts.
-    private func beginSourceSwitch(message: String) {
+    private func beginSourceSwitch(message: String) -> UUID {
+        let token = beginStartupBenchmark(title: activeMeta?.name ?? "")
         isSwitchingSource = true
         switchingSourceMessage = message
         loadingStepMessage = message
@@ -4589,6 +4750,7 @@ class PlayerViewModel: ObservableObject {
         cancelPauseOverlaySchedule()
         showPauseOverlay = false
         engine.pausePlayback()
+        return token
     }
 
     func selectEpisode(_ episode: NuvioVideo) {
@@ -4602,13 +4764,24 @@ class PlayerViewModel: ObservableObject {
         }
         isAdvanceInFlight = false
         lastAdvancedEpisodeId = nil
-        beginSourceSwitch(message: "Loading episode…")
+        let startupToken = beginSourceSwitch(message: "Loading episode…")
         closeSidePanel()
 
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.isSwitchingSource = false }
-            guard let prepared = await resolveNextStream(episode) else {
+            guard let self else {
+                PlaybackStartupTiming.cancel(token: startupToken)
+                return
+            }
+            let prepared = await resolveNextStream(episode, startupToken)
+            guard !Task.isCancelled,
+                  self.startupBenchmarkToken == startupToken,
+                  PlaybackStartupTiming.isActive(token: startupToken) else {
+                self.cancelStartupBenchmark(token: startupToken)
+                return
+            }
+            guard let prepared else {
+                self.cancelStartupBenchmark(token: startupToken)
+                self.isSwitchingSource = false
                 self.showPlayerToast("Couldn't load this episode")
                 self.isAwaitingStreamStart = false
                 self.status = .paused

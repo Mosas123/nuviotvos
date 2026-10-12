@@ -21,34 +21,44 @@ final class PlaybackStartupBenchmark {
     private(set) var t1_sourcePicked: Date?
     private(set) var t2_debridResolved: Date?
     private(set) var t3_playbackStarted: Date?
+    private(set) var t_engineDispatched: Date?
+    private(set) var activeToken: UUID?
 
     // Engine startup breakdown checkpoints
     private var t_sourceOpened: Date?
     private var t_streamsProbed: Date?
     private var t_displayPrepared: Date?
     private var t_sessionConstructed: Date?
+    private let dateProvider: () -> Date
 
-    private init() {}
+    init(dateProvider: @escaping () -> Date = { Date() }) {
+        self.dateProvider = dateProvider
+    }
 
-    func start(title: String = "") {
+    @discardableResult
+    func start(title: String = "") -> UUID {
+        let token = UUID()
+        activeToken = token
         self.title = title
         self.streamName = ""
         self.addonName = ""
-        self.t0_initiated = Date()
+        self.t0_initiated = dateProvider()
         self.t1_sourcePicked = nil
         self.t2_debridResolved = nil
         self.t3_playbackStarted = nil
+        self.t_engineDispatched = nil
         self.t_sourceOpened = nil
         self.t_streamsProbed = nil
         self.t_displayPrepared = nil
         self.t_sessionConstructed = nil
         let target = title.isEmpty ? "playback" : "\"\(title)\""
         print("[StartupBenchmark] ⏱ [0/3] Started startup timer for \(target)")
+        return token
     }
 
-    func markSourcePicked(stream: NuvioStream) {
-        guard let t0 = t0_initiated else { return }
-        let now = Date()
+    func markSourcePicked(stream: NuvioStream, token: UUID?) {
+        guard owns(token), let t0 = t0_initiated else { return }
+        let now = dateProvider()
         self.t1_sourcePicked = now
         self.streamName = stream.name ?? stream.description ?? "Direct URL"
         self.addonName = stream.addonName ?? "Unknown"
@@ -57,19 +67,21 @@ final class PlaybackStartupBenchmark {
         print("[StartupBenchmark] 🔍 [1/3] Source picked in \(String(format: "%.3fs", pickDuration)) (\(addonName) · \(cleanName))")
     }
 
-    func markDebridResolved() {
-        guard let t1 = t1_sourcePicked else { return }
-        let now = Date()
+    func markDebridResolved(token: UUID?) {
+        guard owns(token), let t1 = t1_sourcePicked else { return }
+        let now = dateProvider()
         self.t2_debridResolved = now
         let debridDuration = now.timeIntervalSince(t1)
         let totalSoFar = now.timeIntervalSince(t0_initiated ?? t1)
         print("[StartupBenchmark] ⚡️ [2/3] Debrid link resolved in \(String(format: "%.3fs", debridDuration)) (elapsed: \(String(format: "%.3fs", totalSoFar)))")
     }
 
-    func markEngineCheckpoint(_ name: String) {
-        guard t0_initiated != nil, t3_playbackStarted == nil else { return }
-        let now = Date()
+    func markEngineCheckpoint(_ name: String, token: UUID?) {
+        guard owns(token) else { return }
+        let now = dateProvider()
         switch name {
+        case "dispatched":
+            if t_engineDispatched == nil { t_engineDispatched = now }
         case "sourceOpened":
             if t_sourceOpened == nil { t_sourceOpened = now }
         case "streamsProbed":
@@ -84,39 +96,45 @@ final class PlaybackStartupBenchmark {
     }
 
     @discardableResult
-    func markPlaybackStarted() -> TimeInterval? {
-        guard let t0 = t0_initiated, t3_playbackStarted == nil else { return nil }
-        let now = Date()
+    func markPlaybackStarted(token: UUID?) -> TimeInterval? {
+        guard owns(token), let t0 = t0_initiated else { return nil }
+        let now = dateProvider()
         self.t3_playbackStarted = now
+        self.activeToken = nil
 
         let totalDuration = now.timeIntervalSince(t0)
-        let pickDuration = t1_sourcePicked.map { $0.timeIntervalSince(t0) } ?? 0
+        let pickDuration = t1_sourcePicked.map { $0.timeIntervalSince(t0) }
         let debridDuration: Double = {
             if let t2 = t2_debridResolved, let t1 = t1_sourcePicked {
                 return t2.timeIntervalSince(t1)
             }
             return 0
         }()
-        let engineBase = t2_debridResolved ?? t1_sourcePicked ?? t0
-        let engineDuration = now.timeIntervalSince(engineBase)
+        let preEngineBase = t2_debridResolved ?? t1_sourcePicked ?? t0
+        let preEngineDuration = t_engineDispatched.map {
+            max(0, $0.timeIntervalSince(preEngineBase))
+        }
+        let engineDuration = t_engineDispatched.map {
+            max(0, now.timeIntervalSince($0))
+        }
 
-        let cdnDuration: Double? = {
-            guard let opened = t_sourceOpened else { return nil }
-            return max(0, opened.timeIntervalSince(engineBase))
+        let sourceOpeningDuration: Double? = {
+            guard let dispatched = t_engineDispatched, let opened = t_sourceOpened else { return nil }
+            return max(0, opened.timeIntervalSince(dispatched))
         }()
         let probeDuration: Double? = {
-            guard let probed = t_streamsProbed else { return nil }
-            let prev = t_sourceOpened ?? engineBase
+            guard let dispatched = t_engineDispatched, let probed = t_streamsProbed else { return nil }
+            let prev = t_sourceOpened ?? dispatched
             return max(0, probed.timeIntervalSince(prev))
         }()
         let displayDuration: Double? = {
-            guard let display = t_displayPrepared else { return nil }
-            let prev = t_streamsProbed ?? t_sourceOpened ?? engineBase
+            guard let dispatched = t_engineDispatched, let display = t_displayPrepared else { return nil }
+            let prev = t_streamsProbed ?? t_sourceOpened ?? dispatched
             return max(0, display.timeIntervalSince(prev))
         }()
         let bufferDuration: Double? = {
             let prev = t_displayPrepared ?? t_streamsProbed ?? t_sourceOpened
-            guard let prev else { return nil }
+            guard let prev, t_engineDispatched != nil else { return nil }
             return max(0, now.timeIntervalSince(prev))
         }()
 
@@ -131,16 +149,33 @@ final class PlaybackStartupBenchmark {
             lines.append("  • Selected Source:    \(addonName) · \(cleanName)")
         }
         lines.append("  ----------------------------------------------------------")
-        lines.append("  1. Pick Source:       \(String(format: "%.3fs", pickDuration))  (stream discovery & selection)")
-        if t2_debridResolved != nil {
-            lines.append("  2. Debrid Resolve:    \(String(format: "%.3fs", debridDuration))  (provider unrestrict & URL ready)")
-            lines.append("  3. Engine Startup:    \(String(format: "%.3fs", engineDuration))  (player buffer & first frame)")
+        if let pickDuration {
+            lines.append("  1. Pick Source:       \(String(format: "%.3fs", pickDuration))  (stream discovery & selection)")
         } else {
-            lines.append("  2. Engine Startup:    \(String(format: "%.3fs", engineDuration))  (player buffer & first frame)")
+            lines.append("  1. Pick Source:       unavailable (source selection checkpoint missing)")
+        }
+        var phaseNumber = 2
+        if t2_debridResolved != nil {
+            lines.append("  \(phaseNumber). Debrid Resolve:    \(String(format: "%.3fs", debridDuration))  (provider unrestrict & URL ready)")
+            phaseNumber += 1
+        }
+        if let preEngineDuration {
+            let context = t1_sourcePicked == nil
+                ? "discovery, selection & preparation"
+                : "source ready to engine dispatch"
+            lines.append("  \(phaseNumber). Pre-engine Prep:   \(String(format: "%.3fs", preEngineDuration))  (\(context))")
+        } else {
+            lines.append("  \(phaseNumber). Pre-engine Prep:   unavailable (engine dispatch checkpoint missing)")
+        }
+        phaseNumber += 1
+        if let engineDuration {
+            lines.append("  \(phaseNumber). Engine Startup:    \(String(format: "%.3fs", engineDuration))  (dispatch to playback start)")
+        } else {
+            lines.append("  \(phaseNumber). Engine Startup:    unavailable (engine dispatch checkpoint missing)")
         }
 
-        if let cdn = cdnDuration, cdn >= 0.05 {
-            lines.append("     ├─ CDN First Byte: \(String(format: "%.3fs", cdn))  (connection & initial data)")
+        if let sourceOpening = sourceOpeningDuration, sourceOpening >= 0.05 {
+            lines.append("     ├─ Source Opening: \(String(format: "%.3fs", sourceOpening))  (connection, open & initial data)")
         }
         if let probe = probeDuration, probe >= 0.05 {
             lines.append("     ├─ Stream Probe:   \(String(format: "%.3fs", probe))  (demux container & tracks)")
@@ -160,38 +195,69 @@ final class PlaybackStartupBenchmark {
         return totalDuration
     }
 
-    func cancel() {
-        if t0_initiated != nil && t3_playbackStarted == nil {
-            print("[StartupBenchmark] ❌ Startup timer cancelled")
-        }
+    func cancel(token: UUID?) {
+        guard owns(token) else { return }
+        print("[StartupBenchmark] ❌ Startup timer cancelled")
+        activeToken = nil
         t0_initiated = nil
         t1_sourcePicked = nil
         t2_debridResolved = nil
         t3_playbackStarted = nil
+        t_engineDispatched = nil
         t_sourceOpened = nil
         t_streamsProbed = nil
         t_displayPrepared = nil
         t_sessionConstructed = nil
     }
+
+    private func owns(_ token: UUID?) -> Bool {
+        guard let token else { return false }
+        return activeToken == token && t3_playbackStarted == nil
+    }
 }
 
 @MainActor
 enum PlaybackStartupTiming {
+    static var activeToken: UUID? {
+        PlaybackStartupBenchmark.shared.activeToken
+    }
+
+    static func isActive(token: UUID?) -> Bool {
+        guard let token else { return false }
+        return PlaybackStartupBenchmark.shared.activeToken == token
+    }
+
+    /// Display-only fallback for loading overlays; benchmark mutations always
+    /// require an explicit owner token.
     static var requestDate: Date? {
         PlaybackStartupBenchmark.shared.t0_initiated
     }
 
-    static func start(title: String = "") {
-        PlaybackStartupBenchmark.shared.start(title: title)
+    static func requestDate(for token: UUID?) -> Date? {
+        guard let token, PlaybackStartupBenchmark.shared.activeToken == token else { return nil }
+        return PlaybackStartupBenchmark.shared.t0_initiated
     }
 
     @discardableResult
-    static func complete() -> TimeInterval? {
-        PlaybackStartupBenchmark.shared.markPlaybackStarted()
+    static func start(title: String = "") -> UUID {
+        PlaybackStartupBenchmark.shared.start(title: title)
     }
 
-    static func cancel() {
-        PlaybackStartupBenchmark.shared.cancel()
+    static func markSourcePicked(stream: NuvioStream, token: UUID?) {
+        PlaybackStartupBenchmark.shared.markSourcePicked(stream: stream, token: token)
+    }
+
+    static func markDebridResolved(token: UUID?) {
+        PlaybackStartupBenchmark.shared.markDebridResolved(token: token)
+    }
+
+    @discardableResult
+    static func complete(token: UUID?) -> TimeInterval? {
+        PlaybackStartupBenchmark.shared.markPlaybackStarted(token: token)
+    }
+
+    static func cancel(token: UUID?) {
+        PlaybackStartupBenchmark.shared.cancel(token: token)
     }
 }
 
@@ -212,7 +278,7 @@ struct PlayerLoadingOverlay: View {
     @ObservedObject private var torrentManager = TorrentEngineManager.shared
 
     private var effectiveStartTime: Date {
-        startTime ?? PlaybackStartupTiming.requestDate ?? mountedDate
+        startTime ?? mountedDate
     }
 
     var body: some View {
