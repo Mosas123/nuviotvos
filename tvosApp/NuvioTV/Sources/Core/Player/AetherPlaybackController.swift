@@ -3764,6 +3764,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             panelIsInHDRMode: panelInHDR,
             panelPresentsDolbyVision: panelPresentsDV,
             audioBridgeMode: .surroundCompat,
+            // Read the active profile for each load; unsupported sources keep the normal bridge.
+            objectAudioRendering: SpatialAudioSettings.rendering(),
             nativeRemoteHLS: isRemoteHLS,
             // AetherEngine honors this for ASS/SSA codec tracks only; other text
             // subtitle decoders keep their normal styled/plain cue path.

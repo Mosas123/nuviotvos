@@ -29,4 +29,4 @@ Local pin of [FFmpegBuild 3.7.0](https://github.com/superuser404notfound/FFmpegB
 
 Keep the AetherEngine patch surface minimal so rebases stay manageable.
 
-This build enables TrueHD Atmos object rendering to 9.1.6 APAC in the Nuvio host. LibTrueHD is pinned to 2.2.0; APAC rendering requires tvOS 26 or later and a supported 48 kHz TrueHD Atmos VOD source. The engine retains its ordinary audio bridge for other content.
+The Nuvio host offers an off-by-default setting for TrueHD Atmos object rendering to 9.1.6 APAC. LibTrueHD is pinned to 2.2.0; APAC rendering requires tvOS 26 or later and a supported 48 kHz TrueHD Atmos VOD source. The engine retains its ordinary audio bridge for other content.
