@@ -54,6 +54,10 @@ struct PlaybackLoadRequest: Equatable {
     var trickplayURL: URL?
     /// Remote artwork URL (episode thumbnail or movie poster/backdrop) for system Now Playing publication.
     var artworkURL: URL?
+    /// Startup benchmark owner captured by the player request. Kept on the
+    /// request so cache preparation and delayed backend dispatch cannot adopt a
+    /// newer playback request's global benchmark token.
+    var startupBenchmarkToken: UUID?
 
     init(
         videoURL: URL,
@@ -81,7 +85,8 @@ struct PlaybackLoadRequest: Equatable {
         canonicalMediaKey: String? = nil,
         cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         trickplayURL: URL? = nil,
-        artworkURL: URL? = nil
+        artworkURL: URL? = nil,
+        startupBenchmarkToken: UUID? = nil
     ) {
         self.videoURL = videoURL
         self.audioURL = audioURL
@@ -109,6 +114,7 @@ struct PlaybackLoadRequest: Equatable {
         self.cacheFileIdentity = cacheFileIdentity
         self.trickplayURL = trickplayURL
         self.artworkURL = artworkURL
+        self.startupBenchmarkToken = startupBenchmarkToken
     }
 }
 

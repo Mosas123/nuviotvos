@@ -2350,8 +2350,33 @@ actor HybridSeekThumbnailIndex {
 }
 
 /// Long-lived wrapper around a single `AetherEngine` instance (reused across titles).
+private final class StartupProgressGenerationObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latestGeneration: UInt64?
+
+    var generation: UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return latestGeneration
+    }
+
+    func record(_ progress: StartupProgress?) {
+        guard let generation = progress?.generation else { return }
+        lock.lock()
+        latestGeneration = max(latestGeneration ?? generation, generation)
+        lock.unlock()
+    }
+}
+
 @MainActor
 final class AetherPlaybackController: UIViewController, PlaybackEngineControlling, ScrubThumbnailProviding {
+    private struct StartupBenchmarkLoadOwner {
+        let loadGeneration: UInt64
+        let engineGenerationFloor: UInt64
+        let token: UUID?
+        var engineGeneration: UInt64?
+    }
+
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
     /// Terminal load/runtime failures the coordinator may use for MPV fallback.
     var onTerminalError: ((String) -> Void)?
@@ -2450,6 +2475,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     @Published private(set) var startupProgress: StartupProgress?
     var onStartupProgressChanged: ((StartupProgress?) -> Void)?
+    private let startupProgressGenerationObserver = StartupProgressGenerationObserver()
+    private var startupBenchmarkLoadOwner: StartupBenchmarkLoadOwner?
 
     var loadingStepMessage: String? {
         guard let stage = engine.startupProgress?.stage else {
@@ -3132,21 +3159,38 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     private func observeEngine() {
         engine.$startupProgress
+            .handleEvents(receiveOutput: { [startupProgressGenerationObserver] progress in
+                startupProgressGenerationObserver.record(progress)
+            })
             .receive(on: DispatchQueue.main)
             .sink { [weak self] progress in
                 guard let self else { return }
                 self.startupProgress = progress
                 self.onStartupProgressChanged?(progress)
-                guard let cp = progress?.checkpoint else { return }
+                guard let progress,
+                      progress.generation == self.engine.startupProgress?.generation else { return }
+                guard var owner = self.startupBenchmarkLoadOwner,
+                      owner.loadGeneration == self.loadGeneration,
+                      let token = owner.token else { return }
+                if owner.engineGeneration == nil {
+                    guard progress.checkpoint == .dispatched,
+                          progress.generation >= owner.engineGenerationFloor else { return }
+                    owner.engineGeneration = progress.generation
+                    self.startupBenchmarkLoadOwner = owner
+                }
+                guard owner.engineGeneration == progress.generation else { return }
+                let cp = progress.checkpoint
                 switch cp {
+                case .dispatched:
+                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("dispatched", token: token)
                 case .sourceOpened:
-                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("sourceOpened")
+                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("sourceOpened", token: token)
                 case .streamsProbed:
-                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("streamsProbed")
+                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("streamsProbed", token: token)
                 case .displayPrepared:
-                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("displayPrepared")
+                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("displayPrepared", token: token)
                 case .sessionConstructed:
-                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("sessionConstructed")
+                    PlaybackStartupBenchmark.shared.markEngineCheckpoint("sessionConstructed", token: token)
                 default:
                     break
                 }
@@ -3583,6 +3627,16 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     // MARK: Load
 
     func load(_ request: PlaybackLoadRequest, generation: UInt64) {
+        let currentEngineGeneration = max(
+            engine.startupProgress?.generation ?? 0,
+            startupProgressGenerationObserver.generation ?? 0
+        )
+        startupBenchmarkLoadOwner = StartupBenchmarkLoadOwner(
+            loadGeneration: generation,
+            engineGenerationFloor: currentEngineGeneration &+ 1,
+            token: request.startupBenchmarkToken,
+            engineGeneration: nil
+        )
         resetSoftwareFrameExtractor()
         lifecycleReloadToken &+= 1
         needsForegroundReload = false
@@ -3728,26 +3782,34 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let start = request.resumePositionSeconds
         let gen = generation
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self,
+                  !Task.isCancelled,
+                  self.loadGeneration == gen else { return }
             do {
                 let probe: SourceProbe?
                 if request.videoURL.scheme == "smb" {
                     let reader = try await Self.makeSMBReader(for: request.videoURL)
+                    guard !Task.isCancelled, self.loadGeneration == gen else {
+                        reader.close()
+                        return
+                    }
                     probe = try await self.engine.load(
                         source: .custom(reader, formatHint: nil),
                         startPosition: (start ?? 0) > 0 ? start : nil,
                         options: options
                     )
                 } else if let start, start > 0 {
+                    guard !Task.isCancelled, self.loadGeneration == gen else { return }
                     probe = try await self.engine.load(
                         url: request.videoURL,
                         startPosition: start,
                         options: options
                     )
                 } else {
+                    guard !Task.isCancelled, self.loadGeneration == gen else { return }
                     probe = try await self.engine.load(url: request.videoURL, options: options)
                 }
-                guard self.loadGeneration == gen else { return }
+                guard !Task.isCancelled, self.loadGeneration == gen else { return }
                 self.isAwaitingEngineLoad = false
                 self.engineLoadInitialPhase = nil
                 self.sourceProbe = probe
@@ -3757,7 +3819,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 self.configureRemoteCommandsIfNeeded()
                 #endif
             } catch {
-                guard self.loadGeneration == gen else { return }
+                guard !Task.isCancelled, self.loadGeneration == gen else { return }
                 self.isAwaitingEngineLoad = false
                 self.engineLoadInitialPhase = nil
                 let message = error.localizedDescription

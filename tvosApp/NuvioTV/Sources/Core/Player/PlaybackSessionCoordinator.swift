@@ -330,9 +330,11 @@ final class PlaybackSessionCoordinator: ObservableObject {
     /// Re-attempts the last request after a recoverable Aether construction
     /// failure. Auto requests can simply be reloaded; explicit Aether requests
     /// use this action to retry without recreating the player view.
-    func retryLastLoad() {
-        guard let lastRequest else { return }
+    func retryLastLoad(startupBenchmarkToken: UUID? = nil) {
+        guard var request = lastRequest else { return }
         guard !userStopped else { return }
+        request.startupBenchmarkToken = startupBenchmarkToken
+        lastRequest = request
         loadGeneration &+= 1
         aetherController?.onTerminalError = nil
         aetherController?.destroyPlayer()
@@ -340,7 +342,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         bindAetherCallbacks()
         onAetherControllerChanged?(aetherController)
         statusToast = nil
-        load(lastRequest, requiresMPVAudioControls: lastRequiresMPVAudioControls)
+        load(request, requiresMPVAudioControls: lastRequiresMPVAudioControls)
     }
 
     /// Clears a latched startup error only for the load that has verified recovery.

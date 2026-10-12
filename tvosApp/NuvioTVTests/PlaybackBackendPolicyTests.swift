@@ -5,6 +5,10 @@ import AetherEngine
 import SwiftAssRenderer
 @testable import NuvioTV
 
+private func erasePlaybackTestProfileSettings(_ profileID: String) {
+    UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileID)")
+}
+
 final class PlaybackBackendPolicyTests: XCTestCase {
     func testPlaybackToggleDirectionUsesBackendTransportTruth() {
         XCTAssertEqual(PlaybackToggleDirection(isTransportPlaying: true), .pause)
@@ -2111,6 +2115,34 @@ private func waitForWhile(_ condition: () -> Bool) async {
 }
 
 final class PlaybackCompletionTrackerTests: XCTestCase {
+    private let testProgressProfileID = "playback-completion-test-\(UUID().uuidString)"
+    private var previousWatchedProfileID: String?
+    private var previousWatchProgressProfileID: String?
+    private var previousContinueWatchingProfileID: String?
+    private var previousDismissalProfileID: String?
+
+    override func setUp() {
+        super.setUp()
+        previousWatchedProfileID = WatchedStore.activeProfileId
+        previousWatchProgressProfileID = WatchProgressLedger.activeProfileId
+        previousContinueWatchingProfileID = ContinueWatchingStore.activeProfileId
+        previousDismissalProfileID = ContinueWatchingDismissStore.activeProfileId
+        WatchedStore.setActiveProfile(testProgressProfileID)
+        ContinueWatchingStore.setActiveProfile(testProgressProfileID)
+        ContinueWatchingStore.eraseProfile(testProgressProfileID)
+        WatchedStore.eraseProfile(testProgressProfileID)
+    }
+
+    override func tearDown() {
+        ContinueWatchingStore.eraseProfile(testProgressProfileID)
+        WatchedStore.eraseProfile(testProgressProfileID)
+        WatchedStore.setActiveProfile(previousWatchedProfileID)
+        ContinueWatchingStore.setActiveProfile(previousContinueWatchingProfileID)
+        WatchProgressLedger.setActiveProfile(previousWatchProgressProfileID)
+        ContinueWatchingDismissStore.setActiveProfile(previousDismissalProfileID)
+        super.tearDown()
+    }
+
     func testTrackerSupportsTheUnscopedDefaultProfile() {
         let identity = PlaybackCompletionIdentity(
             titleID: "tt-default-profile-completion",
@@ -2265,7 +2297,7 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
 
     @MainActor
     func testSaveProgressRecordsFirstCompletionOnceAndRequiresEligibleRewatch() {
-        let profileID = "playback-completion-save-progress-tests"
+        let profileID = "playback-completion-save-progress-\(UUID().uuidString)"
         let profileState = activateProfile(profileID)
         WatchedStore.eraseProfile(profileID)
         defer {
@@ -2329,7 +2361,8 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
         XCTAssertEqual(WatchedStore.watchCount(meta: movie), 2, "Credits-only resume must not increment an existing count")
 
         let (profileSwitch, _) = makeModel(resumeFrom: 100)
-        let otherProfileID = "playback-completion-other-profile"
+        let otherProfileID = "playback-completion-other-profile-\(UUID().uuidString)"
+        defer { WatchedStore.eraseProfile(otherProfileID) }
         WatchedStore.eraseProfile(otherProfileID)
         WatchedStore.setActiveProfile(otherProfileID)
         profileSwitch.saveProgress(force: true)
@@ -2341,7 +2374,7 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
 
     @MainActor
     func testEligibilityHelperAllowsRewindAfterResumeTargetConfirmation() {
-        let profileID = "playback-completion-resume-rewind-tests"
+        let profileID = "playback-completion-resume-rewind-\(UUID().uuidString)"
         let profileState = activateProfile(profileID)
         WatchedStore.eraseProfile(profileID)
         let movie = NuvioMeta(id: "tt-resume-rewind", name: "Resume rewind", type: "movie")
@@ -2393,7 +2426,7 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
 
     @MainActor
     func testSaveProgressCountsCompletionsPerEpisode() {
-        let profileID = "playback-completion-episode-tests"
+        let profileID = "playback-completion-episode-\(UUID().uuidString)"
         let profileState = activateProfile(profileID)
         WatchedStore.eraseProfile(profileID)
         defer {
@@ -2455,7 +2488,7 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
 
     @MainActor
     func testInferredEpisodeIdentitySurvivesMissingCurrentEpisodeConfiguration() {
-        let profileID = "playback-completion-inferred-episode-tests"
+        let profileID = "playback-completion-inferred-episode-\(UUID().uuidString)"
         let profileState = activateProfile(profileID)
         WatchedStore.eraseProfile(profileID)
         defer {
@@ -2486,7 +2519,7 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
             current: nil,
             autoPlayEnabled: false,
             autoPlayCountdownSeconds: 10,
-            resolver: { _ in nil }
+            resolver: { _, _ in nil }
         )
         model.status = .playing
         model.time = PlayerTime(current: 1_100, duration: 1_200)
@@ -2501,7 +2534,7 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
 
     @MainActor
     func testSaveProgressRetainsTrailerLiveAndReplacementExclusions() {
-        let profileID = "playback-completion-exclusion-tests"
+        let profileID = "playback-completion-exclusion-\(UUID().uuidString)"
         let profileState = activateProfile(profileID)
         WatchedStore.eraseProfile(profileID)
         defer {
@@ -2551,12 +2584,15 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
     @MainActor
     private func activateProfile(_ profileID: String) -> PlaybackTestProfile {
         let previousSettingsProfileID = ProfileSettings.activeProfileID
+        let previousSettingsProfileIsPrimary = ProfileSettings.isPrimaryProfileStore(ProfileSettings.current)
         let previousWatchedProfileID = WatchedStore.activeProfileId
+        erasePlaybackTestProfileSettings(profileID)
         ProfileSettings.setActiveProfile(profileID, isPrimary: false)
         WatchedStore.setActiveProfile(profileID)
         return PlaybackTestProfile(
             id: profileID,
             previousSettingsProfileID: previousSettingsProfileID,
+            previousSettingsProfileIsPrimary: previousSettingsProfileIsPrimary,
             previousWatchedProfileID: previousWatchedProfileID
         )
     }
@@ -2564,18 +2600,19 @@ final class PlaybackCompletionTrackerTests: XCTestCase {
     @MainActor
     private func restore(_ profile: PlaybackTestProfile) {
         WatchedStore.eraseProfile(profile.id)
-        ProfileSettings.eraseAll(profileIds: [profile.id])
+        WatchedStore.setActiveProfile(profile.previousWatchedProfileID)
         if let previous = profile.previousSettingsProfileID {
-            ProfileSettings.setActiveProfile(previous, isPrimary: previous == "1")
+            ProfileSettings.setActiveProfile(previous, isPrimary: profile.previousSettingsProfileIsPrimary)
         } else {
             ProfileSettings.clearActiveProfile()
         }
-        WatchedStore.setActiveProfile(profile.previousWatchedProfileID)
+        erasePlaybackTestProfileSettings(profile.id)
     }
 
     private struct PlaybackTestProfile {
         let id: String
         let previousSettingsProfileID: String?
+        let previousSettingsProfileIsPrimary: Bool
         let previousWatchedProfileID: String?
     }
 }
@@ -2599,6 +2636,58 @@ final class TraktCompletionHistoryTests: XCTestCase {
             afterCompletionWasRecorded: false,
             source: .trakt
         ))
+    }
+
+    @MainActor
+    func testCompletionAccountRequiresMatchingWatchedAndSettingsProfilesInXCTest() {
+        let profile = activateTraktProfile(slug: "account-a")
+        defer { restore(profile) }
+
+        XCTAssertEqual(
+            TraktHistoryService.completionAccountID(in: profile.store, profileId: profile.id),
+            "account-a",
+            "The authenticated store is accepted when both active profile owners match"
+        )
+
+        let watchedProfileBeforeMismatch = WatchedStore.activeProfileId
+        WatchedStore.setActiveProfile("\(profile.id)-different-watched")
+        XCTAssertNil(TraktHistoryService.completionAccountID(in: profile.store, profileId: profile.id))
+        WatchedStore.setActiveProfile(watchedProfileBeforeMismatch)
+
+        let otherProfile = activateTraktProfile(slug: "account-b")
+        defer { restore(otherProfile) }
+        WatchedStore.setActiveProfile(profile.id)
+        XCTAssertTrue(ProfileSettings.isActiveStore(otherProfile.store))
+        XCTAssertNil(
+            TraktHistoryService.completionAccountID(in: otherProfile.store, profileId: profile.id),
+            "An active authenticated settings store still cannot claim another watched profile"
+        )
+
+        ProfileSettings.setActiveProfile(profile.id, isPrimary: false)
+        WatchedStore.setActiveProfile(profile.id)
+        XCTAssertEqual(TraktHistoryService.completionAccountID(in: profile.store, profileId: profile.id), "account-a")
+
+        let foreignSuiteName = "nuvio.trakt.foreign-\(UUID().uuidString)"
+        let foreignStore = try! XCTUnwrap(UserDefaults(suiteName: foreignSuiteName))
+        UserDefaults.standard.removePersistentDomain(forName: foreignSuiteName)
+        defer { UserDefaults.standard.removePersistentDomain(forName: foreignSuiteName) }
+        foreignStore.set("test-trakt-client", forKey: SettingsKey.traktClientID)
+        TraktAuthStore.saveToken(
+            TraktTokenResponse(
+                accessToken: "foreign-test-access",
+                tokenType: "bearer",
+                expiresIn: 3_600,
+                refreshToken: "foreign-test-refresh",
+                createdAt: Int(Date().timeIntervalSince1970)
+            ),
+            clientID: "test-trakt-client",
+            store: foreignStore,
+            isNewLogin: true
+        )
+        TraktAuthStore.saveUser(username: "Foreign", slug: "foreign-account", store: foreignStore)
+        XCTAssertTrue(TraktAuthStore.isAuthenticated(in: foreignStore))
+        XCTAssertFalse(ProfileSettings.isActiveStore(foreignStore))
+        XCTAssertNil(TraktHistoryService.completionAccountID(in: foreignStore, profileId: profile.id))
     }
 
     @MainActor
@@ -2823,8 +2912,10 @@ final class TraktCompletionHistoryTests: XCTestCase {
     @MainActor
     private func activateTraktProfile(slug: String) -> TestProfile {
         let previousProfileID = ProfileSettings.activeProfileID
+        let previousProfileIsPrimary = ProfileSettings.isPrimaryProfileStore(ProfileSettings.current)
         let previousWatchedProfileID = WatchedStore.activeProfileId
         let id = "trakt-completion-\(UUID().uuidString)"
+        erasePlaybackTestProfileSettings(id)
         ProfileSettings.setActiveProfile(id, isPrimary: false)
         WatchedStore.setActiveProfile(id)
         let store = ProfileSettings.current
@@ -2846,6 +2937,7 @@ final class TraktCompletionHistoryTests: XCTestCase {
             id: id,
             store: store,
             previousProfileID: previousProfileID,
+            previousProfileIsPrimary: previousProfileIsPrimary,
             previousWatchedProfileID: previousWatchedProfileID
         )
     }
@@ -2853,13 +2945,13 @@ final class TraktCompletionHistoryTests: XCTestCase {
     @MainActor
     private func restore(_ profile: TestProfile) {
         WatchedStore.eraseProfile(profile.id)
-        ProfileSettings.eraseAll(profileIds: [profile.id])
+        WatchedStore.setActiveProfile(profile.previousWatchedProfileID)
         if let previous = profile.previousProfileID {
-            ProfileSettings.setActiveProfile(previous, isPrimary: previous == "1")
+            ProfileSettings.setActiveProfile(previous, isPrimary: profile.previousProfileIsPrimary)
         } else {
             ProfileSettings.clearActiveProfile()
         }
-        WatchedStore.setActiveProfile(profile.previousWatchedProfileID)
+        erasePlaybackTestProfileSettings(profile.id)
     }
 
     private func makeTraktSession(mock: TraktCompletionHistoryMock) -> URLSession {
@@ -2873,6 +2965,7 @@ final class TraktCompletionHistoryTests: XCTestCase {
         let id: String
         let store: UserDefaults
         let previousProfileID: String?
+        let previousProfileIsPrimary: Bool
         let previousWatchedProfileID: String?
     }
 }
