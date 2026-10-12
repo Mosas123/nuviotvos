@@ -273,7 +273,7 @@ extension PlayerView {
                 }
             }
             .onChange(of: viewModel.showNextEpisodeCard) { _, visible in
-                guard !viewModel.showControls, !viewModel.postPlayState.isVisible, !viewModel.showSettingsPanel, viewModel.sidePanel == nil else { return }
+                guard !viewModel.showControls, !viewModel.postPlayState.isVisible, !viewModel.showSettingsPanel, !viewModel.showScenePanel, !viewModel.isSceneDetailVisible, viewModel.sidePanel == nil else { return }
                 if visible {
                     focusNextEpisode()
                 } else if viewModel.showSkipSegmentCard {
@@ -294,7 +294,7 @@ extension PlayerView {
                 }
             }
             .onChange(of: viewModel.showSkipSegmentCard) { _, visible in
-                guard !viewModel.showControls, !viewModel.showNextEpisodeCard, !viewModel.postPlayState.isVisible, !viewModel.showSettingsPanel, viewModel.sidePanel == nil else { return }
+                guard !viewModel.showControls, !viewModel.showNextEpisodeCard, !viewModel.postPlayState.isVisible, !viewModel.showSettingsPanel, !viewModel.showScenePanel, !viewModel.isSceneDetailVisible, viewModel.sidePanel == nil else { return }
                 if visible {
                     focusSkipSegment()
                 } else {

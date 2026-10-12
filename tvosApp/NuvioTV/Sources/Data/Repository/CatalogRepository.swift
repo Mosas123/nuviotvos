@@ -1579,12 +1579,20 @@ final class CinemetaCatalogRepository: CatalogRepository {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        var manifestSources: [(name: String, manifestURL: URL)] = []
+        var manifestSources: [(name: String, manifestURL: URL, isAddon: Bool)] = []
         if Self.isCinemetaEnabled {
-            manifestSources.append((name: "Cinemeta", manifestURL: baseURL.appendingPathComponent("manifest.json")))
+            manifestSources.append((
+                name: "Cinemeta",
+                manifestURL: baseURL.appendingPathComponent("manifest.json"),
+                isAddon: false
+            ))
         }
         for manifestURL in Self.configuredStreamAddonManifestURLs {
-            manifestSources.append((name: Self.streamAddonName(for: manifestURL), manifestURL: manifestURL))
+            manifestSources.append((
+                name: Self.streamAddonName(for: manifestURL),
+                manifestURL: manifestURL,
+                isAddon: true
+            ))
         }
 
         struct SearchTarget {
@@ -1592,10 +1600,15 @@ final class CinemetaCatalogRepository: CatalogRepository {
             let baseURL: URL
             let type: String
             let catalogId: String
+            let isAddon: Bool
         }
         var targets: [SearchTarget] = []
         for source in manifestSources {
             guard let manifest = await manifest(for: source.manifestURL) else { continue }
+            let isCinemeta = source.name == "Cinemeta"
+                || manifest.id.caseInsensitiveCompare(Self.cinemetaAddonId) == .orderedSame
+                || source.manifestURL.host?.contains("cinemeta") == true
+            let isAddon = source.isAddon && !isCinemeta
             let sourceBaseURL = source.manifestURL.lastPathComponent.lowercased() == "manifest.json"
                 ? source.manifestURL.deletingLastPathComponent()
                 : source.manifestURL
@@ -1605,7 +1618,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
                         addonName: manifest.displayName ?? source.name,
                         baseURL: sourceBaseURL,
                         type: catalog.type,
-                        catalogId: catalog.id
+                        catalogId: catalog.id,
+                        isAddon: isAddon
                     )
                 )
             }
@@ -1613,8 +1627,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
         if targets.isEmpty {
             targets = [
-                SearchTarget(addonName: "Cinemeta", baseURL: baseURL, type: "movie", catalogId: "top"),
-                SearchTarget(addonName: "Cinemeta", baseURL: baseURL, type: "series", catalogId: "top")
+                SearchTarget(addonName: "Cinemeta", baseURL: baseURL, type: "movie", catalogId: "top", isAddon: false),
+                SearchTarget(addonName: "Cinemeta", baseURL: baseURL, type: "series", catalogId: "top", isAddon: false)
             ]
         }
 
@@ -1630,7 +1644,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
                             search: trimmed,
                             genre: nil
                         )
-                        return (index, items)
+                        let tagged = target.isAddon ? items.map { $0.withIsFromAddon(true) } : items
+                        return (index, tagged)
                     } catch {
                         return (index, [])
                     }
@@ -1643,13 +1658,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
             indexed.sort { $0.0 < $1.0 }
 
             var merged: [NuvioMeta] = []
-            var seen = Set<String>()
             for (_, items) in indexed {
-                for item in items {
-                    if seen.insert(item.id).inserted {
-                        merged.append(item)
-                    }
-                }
+                merged.append(contentsOf: items)
             }
             return merged
         }
@@ -1665,7 +1675,10 @@ final class CinemetaCatalogRepository: CatalogRepository {
     /// canonical external ids first, then cross-match by canonical type, release
     /// year, and title for entries whose external ids do not conflict. This keeps
     /// remakes (different years) and movie/series pairs while removing duplicate posters.
-    static func deduplicatedSearchResults(_ items: [NuvioMeta]) -> [NuvioMeta] {
+    static func deduplicatedSearchResults(
+        _ items: [NuvioMeta],
+        preferAddonArtwork: Bool = CinemetaCatalogRepository.preferAddonArtworkInSearch
+    ) -> [NuvioMeta] {
         guard items.count > 1 else { return items }
 
         var identityToIndex: [String: Int] = [:]
@@ -1702,9 +1715,27 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 let existing = result[existingIndex]
                 let resolvedTmdb = existing.tmdbId ?? itemIdentifiers.tmdb
                 let resolvedImdb = existing.imdbId ?? itemIdentifiers.imdb
-                let resolvedPoster = existing.posterUrl ?? item.posterUrl
-                let resolvedBackdrop = existing.backgroundUrl ?? item.backgroundUrl
-                let resolvedLogo = existing.logoUrl ?? item.logoUrl
+                let resolvedPoster: String? = {
+                    if preferAddonArtwork {
+                        if item.isFromAddon == true, let addonPoster = trimmedNonEmpty(item.posterUrl) {
+                            return addonPoster
+                        }
+                        if existing.isFromAddon == true, let existingPoster = trimmedNonEmpty(existing.posterUrl) {
+                            return existingPoster
+                        }
+                    }
+                    return trimmedNonEmpty(existing.posterUrl) ?? trimmedNonEmpty(item.posterUrl)
+                }()
+                let resolvedPosterShape = (preferAddonArtwork && item.isFromAddon == true ? item.posterShape : nil)
+                    ?? existing.posterShape
+                    ?? item.posterShape
+                let resolvedIsFromAddon = (existing.isFromAddon == true || item.isFromAddon == true) ? true : nil
+                let resolvedBackdrop = (preferAddonArtwork && item.isFromAddon == true ? trimmedNonEmpty(item.backgroundUrl) : nil)
+                    ?? trimmedNonEmpty(existing.backgroundUrl)
+                    ?? trimmedNonEmpty(item.backgroundUrl)
+                let resolvedLogo = (preferAddonArtwork && item.isFromAddon == true ? trimmedNonEmpty(item.logoUrl) : nil)
+                    ?? trimmedNonEmpty(existing.logoUrl)
+                    ?? trimmedNonEmpty(item.logoUrl)
                 let resolvedYear = existing.year ?? item.year ?? parsedYear(from: item.releaseInfo)
 
                 if resolvedTmdb != existing.tmdbId
@@ -1712,7 +1743,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     || resolvedPoster != existing.posterUrl
                     || resolvedBackdrop != existing.backgroundUrl
                     || resolvedLogo != existing.logoUrl
-                    || resolvedYear != existing.year {
+                    || resolvedYear != existing.year
+                    || resolvedPosterShape != existing.posterShape
+                    || resolvedIsFromAddon != existing.isFromAddon {
                     result[existingIndex] = NuvioMeta(
                         id: existing.id,
                         name: existing.name,
@@ -1739,7 +1772,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
                         videos: existing.videos ?? item.videos,
                         trailerYtIds: existing.trailerYtIds ?? item.trailerYtIds,
                         externalRatings: existing.externalRatings ?? item.externalRatings,
-                        posterShape: existing.posterShape ?? item.posterShape
+                        posterShape: resolvedPosterShape,
+                        isFromAddon: resolvedIsFromAddon
                     )
                 }
 
@@ -2184,6 +2218,18 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
     static func setCinemetaDisabled(_ disabled: Bool, in defaults: UserDefaults = ProfileSettings.current) {
         defaults.set(disabled, forKey: SettingsKey.cinemetaDisabled)
+    }
+
+    static func preferAddonArtworkInSearch(in defaults: UserDefaults = ProfileSettings.current) -> Bool {
+        defaults.object(forKey: SettingsKey.preferAddonArtworkInSearch) as? Bool ?? true
+    }
+
+    static var preferAddonArtworkInSearch: Bool {
+        preferAddonArtworkInSearch(in: ProfileSettings.current)
+    }
+
+    static func setPreferAddonArtworkInSearch(_ enabled: Bool, in defaults: UserDefaults = ProfileSettings.current) {
+        defaults.set(enabled, forKey: SettingsKey.preferAddonArtworkInSearch)
     }
 
     private func manifest(for url: URL) async -> AddonManifest? {

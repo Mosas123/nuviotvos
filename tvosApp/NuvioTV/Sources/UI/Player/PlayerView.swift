@@ -136,6 +136,8 @@ struct PlayerView: View {
             guard viewModel.showSkipSegmentCard,
                   !viewModel.postPlayState.isVisible,
                   !viewModel.showSettingsPanel,
+                  !viewModel.showScenePanel,
+                  !viewModel.isSceneDetailVisible,
                   viewModel.sidePanel == nil,
                   !viewModel.isScrubbing,
                   !viewModel.isHoldingSeek,

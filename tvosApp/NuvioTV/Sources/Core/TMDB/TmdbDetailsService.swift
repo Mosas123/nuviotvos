@@ -628,7 +628,8 @@ enum TmdbDetailsService {
             videos: meta.videos,
             trailerYtIds: meta.trailerYtIds,
             externalRatings: meta.externalRatings,
-            posterShape: meta.posterShape
+            posterShape: meta.posterShape,
+            isFromAddon: meta.isFromAddon
         )
     }
 

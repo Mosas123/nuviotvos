@@ -78,7 +78,10 @@ enum SearchResultEnrichment {
 
             for (index, full) in refreshed {
                 guard let full, !Task.isCancelled else { continue }
-                enriched[index] = deduplicatedResults[index].mergingSearchMetadata(from: full)
+                enriched[index] = deduplicatedResults[index].mergingSearchMetadata(
+                    from: full,
+                    preferAddonArtwork: CinemetaCatalogRepository.preferAddonArtworkInSearch
+                )
             }
             cursor = end
         }

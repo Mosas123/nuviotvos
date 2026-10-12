@@ -116,6 +116,9 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
     let externalRatings: [NuvioExternalRating]?
     /// Card shape from add-on metadata ("landscape", "square", "poster").
     let posterShape: String?
+    /// Indicates this card was served by a third-party add-on catalog rather than Cinemeta.
+    /// Used by Search enrichment and deduplication to keep the add-on's custom artwork intact.
+    let isFromAddon: Bool?
 
     var tileShape: CollectionTileShape {
         CollectionTileShape.fromStored(posterShape, fallback: .poster)
@@ -270,7 +273,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             videos: nil,
             trailerYtIds: trailerYtIds,
             externalRatings: nil,
-            posterShape: posterShape
+            posterShape: posterShape,
+            isFromAddon: isFromAddon
         )
     }
 
@@ -351,19 +355,26 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             videos: videos,
             trailerYtIds: trailerYtIds,
             externalRatings: externalRatings,
-            posterShape: posterShape ?? fullMeta.posterShape
+            posterShape: posterShape ?? fullMeta.posterShape,
+            isFromAddon: isFromAddon ?? fullMeta.isFromAddon
         )
     }
 
     /// Search-specific merge for a compact result and its refreshed `/meta`
-    /// record. Search artwork can be stale even when it is present, so the
-    /// refreshed poster, backdrop, and logo win; compact artwork is used only
-    /// when the refreshed record has no non-blank value. The original id and
-    /// all other compact-result identity/order fields remain unchanged.
-    func mergingSearchMetadata(from fullMeta: NuvioMeta) -> NuvioMeta {
-        let resolvedPoster = trimmedNonEmpty(fullMeta.posterUrl) ?? trimmedNonEmpty(posterUrl)
-        let resolvedBackground = trimmedNonEmpty(fullMeta.backgroundUrl) ?? trimmedNonEmpty(backgroundUrl)
-        let resolvedLogo = trimmedNonEmpty(fullMeta.logoUrl) ?? trimmedNonEmpty(logoUrl)
+    /// record. For Cinemeta search records, artwork can be stale even when it
+    /// is present, so the refreshed poster, backdrop, and logo win. For third-party
+    /// add-on results with custom artwork, the catalog poster is kept intact.
+    func mergingSearchMetadata(from fullMeta: NuvioMeta, preferAddonArtwork: Bool = true) -> NuvioMeta {
+        let keepCatalogPoster = preferAddonArtwork && isFromAddon == true && trimmedNonEmpty(posterUrl) != nil
+        let resolvedPoster = keepCatalogPoster
+            ? (trimmedNonEmpty(posterUrl) ?? trimmedNonEmpty(fullMeta.posterUrl))
+            : (trimmedNonEmpty(fullMeta.posterUrl) ?? trimmedNonEmpty(posterUrl))
+        let resolvedBackground = (keepCatalogPoster ? trimmedNonEmpty(backgroundUrl) : nil)
+            ?? trimmedNonEmpty(fullMeta.backgroundUrl)
+            ?? trimmedNonEmpty(backgroundUrl)
+        let resolvedLogo = (keepCatalogPoster ? trimmedNonEmpty(logoUrl) : nil)
+            ?? trimmedNonEmpty(fullMeta.logoUrl)
+            ?? trimmedNonEmpty(logoUrl)
         let heroMerged = fillingMissingHeroMetadata(from: fullMeta)
 
         return NuvioMeta(
@@ -396,7 +407,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             videos: videos ?? fullMeta.videos,
             trailerYtIds: trailerYtIds ?? fullMeta.trailerYtIds,
             externalRatings: externalRatings,
-            posterShape: posterShape ?? fullMeta.posterShape
+            posterShape: posterShape ?? fullMeta.posterShape,
+            isFromAddon: isFromAddon ?? fullMeta.isFromAddon
         )
     }
 
@@ -440,7 +452,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
                 videos: resolved.videos,
                 trailerYtIds: resolved.trailerYtIds,
                 externalRatings: resolved.externalRatings,
-                posterShape: resolved.posterShape
+                posterShape: resolved.posterShape,
+                isFromAddon: resolved.isFromAddon ?? existing.isFromAddon
             )
         }
         return resolved
@@ -473,7 +486,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             videos: videos,
             trailerYtIds: trailerYtIds,
             externalRatings: ratings.isEmpty ? nil : ratings,
-            posterShape: posterShape
+            posterShape: posterShape,
+            isFromAddon: isFromAddon
         )
     }
 
@@ -507,7 +521,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             videos: videosToUse,
             trailerYtIds: trailerYtIds,
             externalRatings: externalRatings,
-            posterShape: posterShape
+            posterShape: posterShape,
+            isFromAddon: isFromAddon
         )
     }
 
@@ -537,7 +552,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
         videos: [NuvioVideo]? = nil,
         trailerYtIds: [String]? = nil,
         externalRatings: [NuvioExternalRating]? = nil,
-        posterShape: String? = nil
+        posterShape: String? = nil,
+        isFromAddon: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -565,6 +581,39 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
         self.trailerYtIds = trailerYtIds
         self.externalRatings = externalRatings
         self.posterShape = posterShape
+        self.isFromAddon = isFromAddon
+    }
+
+    func withIsFromAddon(_ isFromAddon: Bool?) -> NuvioMeta {
+        NuvioMeta(
+            id: id,
+            name: name,
+            description: description,
+            posterUrl: posterUrl,
+            backgroundUrl: backgroundUrl,
+            logoUrl: logoUrl,
+            imdbId: imdbId,
+            tmdbId: tmdbId,
+            type: type,
+            year: year,
+            genres: genres,
+            rating: rating,
+            releaseInfo: releaseInfo,
+            runtime: runtime,
+            cast: cast,
+            director: director,
+            writer: writer,
+            certification: certification,
+            country: country,
+            language: language,
+            released: released,
+            status: status,
+            videos: videos,
+            trailerYtIds: trailerYtIds,
+            externalRatings: externalRatings,
+            posterShape: posterShape,
+            isFromAddon: isFromAddon
+        )
     }
 }
 
@@ -9874,7 +9923,7 @@ struct DetailsUiState {
 /// Nil for missing or whitespace-only values, so blank artwork/status fields
 /// from a compact catalog card count as "missing" when merging a full `/meta`
 /// record into it.
-fileprivate func trimmedNonEmpty(_ value: String?) -> String? {
+func trimmedNonEmpty(_ value: String?) -> String? {
     guard let value else { return nil }
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed

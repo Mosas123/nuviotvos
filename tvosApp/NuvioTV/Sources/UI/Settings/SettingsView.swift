@@ -168,6 +168,7 @@ enum SettingsKey {
     /// key-by-key keyboard with a title list beside the poster grid) or
     /// `"Classic"` (system-keyboard search bar over a full-width poster grid).
     static let searchStyle = "nuvio.tv.settings.layout.searchStyle"
+    static let preferAddonArtworkInSearch = "nuvio.tv.settings.search.preferAddonArtwork"
     static let continueWatchingVisible = "nuvio.tv.settings.layout.continueWatchingVisible"
     static let continueWatchingLandscape = "nuvio.tv.settings.layout.continueWatchingLandscape"
     static let continueWatchingSort = "nuvio.tv.settings.layout.continueWatchingSort"
@@ -331,7 +332,7 @@ enum SettingsKey {
         accountSyncWatchState,
         theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
         homeLayout, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, landscapePosters, discoverLocation,
-        searchStyle,
+        searchStyle, preferAddonArtworkInSearch,
         continueWatchingVisible, continueWatchingLandscape, continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp,
         cardCornerRadius, cardSize, liquidGlassCards,
         hideUnreleased, showFullDates, detailsActionsBelowInfo,
@@ -2975,6 +2976,7 @@ private struct LayoutDiscoverySettingsView: View {
     @AppStorage(SettingsKey.landscapePosters) private var landscapePosters = false
     @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
     @AppStorage(SettingsKey.searchStyle) private var searchStyle = "Netflix"
+    @AppStorage(SettingsKey.preferAddonArtworkInSearch) private var preferAddonArtworkInSearch = true
     @AppStorage(SettingsKey.continueWatchingVisible) private var continueWatchingVisible = true
     @AppStorage(SettingsKey.continueWatchingLandscape) private var continueWatchingLandscape = false
     @AppStorage(SettingsKey.continueWatchingSort) private var continueWatchingSort = "Default"
@@ -3265,6 +3267,19 @@ private struct LayoutDiscoverySettingsView: View {
                         searchStyle = "Netflix"
                     }
                 }
+
+                SettingsToggleRow(
+                    title: L10n.string(
+                        "layout_prefer_addon_artwork_in_search",
+                        fallback: "Prefer Add-on Artwork in Search"
+                    ),
+                    subtitle: L10n.string(
+                        "layout_prefer_addon_artwork_in_search_sub",
+                        fallback: "Keep custom artwork provided by add-ons instead of replacing with Cinemeta or TMDB posters in search."
+                    ),
+                    isOn: $preferAddonArtworkInSearch,
+                    accentColor: accentColor
+                )
 
                 SettingsOptionRow(
                     title: L10n.string("tvos_layout_discover_entry", fallback: "Discover Entry"),

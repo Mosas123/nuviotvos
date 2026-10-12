@@ -259,8 +259,6 @@ extension PlayerView {
             && !viewModel.postPlayState.isVisible
             && viewModel.sidePanel == nil
             && viewModel.currentErrorDiagnostic == nil
-            && !viewModel.showNextEpisodeCard
-            && !viewModel.showSkipSegmentCard
             && !viewModel.isScrubbing
             && !viewModel.isHoldingSeek
             && viewModel.pendingSeekDelta == 0
@@ -427,7 +425,15 @@ extension PlayerView {
 
     @ViewBuilder
     var skipSegmentLayer: some View {
-        if viewModel.showSkipSegmentCard && !viewModel.postPlayState.isVisible && !viewModel.showSettingsPanel && viewModel.sidePanel == nil && !viewModel.isScrubbing && !viewModel.isHoldingSeek, let interval = viewModel.activeSkipInterval {
+        if viewModel.showSkipSegmentCard
+            && !viewModel.postPlayState.isVisible
+            && !viewModel.showSettingsPanel
+            && !viewModel.showScenePanel
+            && !viewModel.isSceneDetailVisible
+            && viewModel.sidePanel == nil
+            && !viewModel.isScrubbing
+            && !viewModel.isHoldingSeek,
+           let interval = viewModel.activeSkipInterval {
             Button(action: {
                 guard !isWakingFromBackground else { return }
                 viewModel.skipActiveInterval()
@@ -444,9 +450,28 @@ extension PlayerView {
             .onMoveCommand { direction in
                 guard !isWakingFromBackground else { return }
                 switch direction {
+                case .up:
+                    if !viewModel.showControls {
+                        withAnimation(.playerControls) {
+                            viewModel.revealControls()
+                        }
+                    }
                 case .down:
-                    skipSegmentFocused = false
-                    requestedControlFocus = .timeline
+                    if !viewModel.showControls {
+                        if viewModel.isSceneEnabled {
+                            skipSegmentFocused = false
+                            viewModel.openScene()
+                        } else {
+                            withAnimation(.playerControls) {
+                                viewModel.revealControls()
+                            }
+                            skipSegmentFocused = false
+                            requestedControlFocus = .timeline
+                        }
+                    } else {
+                        skipSegmentFocused = false
+                        requestedControlFocus = .timeline
+                    }
                 case .right:
                     if viewModel.showNextEpisodeCard {
                         skipSegmentFocused = false
@@ -471,7 +496,15 @@ extension PlayerView {
     var nextEpisodeLayer: some View {
         // Next-episode prompt, shown near the end. Auto-play occurs only
         // after the current episode reaches genuine end-of-media.
-        if viewModel.showNextEpisodeCard && !viewModel.postPlayState.isVisible && !viewModel.showSettingsPanel && viewModel.sidePanel == nil && !viewModel.isScrubbing && !viewModel.isHoldingSeek, let next = viewModel.nextEpisode {
+        if viewModel.showNextEpisodeCard
+            && !viewModel.postPlayState.isVisible
+            && !viewModel.showSettingsPanel
+            && !viewModel.showScenePanel
+            && !viewModel.isSceneDetailVisible
+            && viewModel.sidePanel == nil
+            && !viewModel.isScrubbing
+            && !viewModel.isHoldingSeek,
+           let next = viewModel.nextEpisode {
             VStack(spacing: 8) {
                 Button(action: {
                     guard !isWakingFromBackground else { return }
@@ -490,13 +523,38 @@ extension PlayerView {
                 .onMoveCommand { direction in
                     guard !isWakingFromBackground else { return }
                     switch direction {
+                    case .up:
+                        if !viewModel.showControls {
+                            withAnimation(.playerControls) {
+                                viewModel.revealControls()
+                            }
+                        }
                     case .down:
-                        nextEpisodeFocused = false
-                        requestedControlFocus = .settings
+                        if viewModel.nextEpisodeCountdown != nil {
+                            nextEpisodeFocused = false
+                            cancelAutoPlayFocused = true
+                        } else if !viewModel.showControls {
+                            if viewModel.isSceneEnabled {
+                                nextEpisodeFocused = false
+                                viewModel.openScene()
+                            } else {
+                                withAnimation(.playerControls) {
+                                    viewModel.revealControls()
+                                }
+                                nextEpisodeFocused = false
+                                requestedControlFocus = .settings
+                            }
+                        } else {
+                            nextEpisodeFocused = false
+                            requestedControlFocus = .settings
+                        }
                     case .left:
                         if viewModel.showSkipSegmentCard {
                             nextEpisodeFocused = false
                             focusSkipSegment()
+                        } else if viewModel.showControls {
+                            nextEpisodeFocused = false
+                            requestedControlFocus = .settings
                         }
                     default:
                         break
@@ -527,13 +585,29 @@ extension PlayerView {
                             cancelAutoPlayFocused = false
                             nextEpisodeFocused = true
                         case .down:
-                            cancelAutoPlayFocused = false
-                            requestedControlFocus = .settings
+                            if !viewModel.showControls {
+                                if viewModel.isSceneEnabled {
+                                    cancelAutoPlayFocused = false
+                                    viewModel.openScene()
+                                } else {
+                                    withAnimation(.playerControls) {
+                                        viewModel.revealControls()
+                                    }
+                                    cancelAutoPlayFocused = false
+                                    requestedControlFocus = .settings
+                                }
+                            } else {
+                                cancelAutoPlayFocused = false
+                                requestedControlFocus = .settings
+                            }
                         case .left:
-                        if viewModel.showSkipSegmentCard {
-                            cancelAutoPlayFocused = false
-                            focusSkipSegment()
-                        }
+                            if viewModel.showSkipSegmentCard {
+                                cancelAutoPlayFocused = false
+                                focusSkipSegment()
+                            } else if viewModel.showControls {
+                                cancelAutoPlayFocused = false
+                                requestedControlFocus = .settings
+                            }
                         default:
                             break
                         }

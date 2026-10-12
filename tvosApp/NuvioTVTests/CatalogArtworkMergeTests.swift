@@ -326,6 +326,161 @@ final class CatalogArtworkMergeTests: XCTestCase {
         XCTAssertEqual(enriched.first?.tmdbId, 603)
     }
 
+    func testMergingSearchMetadataPreservesAddonPosterWhenPreferAddonArtwork() {
+        let addonCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://addon.example/badge-poster.jpg",
+            backgroundUrl: nil,
+            logoUrl: nil,
+            runtime: nil,
+            status: nil,
+            isFromAddon: true
+        )
+        let full = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: 1396,
+            posterUrl: "https://cinemeta.example/official-poster.jpg",
+            backgroundUrl: "https://cinemeta.example/backdrop.jpg",
+            logoUrl: "https://cinemeta.example/logo.png",
+            runtime: "47 min",
+            status: "Ended"
+        )
+
+        let enriched = addonCard.mergingSearchMetadata(from: full, preferAddonArtwork: true)
+
+        XCTAssertEqual(enriched.posterUrl, "https://addon.example/badge-poster.jpg", "Add-on custom poster must be preserved")
+        XCTAssertEqual(enriched.backgroundUrl, "https://cinemeta.example/backdrop.jpg", "Missing backdrop must be filled")
+        XCTAssertEqual(enriched.logoUrl, "https://cinemeta.example/logo.png", "Missing logo must be filled")
+        XCTAssertEqual(enriched.tmdbId, 1396)
+        XCTAssertEqual(enriched.isFromAddon, true)
+    }
+
+    func testMergingSearchMetadataReplacesCinemetaPosterWhenNotFromAddon() {
+        let cinemetaCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://cinemeta.example/stale-poster.jpg",
+            backgroundUrl: nil,
+            logoUrl: nil,
+            runtime: nil,
+            status: nil,
+            isFromAddon: nil
+        )
+        let full = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: 1396,
+            posterUrl: "https://cinemeta.example/official-poster.jpg",
+            backgroundUrl: "https://cinemeta.example/backdrop.jpg",
+            logoUrl: "https://cinemeta.example/logo.png",
+            runtime: "47 min",
+            status: "Ended"
+        )
+
+        let enriched = cinemetaCard.mergingSearchMetadata(from: full, preferAddonArtwork: true)
+
+        XCTAssertEqual(enriched.posterUrl, "https://cinemeta.example/official-poster.jpg", "Cinemeta search poster should be refreshed")
+    }
+
+    func testMergingSearchMetadataReplacesAddonPosterWhenPreferAddonArtworkIsDisabled() {
+        let addonCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://addon.example/badge-poster.jpg",
+            backgroundUrl: nil,
+            logoUrl: nil,
+            runtime: nil,
+            status: nil,
+            isFromAddon: true
+        )
+        let full = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: 1396,
+            posterUrl: "https://cinemeta.example/official-poster.jpg",
+            backgroundUrl: "https://cinemeta.example/backdrop.jpg",
+            logoUrl: "https://cinemeta.example/logo.png",
+            runtime: "47 min",
+            status: "Ended"
+        )
+
+        let enriched = addonCard.mergingSearchMetadata(from: full, preferAddonArtwork: false)
+
+        XCTAssertEqual(enriched.posterUrl, "https://cinemeta.example/official-poster.jpg", "When preference is disabled, refreshed poster should win")
+    }
+
+    func testSearchDeduplicationPrefersAddonPosterOverCinemeta() {
+        let cinemetaCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://cinemeta.example/poster.jpg",
+            isFromAddon: nil
+        )
+        let addonCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://addon.example/badge-poster.jpg",
+            isFromAddon: true
+        )
+
+        // Cinemeta first, Addon second
+        let deduplicated1 = CinemetaCatalogRepository.deduplicatedSearchResults([cinemetaCard, addonCard], preferAddonArtwork: true)
+        XCTAssertEqual(deduplicated1.count, 1)
+        XCTAssertEqual(deduplicated1.first?.posterUrl, "https://addon.example/badge-poster.jpg")
+        XCTAssertEqual(deduplicated1.first?.isFromAddon, true)
+
+        // Addon first, Cinemeta second
+        let deduplicated2 = CinemetaCatalogRepository.deduplicatedSearchResults([addonCard, cinemetaCard], preferAddonArtwork: true)
+        XCTAssertEqual(deduplicated2.count, 1)
+        XCTAssertEqual(deduplicated2.first?.posterUrl, "https://addon.example/badge-poster.jpg")
+        XCTAssertEqual(deduplicated2.first?.isFromAddon, true)
+
+        // Preference disabled: Cinemeta first wins
+        let deduplicated3 = CinemetaCatalogRepository.deduplicatedSearchResults([cinemetaCard, addonCard], preferAddonArtwork: false)
+        XCTAssertEqual(deduplicated3.count, 1)
+        XCTAssertEqual(deduplicated3.first?.posterUrl, "https://cinemeta.example/poster.jpg")
+    }
+
+    func testSearchEnrichmentPreservesAddonPosterDuringBackgroundEnrichment() async {
+        let addonCard = makeMeta(
+            id: "tt0903747",
+            imdbId: nil,
+            tmdbId: nil,
+            posterUrl: "https://addon.example/badge-poster.jpg",
+            backgroundUrl: nil,
+            logoUrl: nil,
+            runtime: nil,
+            status: nil,
+            isFromAddon: true
+        )
+        let full = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: 1396,
+            posterUrl: "https://cinemeta.example/refreshed-poster.jpg",
+            backgroundUrl: "https://cinemeta.example/backdrop.jpg",
+            logoUrl: "https://cinemeta.example/logo.png",
+            runtime: "47 min",
+            status: "Ended"
+        )
+
+        let repository = StubRefreshRepository(fullByID: ["tt0903747": full])
+        let enriched = await SearchResultEnrichment.enrich([addonCard], repository: repository)
+
+        XCTAssertEqual(enriched.count, 1)
+        XCTAssertEqual(enriched.first?.posterUrl, "https://addon.example/badge-poster.jpg", "Add-on poster must not be replaced by Cinemeta")
+        XCTAssertEqual(enriched.first?.backgroundUrl, "https://cinemeta.example/backdrop.jpg")
+        XCTAssertEqual(enriched.first?.logoUrl, "https://cinemeta.example/logo.png")
+        XCTAssertEqual(enriched.first?.tmdbId, 1396)
+    }
+
     private func makeMeta(
         id: String,
         imdbId: String?,
@@ -338,7 +493,8 @@ final class CatalogArtworkMergeTests: XCTestCase {
         backgroundUrl: String? = "bg",
         logoUrl: String? = "logo",
         runtime: String? = "45 min",
-        status: String? = "Ended"
+        status: String? = "Ended",
+        isFromAddon: Bool? = nil
     ) -> NuvioMeta {
         NuvioMeta(
             id: id,
@@ -361,7 +517,8 @@ final class CatalogArtworkMergeTests: XCTestCase {
             certification: nil,
             country: nil,
             released: nil,
-            status: status
+            status: status,
+            isFromAddon: isFromAddon
         )
     }
 }

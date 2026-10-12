@@ -1461,6 +1461,163 @@ final class ExternalPlayerTests: XCTestCase {
         XCTAssertEqual(ExternalPlayer.from("Unknown"), .builtIn)
         XCTAssertEqual(ExternalPlayer.from(nil), .builtIn)
     }
+
+    func testSubtitleMenuFormatterExternalLabels() {
+        // Standard external subtitle with distinct release label:
+        // release label becomes primary title, add-on name becomes secondary subtitle.
+        let optionWithRelease = SubtitlePanelOption(
+            id: "ext-1",
+            kind: .external(NuvioSubtitle(url: "https://example.com/1.srt", language: "en", label: "The.Batman.2022.1080p.WEBRip.x264-RARBG", source: "OpenSubtitles v3")),
+            badge: "OpenSubtitles v3",
+            title: "English",
+            detail: "The.Batman.2022.1080p.WEBRip.x264-RARBG",
+            language: "English",
+            isSelected: false
+        )
+        let labelsWithRelease = SubtitleMenuFormatter.groupedExternalMenuLabels(option: optionWithRelease)
+        XCTAssertEqual(labelsWithRelease.title, "The.Batman.2022.1080p.WEBRip.x264-RARBG")
+        XCTAssertEqual(labelsWithRelease.subtitle, "OpenSubtitles v3")
+
+        // External subtitle where label is redundant with the add-on name:
+        let optionRedundantAddon = SubtitlePanelOption(
+            id: "ext-2",
+            kind: .external(NuvioSubtitle(url: "https://example.com/2.srt", language: "en", label: "OpenSubtitles", source: "OpenSubtitles v3")),
+            badge: "OpenSubtitles v3",
+            title: "English",
+            detail: "OpenSubtitles",
+            language: "English",
+            isSelected: false
+        )
+        let labelsRedundant = SubtitleMenuFormatter.groupedExternalMenuLabels(option: optionRedundantAddon)
+        XCTAssertEqual(labelsRedundant.title, "OpenSubtitles v3")
+        XCTAssertNil(labelsRedundant.subtitle)
+
+        // External subtitle without label (or label matches language):
+        let optionLanguageOnly = SubtitlePanelOption(
+            id: "ext-3",
+            kind: .external(NuvioSubtitle(url: "https://example.com/3.srt", language: "en", label: "English", source: "SubDL")),
+            badge: "SubDL",
+            title: "English",
+            detail: nil,
+            language: "English",
+            isSelected: false
+        )
+        let labelsLangOnly = SubtitleMenuFormatter.groupedExternalMenuLabels(option: optionLanguageOnly)
+        XCTAssertEqual(labelsLangOnly.title, "SubDL")
+        XCTAssertNil(labelsLangOnly.subtitle)
+
+        // External subtitle with hash/token that gets filtered by sanitizer:
+        let optionGarbageToken = SubtitlePanelOption(
+            id: "ext-4",
+            kind: .external(NuvioSubtitle(url: "https://example.com/4.srt", language: "en", label: "v3_e1_deadbeef123456", source: "OpenSubtitles v3")),
+            badge: "OpenSubtitles v3",
+            title: "English",
+            detail: "v3_e1_deadbeef123456",
+            language: "English",
+            isSelected: false
+        )
+        let labelsGarbage = SubtitleMenuFormatter.groupedExternalMenuLabels(option: optionGarbageToken)
+        XCTAssertEqual(labelsGarbage.title, "OpenSubtitles v3")
+        XCTAssertNil(labelsGarbage.subtitle)
+
+        // Orphaned external mpv track:
+        let optionExternalTrack = SubtitlePanelOption(
+            id: "track-1",
+            kind: .track(SubtitleTrack(id: "1", name: "custom_sub.srt", language: "eng", isSelected: false, externalFilename: "custom_sub.srt")),
+            badge: "External",
+            title: "custom_sub.srt",
+            detail: nil,
+            language: "English",
+            isSelected: false
+        )
+        let labelsTrack = SubtitleMenuFormatter.groupedExternalMenuLabels(option: optionExternalTrack)
+        XCTAssertEqual(labelsTrack.title, "custom_sub.srt")
+        XCTAssertEqual(labelsTrack.subtitle, "External")
+    }
+
+    func testSubtitleMenuFormatterBuiltInLabels() {
+        // Built-in track with title and no extra detail:
+        let optionStandard = SubtitlePanelOption(
+            id: "track-builtin-1",
+            kind: .track(SubtitleTrack(id: "2", name: "English [CC]", language: "eng", isSelected: false, externalFilename: "")),
+            badge: "Built in",
+            title: "English [CC]",
+            detail: nil,
+            language: "English",
+            isSelected: false
+        )
+        let labelsStandard = SubtitleMenuFormatter.builtInMenuLabels(option: optionStandard)
+        XCTAssertEqual(labelsStandard.title, "English [CC]")
+        XCTAssertNil(labelsStandard.subtitle)
+
+        // Built-in track with descriptive detail (e.g. commentary):
+        let optionCommentary = SubtitlePanelOption(
+            id: "track-builtin-2",
+            kind: .track(SubtitleTrack(id: "3", name: "English", language: "eng", isSelected: false, externalFilename: "")),
+            badge: "Built in",
+            title: "English",
+            detail: "Director Commentary",
+            language: "English",
+            isSelected: false
+        )
+        let labelsCommentary = SubtitleMenuFormatter.builtInMenuLabels(option: optionCommentary)
+        XCTAssertEqual(labelsCommentary.title, "English")
+        XCTAssertEqual(labelsCommentary.subtitle, "Director Commentary")
+
+        // Built-in track where detail is identical to title:
+        let optionDuplicate = SubtitlePanelOption(
+            id: "track-builtin-3",
+            kind: .track(SubtitleTrack(id: "4", name: "English", language: "eng", isSelected: false, externalFilename: "")),
+            badge: "Built in",
+            title: "English",
+            detail: "English",
+            language: "English",
+            isSelected: false
+        )
+        let labelsDuplicate = SubtitleMenuFormatter.builtInMenuLabels(option: optionDuplicate)
+        XCTAssertEqual(labelsDuplicate.title, "English")
+        XCTAssertNil(labelsDuplicate.subtitle)
+    }
+
+    func testSubtitleLanguageGroupSelectedOptionAndDisplayTitle() {
+        let externalOption = SubtitlePanelOption(
+            id: "ext-1",
+            kind: .external(NuvioSubtitle(url: "https://example.com/1.srt", language: "en", label: "WEB-DL.x264", source: "OpenSubtitles v3")),
+            badge: "OpenSubtitles v3",
+            title: "English",
+            detail: "WEB-DL.x264",
+            language: "English",
+            isSelected: true
+        )
+        let unselectedOption = SubtitlePanelOption(
+            id: "ext-2",
+            kind: .external(NuvioSubtitle(url: "https://example.com/2.srt", language: "en", label: "720p.HDTV", source: "OpenSubtitles v3")),
+            badge: "OpenSubtitles v3",
+            title: "English",
+            detail: "720p.HDTV",
+            language: "English",
+            isSelected: false
+        )
+        let group = SubtitleLanguageGroup(
+            language: "English",
+            options: [externalOption, unselectedOption]
+        )
+
+        XCTAssertTrue(group.hasSelected)
+        XCTAssertEqual(group.selectedOption?.id, "ext-1")
+        XCTAssertEqual(SubtitleMenuFormatter.optionDisplayTitle(for: externalOption), "WEB-DL.x264")
+
+        let builtInWithDetail = SubtitlePanelOption(
+            id: "track-1",
+            kind: .track(SubtitleTrack(id: "1", name: "English", language: "eng", isSelected: true, externalFilename: "")),
+            badge: "Built in",
+            title: "English",
+            detail: "SDH",
+            language: "English",
+            isSelected: true
+        )
+        XCTAssertEqual(SubtitleMenuFormatter.optionDisplayTitle(for: builtInWithDetail), "English (SDH)")
+    }
 }
 
 

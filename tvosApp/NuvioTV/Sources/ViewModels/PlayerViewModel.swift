@@ -1493,6 +1493,8 @@ class PlayerViewModel: ObservableObject {
               time.duration >= 60,
               !postPlayState.isVisible,
               !showSettingsPanel,
+              !showScenePanel,
+              !isSceneDetailVisible,
               sidePanel == nil else {
             clearNextEpisodeCard()
             return
@@ -1544,6 +1546,8 @@ class PlayerViewModel: ObservableObject {
     private var shouldPresentNextEpisodeCard: Bool {
         guard !postPlayState.isVisible,
               !showSettingsPanel,
+              !showScenePanel,
+              !isSceneDetailVisible,
               sidePanel == nil,
               hasRenderedFirstFrame,
               !isAdvanceInFlight,
@@ -1657,6 +1661,8 @@ class PlayerViewModel: ObservableObject {
               subtitle != PlaybackMarkers.trailerSubtitle,
               !postPlayState.isVisible,
               !showSettingsPanel,
+              !showScenePanel,
+              !isSceneDetailVisible,
               sidePanel == nil else {
             if activeSkipInterval != nil { activeSkipInterval = nil }
             if skipSegmentCountdown != nil { skipSegmentCountdown = nil }
