@@ -1,6 +1,10 @@
 import XCTest
 @testable import NuvioTV
 
+private func eraseContinueWatchingTestSettingsSuite(_ profileID: String) {
+    UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileID)")
+}
+
 private final class WatchedStoreReconciliationProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var storedReentryCompleted = true
@@ -42,18 +46,42 @@ private final class WatchedStoreReconciliationProbe: @unchecked Sendable {
 
 final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
     private let dismissalTestProfileId = "continue-watching-sync-\(UUID().uuidString)"
+    private var previousWatchedProfileId: String?
+    private var previousWatchProgressProfileId: String?
+    private var previousContinueWatchingProfileId: String?
     private var previousDismissalProfileId: String?
+    private var previousSettingsProfileId: String?
+    private var previousSettingsProfileIsPrimary = false
 
     override func setUp() {
         super.setUp()
+        previousSettingsProfileId = ProfileSettings.activeProfileID
+        previousSettingsProfileIsPrimary = ProfileSettings.isPrimaryProfileStore(ProfileSettings.current)
+        previousWatchedProfileId = WatchedStore.activeProfileId
+        previousWatchProgressProfileId = WatchProgressLedger.activeProfileId
+        previousContinueWatchingProfileId = ContinueWatchingStore.activeProfileId
         previousDismissalProfileId = ContinueWatchingDismissStore.activeProfileId
-        ContinueWatchingDismissStore.setActiveProfile(dismissalTestProfileId)
-        ContinueWatchingDismissStore.eraseProfile(dismissalTestProfileId)
+        eraseContinueWatchingTestSettingsSuite(dismissalTestProfileId)
+        ProfileSettings.setActiveProfile(dismissalTestProfileId, isPrimary: false)
+        WatchedStore.setActiveProfile(dismissalTestProfileId)
+        ContinueWatchingStore.setActiveProfile(dismissalTestProfileId)
+        ContinueWatchingStore.eraseProfile(dismissalTestProfileId)
+        WatchedStore.eraseProfile(dismissalTestProfileId)
     }
 
     override func tearDown() {
-        ContinueWatchingDismissStore.eraseProfile(dismissalTestProfileId)
+        ContinueWatchingStore.eraseProfile(dismissalTestProfileId)
+        WatchedStore.eraseProfile(dismissalTestProfileId)
+        WatchedStore.setActiveProfile(previousWatchedProfileId)
+        ContinueWatchingStore.setActiveProfile(previousContinueWatchingProfileId)
+        WatchProgressLedger.setActiveProfile(previousWatchProgressProfileId)
         ContinueWatchingDismissStore.setActiveProfile(previousDismissalProfileId)
+        if let previousSettingsProfileId {
+            ProfileSettings.setActiveProfile(previousSettingsProfileId, isPrimary: previousSettingsProfileIsPrimary)
+        } else {
+            ProfileSettings.clearActiveProfile()
+        }
+        eraseContinueWatchingTestSettingsSuite(dismissalTestProfileId)
         super.tearDown()
     }
 
@@ -1839,8 +1867,14 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
     }
 
     func testWatchedReconciliationPreservesQueuedEventsAndProviderMutations() {
-        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
+        let previousSettingsProfileId = ProfileSettings.activeProfileID
+        let previousSettingsProfileIsPrimary = ProfileSettings.isPrimaryProfileStore(ProfileSettings.current)
+        let previousWatchedProfileId = WatchedStore.activeProfileId
+        let profileId = "completion-outbox-reconcile-\(UUID().uuidString)"
+        eraseContinueWatchingTestSettingsSuite(profileId)
+        ProfileSettings.setActiveProfile(profileId, isPrimary: false)
         let defaults = ProfileSettings.current
+        let restoreRemoteSettings = disableRemoteWatchedSyncForTest()
         let keys = [
             "nuvio.tv.trakt.auth.accessToken",
             "nuvio.tv.trakt.auth.refreshToken",
@@ -1849,24 +1883,31 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
             SettingsKey.traktConnected,
             SettingsKey.traktWatchProgressSource
         ]
-        let priorValues = keys.map { ($0, defaults.object(forKey: $0)) }
-        let profileId = "completion-outbox-reconcile-\(UUID().uuidString)"
-        let previousProfileId = WatchedStore.activeProfileId
         WatchedStore.eraseProfile(profileId)
         WatchedStore.setActiveProfile(profileId)
         defaults.set("test-access", forKey: keys[0])
         defaults.set("test-refresh", forKey: keys[1])
         defaults.set("test-account", forKey: keys[2])
-        defaults.set(TraktConfig.clientID(in: defaults), forKey: keys[3])
+        defaults.set("test-trakt-client", forKey: SettingsKey.traktClientID)
+        defaults.set("test-trakt-client", forKey: keys[3])
         defaults.set(true, forKey: keys[4])
         defaults.set(TraktWatchProgressSource.nuvioSync.rawValue, forKey: keys[5])
+        XCTAssertTrue(ProfileSettings.isActiveStore(defaults))
+        XCTAssertTrue(TraktAuthStore.isAuthenticated(in: defaults))
+        XCTAssertEqual(
+            TraktHistoryService.completionAccountID(in: defaults, profileId: profileId),
+            "test-account"
+        )
         defer {
-            WatchedStore.eraseProfile(profileId)
-            WatchedStore.setActiveProfile(previousProfileId)
-            for (key, value) in priorValues {
-                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
-            }
             restoreRemoteSettings()
+            WatchedStore.eraseProfile(profileId)
+            WatchedStore.setActiveProfile(previousWatchedProfileId)
+            if let previousSettingsProfileId {
+                ProfileSettings.setActiveProfile(previousSettingsProfileId, isPrimary: previousSettingsProfileIsPrimary)
+            } else {
+                ProfileSettings.clearActiveProfile()
+            }
+            eraseContinueWatchingTestSettingsSuite(profileId)
         }
 
         let meta = NuvioMeta(id: "tt-outbox-reconcile-\(UUID().uuidString)", name: "Reconciled", type: "movie")

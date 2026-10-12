@@ -10,6 +10,24 @@ import Combine
 import Foundation
 import UIKit
 
+enum NuvioDeviceRegistrationCapability {
+    private static let unsupportedClientMessage = "Unsupported Nuvio client"
+
+    static var clientVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
+    static func accountVersionKey(accountId: String, clientVersion: String) -> String {
+        "\(accountId)|\(clientVersion)"
+    }
+
+    static func isExplicitlyUnsupported(_ error: Error) -> Bool {
+        guard let authError = error as? AuthError else { return false }
+        return authError.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            .compare(unsupportedClientMessage, options: .caseInsensitive) == .orderedSame
+    }
+}
+
 @MainActor
 final class NuvioSyncManager: ObservableObject {
     /// Posted by the Settings add-on list after an order/enabled-state change.
@@ -105,6 +123,7 @@ final class NuvioSyncManager: ObservableObject {
     /// linked devices. Keep it well below the server's stale-device window,
     /// without adding a request to every foreground refresh.
     private var lastDeviceRegistrationAt: Date?
+    private var unsupportedDeviceRegistrationKey: String?
     private static let deviceRegistrationInterval: TimeInterval = 15 * 60
     /// Identifies the pull that currently owns `pullTask` and the post-login
     /// loading gate. A cancelled pull can unwind after its replacement starts;
@@ -333,6 +352,7 @@ final class NuvioSyncManager: ObservableObject {
             if !isSameAccount {
                 ContinueWatchingBuilder.cancelScheduledRebuild()
                 lastDeviceRegistrationAt = nil
+                unsupportedDeviceRegistrationKey = nil
             }
             Self.accountSyncDiagnostic = "scheduled"
             if AuthConfig.isConfigured {
@@ -363,6 +383,7 @@ final class NuvioSyncManager: ObservableObject {
             observedAuthUserId = nil
             observedActiveProfileId = nil
             lastDeviceRegistrationAt = nil
+            unsupportedDeviceRegistrationKey = nil
             isPullingAccountProfiles = false
             profileSyncError = nil
         case .loading:
@@ -863,6 +884,70 @@ final class NuvioSyncManager: ObservableObject {
         }
     }
 
+    /// Archives and retires only the known synthetic regression fixtures before
+    /// treating the remaining rows as the authoritative remote snapshot.
+    /// Delete failures stay in the profile-scoped retry queue and do not block
+    /// account sync; the Continue Watching builder independently excludes these
+    /// exact IDs so they cannot trigger metadata requests while cleanup retries.
+    static func removeKnownRegressionFixturesFromSnapshot(
+        _ remoteProgress: [WatchProgressRecord],
+        profileId: String?,
+        isCurrentPull: () -> Bool = { true },
+        deleteRemote: ([String], String?) async -> Bool
+    ) async -> [WatchProgressRecord]? {
+        let remoteFixtures = remoteProgress.filter {
+            WatchProgressLedger.isKnownRegressionFixture(contentId: $0.contentId)
+        }
+        let localFixtures = WatchProgressLedger.records(profileId: profileId).filter {
+            WatchProgressLedger.isKnownRegressionFixture(contentId: $0.contentId)
+        }
+        let remoteFixtureKeys = Set(remoteFixtures.map(\.progressKey))
+        guard WatchProgressLedger.backupKnownRegressionFixtures(
+            remoteFixtures + localFixtures,
+            pendingKeys: remoteFixtureKeys,
+            profileId: profileId
+        ) else {
+            print("[NuvioSync] known fixture cleanup deferred: profile backup could not be verified")
+            return nil
+        }
+
+        if !localFixtures.isEmpty {
+            let localKeys = localFixtures.map(\.progressKey)
+            if !WatchProgressLedger.remove(keys: localKeys, profileId: profileId) {
+                print("[NuvioSync] known fixture cleanup: local ledger removal failed for \(localKeys.count) row(s)")
+            }
+        }
+        if ContinueWatchingStore.activeProfileId == profileId {
+            let fixtureContentIds = Set((remoteFixtures + localFixtures).map(\.contentId))
+            for contentId in fixtureContentIds {
+                ContinueWatchingStore.remove(metaId: contentId, retainingLedger: true)
+            }
+        }
+
+        let pendingKeys = WatchProgressLedger.pendingKnownRegressionFixtureCleanupKeys(profileId: profileId)
+        if !pendingKeys.isEmpty {
+            if await deleteRemote(pendingKeys, profileId) {
+                guard isCurrentPull() else {
+                    print("[NuvioSync] known fixture delete completed for a stale pull; retry marker remains")
+                    return remoteProgress.filter {
+                        !WatchProgressLedger.isKnownRegressionFixture(contentId: $0.contentId)
+                    }
+                }
+                if WatchProgressLedger.completeKnownRegressionFixtureCleanup(keys: pendingKeys, profileId: profileId) {
+                    print("[NuvioSync] known fixture cleanup completed for \(pendingKeys.count) remote progress row(s)")
+                } else {
+                    print("[NuvioSync] known fixture cleanup delete succeeded; retry marker remains for recovery")
+                }
+            } else {
+                print("[NuvioSync] known fixture cleanup delete failed; retrying on the next pull for this profile")
+            }
+        }
+
+        return remoteProgress.filter {
+            !WatchProgressLedger.isKnownRegressionFixture(contentId: $0.contentId)
+        }
+    }
+
     func schedulePush(scope: SyncPushScope = .all, delay: TimeInterval = 1.5) {
         guard AuthConfig.isConfigured else { return }
         guard authManager?.isAuthenticated == true else { return }
@@ -969,9 +1054,16 @@ final class NuvioSyncManager: ObservableObject {
     /// the freshly wiped local stores. Call between every network step and the
     /// local apply that follows it; throws once auth flips or the task is
     /// cancelled so the sync dies before it can touch local state.
-    private func ensureStillSyncing(profileId: String? = nil) throws {
+    private func ensureStillSyncing(profileId: String? = nil, accountId: String? = nil) throws {
         try Task.checkCancellation()
         guard authManager?.isAuthenticated == true else { throw CancellationError() }
+        if let accountId {
+            guard let authManager,
+                  case let .fullAccount(currentUserId, _) = authManager.authState,
+                  currentUserId == accountId else {
+                throw CancellationError()
+            }
+        }
         guard let profileId else { return }
         guard profileViewModel?.activeProfile?.id == profileId,
               ContinueWatchingStore.activeProfileId == profileId,
@@ -1039,7 +1131,12 @@ final class NuvioSyncManager: ObservableObject {
             // from the account page even when authentication succeeded. The
             // registration is deliberately best-effort so an older backend
             // remains usable.
-            let shouldRegisterDevice = !attemptedDeviceRegistration && (
+            let registrationKey = NuvioDeviceRegistrationCapability.accountVersionKey(
+                accountId: session.userId,
+                clientVersion: NuvioDeviceRegistrationCapability.clientVersion
+            )
+            let shouldRegisterDevice = unsupportedDeviceRegistrationKey != registrationKey
+                && !attemptedDeviceRegistration && (
                 lastDeviceRegistrationAt == nil
                     || Date().timeIntervalSince(lastDeviceRegistrationAt ?? .distantPast)
                         >= Self.deviceRegistrationInterval
@@ -1047,11 +1144,21 @@ final class NuvioSyncManager: ObservableObject {
             if shouldRegisterDevice {
                 attemptedDeviceRegistration = true
                 do {
+                    try ensureStillSyncing(accountId: session.userId)
                     try await client.registerCurrentDevice(session: session)
+                    try ensureStillSyncing(accountId: session.userId)
                     lastDeviceRegistrationAt = Date()
                     print("Nuvio sync registered this Apple TV as a linked device.")
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
-                    print("Nuvio device registration skipped: \(error.localizedDescription)")
+                    try ensureStillSyncing(accountId: session.userId)
+                    if NuvioDeviceRegistrationCapability.isExplicitlyUnsupported(error) {
+                        unsupportedDeviceRegistrationKey = registrationKey
+                        print("Nuvio device registration unsupported by server for Nuvio tvOS.")
+                    } else {
+                        print("Nuvio device registration skipped: \(error.localizedDescription)")
+                    }
                 }
             }
 
@@ -1328,9 +1435,38 @@ final class NuvioSyncManager: ObservableObject {
 
             var didSaveWatchProgress = false
             do {
-                let remoteProgress = try await progressRequest
-                print("[NuvioSync] pullWatchProgress: received \(remoteProgress.count) progress items from server for profile \(remoteProfileId)")
-                try ensureStillSyncing(profileId: activeProfile.id)
+                let fetchedProgress = try await progressRequest
+                try ensureStillSyncing(profileId: activeProfile.id, accountId: session.userId)
+                guard let remoteProgress = await Self.removeKnownRegressionFixturesFromSnapshot(
+                    fetchedProgress,
+                    profileId: activeProfile.id,
+                    isCurrentPull: {
+                        (try? self.ensureStillSyncing(profileId: activeProfile.id, accountId: session.userId)) != nil
+                    },
+                    deleteRemote: { keys, profileId in
+                        guard profileId == activeProfile.id else { return false }
+                        do {
+                            try self.ensureStillSyncing(profileId: activeProfile.id, accountId: session.userId)
+                            try await self.client.deleteWatchProgress(
+                                session: session,
+                                remoteProfileId: remoteProfileId,
+                                keys: keys
+                            )
+                            try self.ensureStillSyncing(profileId: activeProfile.id, accountId: session.userId)
+                            return true
+                        } catch is CancellationError {
+                            return false
+                        } catch {
+                            print("[NuvioSync] known fixture remote delete failed for \(keys.count) row(s)")
+                            return false
+                        }
+                    }
+                ) else {
+                    try ensureStillSyncing(profileId: activeProfile.id, accountId: session.userId)
+                    throw AuthError(message: "Known fixture backup could not be verified; watch progress reconcile deferred.")
+                }
+                print("[NuvioSync] pullWatchProgress: received \(fetchedProgress.count) row(s), keeping \(remoteProgress.count) after known-fixture cleanup for profile \(remoteProfileId)")
+                try ensureStillSyncing(profileId: activeProfile.id, accountId: session.userId)
                 // Authoritative, deletions included. The account is this
                 // backend's source of truth, and a row deleted on another
                 // device reaches us only as an absence from the snapshot.
@@ -2586,9 +2722,7 @@ fileprivate final class NuvioAPIClient {
     @MainActor
     func registerCurrentDevice(session: AuthSession) async throws {
         let device = UIDevice.current
-        let clientVersion = Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "dev"
+        let clientVersion = NuvioDeviceRegistrationCapability.clientVersion
         let deviceName = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let platform = "\(device.systemName) \(device.systemVersion)"
 

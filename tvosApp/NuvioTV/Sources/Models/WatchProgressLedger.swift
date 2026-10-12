@@ -71,6 +71,129 @@ struct WatchProgressRecord: Codable, Equatable, Identifiable, Sendable {
 enum WatchProgressLedger {
     static let changedNotification = Notification.Name("nuvio.tv.watchProgress.ledger.changed")
 
+    private static let knownRegressionFixtureIDs: Set<String> = [
+        "tt-playback-completion",
+        "tt-resume-rewind",
+        "series-completion",
+        "series-inferred"
+    ]
+    private static let fixtureCleanupArchiveBaseKey = "nuvio.tv.watchProgress.fixtureCleanup.v1"
+    static let fixtureCleanupArchiveDirectoryName = "WatchProgressFixtureCleanup"
+
+    private struct FixtureCleanupArchive: Codable, Equatable {
+        var recordsByKey: [String: WatchProgressRecord] = [:]
+        var pendingKeys: Set<String> = []
+    }
+
+    /// Matches only synthetic records emitted by the known progress regressions.
+    /// The dismissal-race fixture is dynamic, so its suffix must be a canonical UUID.
+    static func isKnownRegressionFixture(contentId: String) -> Bool {
+        if knownRegressionFixtureIDs.contains(contentId) { return true }
+        let prefix = "tt-dismiss-race-"
+        guard contentId.hasPrefix(prefix) else { return false }
+        let uuidText = String(contentId.dropFirst(prefix.count))
+        guard let uuid = UUID(uuidString: uuidText) else { return false }
+        return uuid.uuidString.caseInsensitiveCompare(uuidText) == .orderedSame
+    }
+
+    /// Archives classified fixture rows before a sync pull filters or removes them.
+    /// Callers pass only remote keys as pending; the retained records also cover
+    /// local-only rows, so successful server cleanup remains inspectable without
+    /// being retried on every pull.
+    @discardableResult
+    static func backupKnownRegressionFixtures(
+        _ records: [WatchProgressRecord],
+        pendingKeys requestedPendingKeys: Set<String>? = nil,
+        profileId: String? = nil
+    ) -> Bool {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard var archive = fixtureCleanupArchiveLocked(profileId: profileId) else { return false }
+
+        let fixtures = records.filter { isKnownRegressionFixture(contentId: $0.contentId) }
+        guard !fixtures.isEmpty else { return true }
+        for record in fixtures {
+            if let existing = archive.recordsByKey[record.progressKey],
+               existing.lastWatchedAt > record.lastWatchedAt {
+                // Keep the newer archived payload while still scheduling the key
+                // for deletion if it reappeared in a remote snapshot.
+            } else {
+                archive.recordsByKey[record.progressKey] = record
+            }
+        }
+        let archivedKeys = Set(fixtures.map(\.progressKey))
+        let pendingKeys = requestedPendingKeys ?? archivedKeys
+        for key in pendingKeys.intersection(archivedKeys) {
+            archive.pendingKeys.insert(key)
+        }
+        return persistFixtureCleanupArchiveLocked(archive, profileId: profileId)
+    }
+
+    static func knownRegressionFixtureCleanupRecords(profileId: String? = nil) -> [WatchProgressRecord] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard let archive = fixtureCleanupArchiveLocked(profileId: profileId) else { return [] }
+        return archive.recordsByKey.values.sorted { $0.progressKey < $1.progressKey }
+    }
+
+    static func pendingKnownRegressionFixtureCleanupKeys(profileId: String? = nil) -> [String] {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard let archive = fixtureCleanupArchiveLocked(profileId: profileId) else { return [] }
+        return archive.pendingKeys.sorted()
+    }
+
+    /// Clears only the retry markers after the remote delete succeeds. The
+    /// archived rows remain available for inspection and recovery.
+    @discardableResult
+    static func completeKnownRegressionFixtureCleanup(keys: [String], profileId: String? = nil) -> Bool {
+        guard !keys.isEmpty else { return true }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard var archive = fixtureCleanupArchiveLocked(profileId: profileId) else { return false }
+        archive.pendingKeys.subtract(keys)
+        return persistFixtureCleanupArchiveLocked(archive, profileId: profileId)
+    }
+
+    static func fixtureCleanupArchiveStorageKey(profileId: String?) -> String {
+        let id = profileId ?? activeProfileId ?? ""
+        return "\(fixtureCleanupArchiveBaseKey).\(id.isEmpty ? "default" : id)"
+    }
+
+    private static func fixtureCleanupArchiveLocked(profileId: String?) -> FixtureCleanupArchive? {
+        guard let data = LargePayloadStore.read(
+            key: fixtureCleanupArchiveStorageKey(profileId: profileId),
+            directory: fixtureCleanupArchiveDirectoryName
+        ) else {
+            return FixtureCleanupArchive()
+        }
+        guard var archive = try? JSONDecoder().decode(FixtureCleanupArchive.self, from: data) else {
+            print("[WatchProgressLedger] fixture cleanup archive decode failed; cleanup will be deferred")
+            return nil
+        }
+        var classifiedRecords: [String: WatchProgressRecord] = [:]
+        for (key, record) in archive.recordsByKey
+        where key == record.progressKey && isKnownRegressionFixture(contentId: record.contentId) {
+            classifiedRecords[key] = record
+        }
+        archive.recordsByKey = classifiedRecords
+        archive.pendingKeys.formIntersection(Set(archive.recordsByKey.keys))
+        return archive
+    }
+
+    private static func persistFixtureCleanupArchiveLocked(
+        _ archive: FixtureCleanupArchive,
+        profileId: String?
+    ) -> Bool {
+        guard let data = try? JSONEncoder().encode(archive) else { return false }
+        let key = fixtureCleanupArchiveStorageKey(profileId: profileId)
+        guard LargePayloadStore.write(data, key: key, directory: fixtureCleanupArchiveDirectoryName),
+              LargePayloadStore.read(key: key, directory: fixtureCleanupArchiveDirectoryName) == data else {
+            return false
+        }
+        return true
+    }
+
     private static let baseKey = "nuvio.tv.watchProgress.ledger.v1"
     /// Guards the one-time movie re-push recovery, per profile.
     private static let movieRepushFlagKey = "nuvio.tv.watchProgress.ledger.movieRepush.v1"
@@ -445,6 +568,10 @@ enum WatchProgressLedger {
         // profile erased and rebuilt has already spent its recovery — which for
         // a test suite silently disables what the next run is asserting.
         UserDefaults.standard.removeObject(forKey: repushFlagKey(for: profileId))
+        LargePayloadStore.remove(
+            key: fixtureCleanupArchiveStorageKey(profileId: profileId),
+            directory: fixtureCleanupArchiveDirectoryName
+        )
         invalidateCache()
         postChangedNotification()
     }
@@ -452,9 +579,13 @@ enum WatchProgressLedger {
     static func eraseAllProfiles() {
         let defaults = UserDefaults.standard
         defaults.dictionaryRepresentation().keys
-            .filter { $0.hasPrefix(baseKey) || $0.hasPrefix(movieRepushFlagKey) }
+            .filter {
+                $0.hasPrefix(baseKey)
+                    || $0.hasPrefix(movieRepushFlagKey)
+            }
             .forEach { defaults.removeObject(forKey: $0) }
         LargePayloadStore.removeDirectory(storageDirectoryName)
+        LargePayloadStore.removeDirectory(fixtureCleanupArchiveDirectoryName)
         invalidateCache()
         postChangedNotification()
     }
