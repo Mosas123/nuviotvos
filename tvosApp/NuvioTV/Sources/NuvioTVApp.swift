@@ -337,7 +337,6 @@ struct ContentView: View {
     private static let profileGateMinimumDuration: TimeInterval = 1.2
     /// Watchdog for maximum profile loading time (capped at 3.0 seconds).
     private static let profileGateTimeout: TimeInterval = 3.0
-    @State private var isInitialHomeFocusPending = false
     @State private var selectedTab: TVTab = .home
     /// Series context for the current playback, captured at play time so the
     /// player can offer/auto-play the next episode. Empty for movies/trailers.
@@ -348,6 +347,8 @@ struct ContentView: View {
     @State private var playbackVideoSize: Int64?
     @State private var playbackVideoHash: String?
     @State private var playbackCacheFileIdentity: PlaybackCacheFileIdentity?
+    @State private var playbackStartupBenchmarkToken: UUID?
+    @State private var continueWatchingStartupBenchmarkToken: UUID?
     @State private var playbackDidStart = false
     @State private var reopenStreamPickerOnDetails = false
     @State private var reopenStreamPickerEpisode: NuvioVideo?
@@ -516,13 +517,13 @@ struct ContentView: View {
         }
         // Backing out of the switch must not leave the cover behind.
         .onChange(of: isOnProfileSelection) { _, isSelecting in
-            if isSelecting, isPreparingProfile || isInitialHomeFocusPending {
-                cancelProfileGate()
+            if isSelecting, isPreparingProfile {
+                liftProfileGate()
             }
         }
         .onChange(of: selectedTab) { _, tab in
-            if tab != .home, isPreparingProfile || isInitialHomeFocusPending {
-                cancelProfileGate(generation: profileGateGeneration)
+            if isPreparingProfile, tab != .home {
+                liftProfileGate(generation: profileGateGeneration)
             }
         }
         .onChange(of: activeScreen) { oldScreen, newScreen in
@@ -759,7 +760,8 @@ struct ContentView: View {
     /// tears the overlay down, so Player's `onDisappear` cleanup still runs.
     private func dismissOverlay() {
         if isResolvingContinueWatchingStream {
-            PlaybackStartupTiming.cancel()
+            PlaybackStartupTiming.cancel(token: continueWatchingStartupBenchmarkToken)
+            continueWatchingStartupBenchmarkToken = nil
             continueWatchingPlaybackTask?.cancel()
             continueWatchingPlaybackTask = nil
             resolvingContinueWatchingItem = nil
@@ -1062,7 +1064,6 @@ struct ContentView: View {
         profileGateGeneration &+= 1
         profileGateReadinessIdentity = nil
         profileGateReadiness = .waiting(hasFocusableContent: false, targetSignature: nil)
-        isInitialHomeFocusPending = true
         isPreparingProfile = true
         profileGateStartedAt = Date()
         let generation = profileGateGeneration
@@ -1076,7 +1077,7 @@ struct ContentView: View {
                 return
             }
             TVHomeDebugTrace.log("⚠️ profileGate.watchdog FIRED after \(Self.profileGateTimeout)s timeout! Force lifting gate for gen=\(generation)")
-            timeoutProfileGate(generation: generation)
+            liftProfileGate(generation: generation)
         }
     }
 
@@ -1086,16 +1087,13 @@ struct ContentView: View {
         _ readiness: TVProfileGateReadiness
     ) {
         TVHomeDebugTrace.log("profileGate.readinessChanged identity=\(identity.profileId):\(identity.catalogRevision) gen=\(generation) curGen=\(profileGateGeneration) readiness=\(readiness)")
-        guard isInitialHomeFocusPending,
+        guard isPreparingProfile,
               generation == profileGateGeneration,
               identity == currentHomeContentIdentity else { return }
         profileGateReadinessIdentity = identity
         profileGateReadiness = readiness
         switch readiness {
-        case .ready:
-            scheduleProfileGateLift(for: identity, generation: generation)
-        case .empty, .overlay:
-            isInitialHomeFocusPending = false
+        case .ready, .empty, .overlay:
             scheduleProfileGateLift(for: identity, generation: generation)
         case .waiting:
             profileGateLiftTask?.cancel()
@@ -1104,9 +1102,9 @@ struct ContentView: View {
     }
 
     private func scheduleProfileGateLift(for identity: TVHomeContentIdentity, generation: UInt) {
-        guard isPreparingProfile || isInitialHomeFocusPending else { return }
+        guard isPreparingProfile else { return }
         let elapsed = Date().timeIntervalSince(profileGateStartedAt ?? Date())
-        let remaining = isPreparingProfile ? max(0, Self.profileGateMinimumDuration - elapsed) : 0
+        let remaining = max(0, Self.profileGateMinimumDuration - elapsed)
         TVHomeDebugTrace.log("profileGate.scheduleLift gen=\(generation) elapsed=\(String(format: "%.2f", elapsed))s remaining=\(String(format: "%.2f", remaining))s readiness=\(profileGateReadiness)")
         profileGateLiftTask?.cancel()
         profileGateLiftTask = Task { @MainActor in
@@ -1114,6 +1112,7 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
             }
             guard !Task.isCancelled,
+                  isPreparingProfile,
                   generation == profileGateGeneration,
                   identity == currentHomeContentIdentity,
                   profileGateReadinessIdentity == identity else {
@@ -1127,29 +1126,9 @@ struct ContentView: View {
                 TVHomeDebugTrace.log("profileGate.liftTask aborted: readiness still waiting gen=\(generation)")
                 return
             }
-            isInitialHomeFocusPending = false
             TVHomeDebugTrace.log("profileGate.liftTask executing normal lift for gen=\(generation)")
             liftProfileGate(generation: generation)
         }
-    }
-
-    private func timeoutProfileGate(generation: UInt) {
-        guard generation == profileGateGeneration, isPreparingProfile else { return }
-        if profileGateReadinessIdentity == currentHomeContentIdentity {
-            switch profileGateReadiness {
-            case .ready, .empty, .overlay:
-                isInitialHomeFocusPending = false
-            case .waiting:
-                break
-            }
-        }
-        liftProfileGate(generation: generation)
-    }
-
-    private func cancelProfileGate(generation: UInt? = nil) {
-        if let generation, generation != profileGateGeneration { return }
-        isInitialHomeFocusPending = false
-        liftProfileGate(generation: generation)
     }
 
     /// Used when the user backs out or the scoped deadline reaches an empty load.
@@ -1307,7 +1286,8 @@ struct ContentView: View {
 
         resolvingContinueWatchingItem = item
         continueWatchingLoadingMessage = L10n.string("player_searching_sources", fallback: "Searching sources…")
-        PlaybackStartupTiming.start(title: item.meta.name)
+        let startupToken = PlaybackStartupTiming.start(title: item.meta.name)
+        continueWatchingStartupBenchmarkToken = startupToken
         isResolvingContinueWatchingStream = true
         continueWatchingPlaybackTask = Task {
             let prepared: PreparedNextStream?
@@ -1315,25 +1295,32 @@ struct ContentView: View {
                 prepared = await Self.resolveNextEpisodeStream(
                     episode: episode,
                     seriesMeta: item.meta,
-                    profileId: profileId
+                    profileId: profileId,
+                    startupToken: startupToken
                 )
             } else if let episode = Self.manualPlaybackEpisode(for: item) {
                 prepared = await Self.resolveNextEpisodeStream(
                     episode: episode,
                     seriesMeta: item.meta,
-                    profileId: profileId
+                    profileId: profileId,
+                    startupToken: startupToken
                 )
             } else {
                 prepared = await Self.resolveStream(
                     contentId: item.meta.id,
                     type: item.meta.type,
                     subtitleLine: item.episodeSubtitle ?? "",
-                    profileId: profileId
+                    profileId: profileId,
+                    startupToken: startupToken
                 )
             }
 
-            guard !Task.isCancelled else {
-                PlaybackStartupTiming.cancel()
+            guard !Task.isCancelled,
+                  PlaybackStartupTiming.isActive(token: startupToken) else {
+                PlaybackStartupTiming.cancel(token: startupToken)
+                if continueWatchingStartupBenchmarkToken == startupToken {
+                    continueWatchingStartupBenchmarkToken = nil
+                }
                 return
             }
 
@@ -1349,13 +1336,20 @@ struct ContentView: View {
                     httpHeaders: prepared.httpHeaders,
                     filename: prepared.filename,
                     videoSize: prepared.videoSize,
-                    videoHash: prepared.videoHash
+                    videoHash: prepared.videoHash,
+                    startupBenchmarkToken: startupToken
                 )
+                if continueWatchingStartupBenchmarkToken == startupToken {
+                    continueWatchingStartupBenchmarkToken = nil
+                }
                 isResolvingContinueWatchingStream = false
                 resolvingContinueWatchingItem = nil
             } else {
                 continueWatchingPlaybackTask = nil
-                PlaybackStartupTiming.cancel()
+                PlaybackStartupTiming.cancel(token: startupToken)
+                if continueWatchingStartupBenchmarkToken == startupToken {
+                    continueWatchingStartupBenchmarkToken = nil
+                }
                 // Keep the manual picker available when no add-on returns a
                 // playable stream automatically.
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -1455,7 +1449,8 @@ struct ContentView: View {
         cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         filename: String? = nil,
         videoSize: Int64? = nil,
-        videoHash: String? = nil
+        videoHash: String? = nil,
+        startupBenchmarkToken: UUID? = nil
     ) {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
@@ -1522,6 +1517,7 @@ struct ContentView: View {
                errorURL: errorCallback
            ),
            UIApplication.shared.canOpenURL(launchURL) {
+            PlaybackStartupTiming.cancel(token: startupBenchmarkToken)
             if let externalSession {
                 ExternalPlaybackSessionStore.save(externalSession)
             }
@@ -1540,7 +1536,8 @@ struct ContentView: View {
             cacheFileIdentity: cacheFileIdentity,
             filename: filename,
             videoSize: videoSize,
-            videoHash: videoHash
+            videoHash: videoHash,
+            startupBenchmarkToken: startupBenchmarkToken
         )
     }
 
@@ -1555,7 +1552,8 @@ struct ContentView: View {
         cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         filename: String? = nil,
         videoSize: Int64? = nil,
-        videoHash: String? = nil
+        videoHash: String? = nil,
+        startupBenchmarkToken: UUID? = nil
     ) {
         if PictureInPictureManager.shared.isPictureInPictureActive,
            PictureInPictureManager.shared.activeContext?.url != url {
@@ -1566,6 +1564,7 @@ struct ContentView: View {
         playbackVideoSize = videoSize
         playbackVideoHash = videoHash
         playbackCacheFileIdentity = cacheFileIdentity
+        playbackStartupBenchmarkToken = startupBenchmarkToken
         playbackDidStart = false
         withAnimation(.easeInOut(duration: 0.28)) {
             activeScreen = .player(
@@ -1651,7 +1650,8 @@ struct ContentView: View {
                     subtitle: subtitle,
                     httpHeaders: httpHeaders,
                     externalSubtitles: externalSubtitles,
-                    resumeFrom: resumeFrom
+                    resumeFrom: resumeFrom,
+                    startupBenchmarkToken: playbackStartupBenchmarkToken
                 )
                 .transition(.opacity)
                 .onDisappear {
@@ -1829,12 +1829,11 @@ struct ContentView: View {
             homeCatalogRevision: syncManager.homeCatalogRevision,
             homeCollectionsRevision: syncManager.homeCollectionsRevision,
             isFullScreenOverlayPresented: fullScreenOverlayPresented,
-            isProfileGateCoverPresented: isPreparingProfile,
             detailsDidDisappearGeneration: detailsDidDisappearGeneration,
             accountEmail: authManager.currentEmail,
             isAuthenticated: authManager.isAuthenticated,
             sessionNeedsReauthentication: authManager.sessionNeedsReauthentication,
-            isProfileFocusPending: isInitialHomeFocusPending,
+            isProfileFocusPending: isPreparingProfile,
             profileGateGeneration: profileGateGeneration,
             onProfileGateReadinessChange: profileGateReadinessChanged,
             authManager: authManager,
@@ -1994,7 +1993,7 @@ struct ContentView: View {
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
             },
-            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity, filename, videoSize, videoHash, resumeFrom in
+            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity, filename, videoSize, videoHash, resumeFrom, startupToken in
                 if let url = URL(string: streamUrlString) {
                     let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
                     reopenStreamPickerOnDetails = false
@@ -2013,8 +2012,11 @@ struct ContentView: View {
                         cacheFileIdentity: cacheFileIdentity,
                         filename: filename,
                         videoSize: videoSize,
-                        videoHash: videoHash
+                        videoHash: videoHash,
+                        startupBenchmarkToken: startupToken
                     )
+                } else {
+                    PlaybackStartupTiming.cancel(token: startupToken)
                 }
             },
             onBack: { leaveDetails() },
@@ -2074,7 +2076,8 @@ struct ContentView: View {
     private static func resolveNextEpisodeStream(
         episode: NuvioVideo,
         seriesMeta: NuvioMeta,
-        profileId: String?
+        profileId: String?,
+        startupToken: UUID? = nil
     ) async -> PreparedNextStream? {
         let streamId = seriesMeta.canonicalEpisodeStreamId(for: episode)
         return await resolveStream(
@@ -2082,7 +2085,8 @@ struct ContentView: View {
             type: "series",
             subtitleLine: "S\(episode.season) · E\(episode.episode) · \(episode.title)",
             profileId: profileId,
-            seriesMetaId: seriesMeta.id
+            seriesMetaId: seriesMeta.id,
+            startupToken: startupToken
         )
     }
 
@@ -2097,7 +2101,8 @@ struct ContentView: View {
         profileId: String?,
         excludingURLs: Set<String> = [],
         seriesMetaId: String? = nil,
-        forceRefresh: Bool = false
+        forceRefresh: Bool = false,
+        startupToken: UUID? = nil
     ) async -> PreparedNextStream? {
         let streams = await StreamsRepository.shared.collectStreams(
             type: type,
@@ -2184,6 +2189,7 @@ struct ContentView: View {
             }
 
             if candidate.isDebridResolvable {
+                PlaybackStartupTiming.markSourcePicked(stream: candidate, token: startupToken)
                 var resolvedURL: URL? = nil
                 var providerName = debrid.selectedKind.rawValue
                 if debrid.isEnabled {
@@ -2214,6 +2220,7 @@ struct ContentView: View {
                 }
                 guard let url = resolvedURL else { continue }
                 if excludingURLs.contains(url.absoluteString) { continue }
+                PlaybackStartupTiming.markDebridResolved(token: startupToken)
                 LastStreamQualityStore.save(
                     metaId: metaIdForTags,
                     stream: candidate,
@@ -2241,6 +2248,7 @@ struct ContentView: View {
             }
 
             guard let urlString = candidate.directURL, let url = URL(string: urlString) else { continue }
+            PlaybackStartupTiming.markSourcePicked(stream: candidate, token: startupToken)
             LastStreamQualityStore.save(
                 metaId: metaIdForTags,
                 stream: candidate,
@@ -2337,9 +2345,11 @@ struct ContentView: View {
         contentId: String,
         subtitleLine: String,
         seriesMetaId: String? = nil,
-        profileId: String?
+        profileId: String?,
+        startupToken: UUID? = nil
     ) async -> PreparedNextStream? {
         guard stream.unavailabilityReason == nil else { return nil }
+        PlaybackStartupTiming.markSourcePicked(stream: stream, token: startupToken)
         let store = ProfileSettings.store(for: profileId)
         let debrid = DebridResolver(store: store)
         let (season, episode) = seasonEpisode(fromContentId: contentId)
@@ -2376,6 +2386,7 @@ struct ContentView: View {
                 }
             }
             guard let url = resolvedURL else { return nil }
+            PlaybackStartupTiming.markDebridResolved(token: startupToken)
             LastStreamQualityStore.save(
                 metaId: metaIdForTags,
                 stream: stream,
@@ -2500,7 +2511,8 @@ struct ContentView: View {
         subtitle: String,
         httpHeaders: [String: String],
         externalSubtitles: [NuvioSubtitle],
-        resumeFrom: Double?
+        resumeFrom: Double?,
+        startupBenchmarkToken: UUID?
     ) -> some View {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
@@ -2520,13 +2532,15 @@ struct ContentView: View {
             cacheFileIdentity: isTrailer ? nil : playbackCacheFileIdentity,
             episodes: isTrailer ? [] : playbackEpisodes,
             currentEpisode: isTrailer ? nil : playbackCurrentEpisode,
+            initialStartupBenchmarkToken: startupBenchmarkToken,
             autoPlayNextEnabled: autoPlayNext,
             autoPlayNextCountdownSeconds: autoPlayNextCountdown,
-            resolveNextStream: (isTrailer || !meta.isSeries) ? nil : { episode in
+            resolveNextStream: (isTrailer || !meta.isSeries) ? nil : { episode, startupToken in
                 await Self.resolveNextEpisodeStream(
                     episode: episode,
                     seriesMeta: meta,
-                    profileId: profileViewModel.activeProfile?.id
+                    profileId: profileViewModel.activeProfile?.id,
+                    startupToken: startupToken
                 )
             },
             reloadCurrentStream: isTrailer ? nil : { currentEpisode, excludedURLs in
@@ -2541,7 +2555,8 @@ struct ContentView: View {
                         profileId: profileId,
                         excludingURLs: excluded,
                         seriesMetaId: meta.id,
-                        forceRefresh: true
+                        forceRefresh: true,
+                        startupToken: nil
                     )
                 }
                 return await Self.resolveStream(
@@ -2551,7 +2566,8 @@ struct ContentView: View {
                     profileId: profileId,
                     excludingURLs: excluded,
                     seriesMetaId: meta.isSeries ? meta.id : nil,
-                    forceRefresh: true
+                    forceRefresh: true,
+                    startupToken: nil
                 )
             },
             fetchPlaybackSources: isTrailer ? nil : { contentId, type in
@@ -2561,13 +2577,14 @@ struct ContentView: View {
                     profileId: profileViewModel.activeProfile?.id
                 )
             },
-            resolvePlaybackStream: isTrailer ? nil : { stream, contentId, subtitleLine in
+            resolvePlaybackStream: isTrailer ? nil : { stream, contentId, subtitleLine, startupToken in
                 await Self.resolveChosenStream(
                     stream,
                     contentId: contentId,
                     subtitleLine: subtitleLine,
                     seriesMetaId: meta.isSeries ? meta.id : nil,
-                    profileId: profileViewModel.activeProfile?.id
+                    profileId: profileViewModel.activeProfile?.id,
+                    startupToken: startupToken
                 )
             },
             onRequestSources: isTrailer ? nil : {
@@ -3013,7 +3030,6 @@ private struct TVMainTabView: View {
     let homeCatalogRevision: UInt
     let homeCollectionsRevision: UInt
     let isFullScreenOverlayPresented: Bool
-    let isProfileGateCoverPresented: Bool
     let detailsDidDisappearGeneration: UInt
     let accountEmail: String?
     let isAuthenticated: Bool
@@ -3247,8 +3263,8 @@ private struct TVMainTabView: View {
                 syncManager.flushPendingPushes()
             }
             if tab == .profile {
-                if isProfileGateCoverPresented {
-                    TVHomeDebugTrace.log("app.selectedTab reset from Profile to Home because profile gate cover is visible")
+                if isProfileFocusPending {
+                    TVHomeDebugTrace.log("app.selectedTab reset from Profile to Home because isProfileFocusPending is true")
                     selectedTab = .home
                     return
                 }
@@ -4541,8 +4557,6 @@ struct TVHomeView: View {
                                         verticalScrollProxy.scrollTo("home-grid-hero-top", anchor: .top)
                                     }
                                 }
-                            },
-                            onNativeFocusChange: { isFocused in
                                 let wasHeroFocused = didNativeFocusGridHero
                                 didNativeFocusGridHero = isProfileFocusPending && isFocused
                                 if isProfileFocusPending && didNativeFocusGridHero != wasHeroFocused {
@@ -5047,9 +5061,6 @@ struct TVHomeView: View {
         if isFullScreenOverlayPresented { return .overlay }
         let target = profileGateStartupFocusTarget
         if let target {
-            guard hasNativeProfileFocus(for: target) else {
-                return .waiting(hasFocusableContent: true, targetSignature: target.signature)
-            }
             return .ready(
                 targetSignature: target.signature,
                 storeLoaded: store.isLoaded(for: contentIdentity)
@@ -9096,15 +9107,10 @@ private final class GridHeroNativeFocusTracker {
     private(set) var currentTarget: GridHeroFocusTarget?
     private var updateGeneration = 0
 
-    func update(
-        target: GridHeroFocusTarget,
-        isFocused: Bool,
-        onAnyFocusChange: ((Bool) -> Void)?
-    ) {
+    func update(target: GridHeroFocusTarget, isFocused: Bool) {
         if isFocused {
             updateGeneration &+= 1
             currentTarget = target
-            onAnyFocusChange?(true)
             return
         }
         guard currentTarget == target else { return }
@@ -9116,7 +9122,6 @@ private final class GridHeroNativeFocusTracker {
                   self.updateGeneration == generation,
                   self.currentTarget == target else { return }
             self.currentTarget = nil
-            onAnyFocusChange?(false)
         }
     }
 }
@@ -9506,7 +9511,6 @@ private struct TVGridHeroSlideshowView: View {
     let onPlay: (NuvioMeta) -> Void
     var backdropBleed: CGFloat = 0
     var onFocusChange: ((Bool) -> Void)? = nil
-    var onNativeFocusChange: ((Bool) -> Void)? = nil
     let onSelect: (NuvioMeta) -> Void
 
     @AppStorage(SettingsKey.amoled) private var amoled = false
@@ -9514,8 +9518,6 @@ private struct TVGridHeroSlideshowView: View {
     @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
     @AppStorage(SettingsKey.trailerDelay) private var trailerDelay = 7
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.resetFocus) private var resetFocus
-    @Namespace private var heroFocusScope
     @FocusState private var focusedTarget: GridHeroFocusTarget?
     @State private var isInLibraryCache = false
     @State private var lastFocusChangeTime: CFTimeInterval = 0
@@ -10151,11 +10153,7 @@ private struct TVGridHeroSlideshowView: View {
                 )
             }
             .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
-                nativeFocusTracker.update(
-                    target: .play,
-                    isFocused: isFocused,
-                    onAnyFocusChange: onNativeFocusChange
-                )
+                nativeFocusTracker.update(target: .play, isFocused: isFocused)
             }))
             .disabled(playTarget?.isPlayable == false)
             .focused($focusedTarget, equals: .play)
@@ -10191,11 +10189,7 @@ private struct TVGridHeroSlideshowView: View {
                     )
             }
             .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
-                nativeFocusTracker.update(
-                    target: .watchlist,
-                    isFocused: isFocused,
-                    onAnyFocusChange: onNativeFocusChange
-                )
+                nativeFocusTracker.update(target: .watchlist, isFocused: isFocused)
             }))
             .focused($focusedTarget, equals: .watchlist)
             .focusEffectDisabledIfAvailable()
@@ -10218,11 +10212,7 @@ private struct TVGridHeroSlideshowView: View {
                     )
             }
             .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
-                nativeFocusTracker.update(
-                    target: .info,
-                    isFocused: isFocused,
-                    onAnyFocusChange: onNativeFocusChange
-                )
+                nativeFocusTracker.update(target: .info, isFocused: isFocused)
             }))
             .focused($focusedTarget, equals: .info)
             .focusEffectDisabledIfAvailable()
@@ -10246,11 +10236,7 @@ private struct TVGridHeroSlideshowView: View {
                         )
                 }
                 .buttonStyle(TvHeroActionButtonStyle(onNativeFocusChange: { isFocused in
-                    nativeFocusTracker.update(
-                        target: .next,
-                        isFocused: isFocused,
-                        onAnyFocusChange: onNativeFocusChange
-                    )
+                    nativeFocusTracker.update(target: .next, isFocused: isFocused)
                 }))
                 .focused($focusedTarget, equals: .next)
                 .focusEffectDisabledIfAvailable()

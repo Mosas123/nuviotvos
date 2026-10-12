@@ -35,7 +35,8 @@ struct DetailsScreen: View {
         _ filename: String?,
         _ videoSize: Int64?,
         _ videoHash: String?,
-        _ resumeFrom: Double?
+        _ resumeFrom: Double?,
+        _ startupBenchmarkToken: UUID?
     ) -> Void
     let onBack: () -> Void
     /// Open another title (More Like This / production catalog).
@@ -53,6 +54,7 @@ struct DetailsScreen: View {
     @State private var isSmartPlaybackPending = false
     @State private var isPreparingPlayback = false
     @State private var isPreparingInitialPlayback = false
+    @State private var startupBenchmarkToken: UUID?
     @State private var pendingInitialPlaybackRequestID: UInt?
     @State private var readyInitialPlaybackRequestID: UInt?
     @State private var initialPlaybackPreparationTask: Task<Void, Never>?
@@ -120,7 +122,8 @@ struct DetailsScreen: View {
             _ filename: String?,
             _ videoSize: Int64?,
             _ videoHash: String?,
-            _ resumeFrom: Double?
+            _ resumeFrom: Double?,
+            _ startupBenchmarkToken: UUID?
         ) -> Void,
         onBack: @escaping () -> Void,
         onOpenTitle: ((String, String) -> Void)? = nil,
@@ -244,7 +247,7 @@ struct DetailsScreen: View {
                     onPlayClick: {
                         if let url = viewModel.uiState.streams.first?.url,
                            let meta = viewModel.uiState.meta {
-                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil)
+                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil, nil)
                         }
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
@@ -273,7 +276,7 @@ struct DetailsScreen: View {
                     title: meta.name,
                     message: detailsLoadingMessage,
                     onDismiss: {
-                        PlaybackStartupTiming.cancel()
+                        cancelStartupRequest()
                         isSmartPlaybackPending = false
                         isResolvingDebrid = false
                         isPreparingPlayback = false
@@ -321,11 +324,11 @@ struct DetailsScreen: View {
                     isResolvingDebrid: isResolvingDebrid,
                     initialAvailabilityMessage: streamPickerAvailabilityMessage,
                     onSelect: { stream, player in
-                        PlaybackStartupTiming.start(title: meta.name)
+                        let startupToken = ensureStartupRequest(title: meta.name)
                         streamPickerAvailabilityMessage = nil
                         isStreamPickerPresented = false
                         isPreparingPlayback = true
-                        playStream(stream, meta: meta, player: player)
+                        playStream(stream, meta: meta, player: player, startupToken: startupToken)
                     },
                     onRefresh: {
                         refreshSources()
@@ -358,7 +361,7 @@ struct DetailsScreen: View {
                     finishInitialPlaybackRequest(requestID)
                 }
             } else if isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback {
-                PlaybackStartupTiming.cancel()
+                cancelStartupRequest()
                 isSmartPlaybackPending = false
                 isResolvingDebrid = false
                 isPreparingPlayback = false
@@ -391,7 +394,7 @@ struct DetailsScreen: View {
             }
         }
         .onAppear {
-            PlaybackStartupTiming.cancel()
+            cancelStartupRequest()
             isSmartPlaybackPending = false
             isResolvingDebrid = false
             isPreparingPlayback = false
@@ -414,6 +417,7 @@ struct DetailsScreen: View {
         }
         .onDisappear {
             TVHomeDebugTrace.log("details.disappear id=\(id) type=\(type)")
+            cancelStartupRequest()
             if let requestID = pendingInitialPlaybackRequestID {
                 finishInitialPlaybackRequest(requestID)
             } else {
@@ -429,7 +433,7 @@ struct DetailsScreen: View {
     /// Waiting for onDisappear is too late: enrichment can still publish
     /// updates while the opacity transition is trying to tear Details down.
     private func handleBack() {
-        PlaybackStartupTiming.cancel()
+        cancelStartupRequest()
         TVHomeDebugTrace.log("details.back.cancelTasks id=\(id)")
         if let requestID = pendingInitialPlaybackRequestID {
             finishInitialPlaybackRequest(requestID)
@@ -547,12 +551,32 @@ struct DetailsScreen: View {
         }
     }
 
+    private func ensureStartupRequest(title: String) -> UUID {
+        if let token = startupBenchmarkToken,
+           PlaybackStartupTiming.isActive(token: token) {
+            return token
+        }
+        let token = PlaybackStartupTiming.start(title: title)
+        startupBenchmarkToken = token
+        return token
+    }
+
+    private func cancelStartupRequest(token explicitToken: UUID? = nil) {
+        guard let token = explicitToken ?? startupBenchmarkToken else { return }
+        PlaybackStartupTiming.cancel(token: token)
+        if startupBenchmarkToken == token {
+            startupBenchmarkToken = nil
+        }
+    }
+
     private func startStreamFlow(streamId: String, type: String, reload: Bool, forceManualPicker: Bool = false) {
         guard let meta = viewModel.uiState.meta else { return }
         streamPickerAvailabilityMessage = nil
 
         if forceManualPicker || !smartStreamSelection {
+            cancelStartupRequest()
             isSmartPlaybackPending = false
+            isResolvingDebrid = false
             isPreparingPlayback = false
             if reload {
                 viewModel.prepareStreams(forId: streamId, type: type)
@@ -561,8 +585,9 @@ struct DetailsScreen: View {
             return
         }
 
-        PlaybackStartupTiming.start(title: meta.name)
+        startupBenchmarkToken = PlaybackStartupTiming.start(title: meta.name)
         isSmartPlaybackPending = true
+        isResolvingDebrid = false
         isPreparingPlayback = false
         isStreamPickerPresented = false
 
@@ -682,11 +707,13 @@ struct DetailsScreen: View {
             if isIdealMatch {
                 isSmartPlaybackPending = false
                 isPreparingPlayback = true
-                playStream(stream, meta: meta)
+                guard let startupToken = startupBenchmarkToken,
+                      PlaybackStartupTiming.isActive(token: startupToken) else { return }
+                playStream(stream, meta: meta, startupToken: startupToken)
             }
         } else if !viewModel.uiState.isLoadingStreams
                     && (viewModel.uiState.streamsEmptyReason != nil || !viewModel.uiState.streamGroups.isEmpty || unavailableReason != nil) {
-            PlaybackStartupTiming.cancel()
+            cancelStartupRequest()
             isSmartPlaybackPending = false
             isPreparingPlayback = false
             if let unavailableReason {
@@ -703,10 +730,18 @@ struct DetailsScreen: View {
     /// Plays a chosen stream. Direct URLs go straight to the player; torrent-only
     /// streams are resolved through the configured debrid provider first, keeping
     /// the picker's spinner up until a link comes back (or the attempt fails).
-    private func playStream(_ stream: NuvioStream, meta: NuvioMeta, player: ExternalPlayer? = nil) {
+    private func playStream(
+        _ stream: NuvioStream,
+        meta: NuvioMeta,
+        player: ExternalPlayer? = nil,
+        startupToken: UUID
+    ) {
+        guard PlaybackStartupTiming.isActive(token: startupToken) else {
+            cancelStartupRequest(token: startupToken)
+            return
+        }
         if let unavailableReason = stream.unavailabilityReason {
-            PlaybackStartupTiming.cancel()
-            PlaybackStartupBenchmark.shared.cancel()
+            cancelStartupRequest(token: startupToken)
             isResolvingDebrid = false
             isPreparingPlayback = false
             isSmartPlaybackPending = false
@@ -718,12 +753,15 @@ struct DetailsScreen: View {
         let activeProfileId = ProfileSettings.activeProfileID
         LastStreamQualityStore.save(metaId: meta.id, stream: stream, profileId: activeProfileId)
         BingeGroupStore.save(seriesId: meta.id, stream: stream, profileId: activeProfileId)
-        PlaybackStartupBenchmark.shared.markSourcePicked(stream: stream)
+        PlaybackStartupTiming.markSourcePicked(stream: stream, token: startupToken)
         if let url = stream.directURL, !url.isEmpty {
             isStreamPickerPresented = false
             isPreparingPlayback = true
             isSmartPlaybackPending = false
             armExternalPlayerTimeoutIfNeeded(player: player)
+            if self.startupBenchmarkToken == startupToken {
+                self.startupBenchmarkToken = nil
+            }
             onPlayClick(
                 url,
                 stream.httpHeaders ?? [:],
@@ -737,7 +775,8 @@ struct DetailsScreen: View {
                 stream.filename,
                 stream.videoSize,
                 stream.videoHash,
-                nil
+                nil,
+                startupToken
             )
             return
         }
@@ -783,13 +822,17 @@ struct DetailsScreen: View {
             }
 
             await MainActor.run {
+                guard PlaybackStartupTiming.isActive(token: startupToken) else { return }
                 isResolvingDebrid = false
                 if let url = resolvedURL {
-                    PlaybackStartupBenchmark.shared.markDebridResolved()
+                    PlaybackStartupTiming.markDebridResolved(token: startupToken)
                     isStreamPickerPresented = false
                     isPreparingPlayback = true
                     isSmartPlaybackPending = false
                     armExternalPlayerTimeoutIfNeeded(player: player)
+                    if self.startupBenchmarkToken == startupToken {
+                        self.startupBenchmarkToken = nil
+                    }
                     onPlayClick(
                         url.absoluteString,
                         stream.httpHeaders ?? [:],
@@ -803,10 +846,11 @@ struct DetailsScreen: View {
                         debridFilename ?? stream.filename,
                         debridVideoSize ?? stream.videoSize,
                         stream.videoHash,
-                        nil
+                        nil,
+                        startupToken
                     )
                 } else {
-                    PlaybackStartupBenchmark.shared.cancel()
+                    cancelStartupRequest(token: startupToken)
                     isPreparingPlayback = false
                     isSmartPlaybackPending = false
                     isStreamPickerPresented = true
@@ -881,12 +925,12 @@ struct DetailsScreen: View {
         Task {
             if let source = await YouTubeTrailerResolver.shared.resolve(for: meta) {
                 await MainActor.run {
-                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom)
+                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil)
                 }
             } else if let ytId = await preferredTrailerYouTubeId(for: meta) {
                 let youtubeUrl = "https://www.youtube.com/watch?v=\(ytId)"
                 await MainActor.run {
-                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom)
+                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil)
                 }
             }
         }

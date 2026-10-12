@@ -3,6 +3,10 @@ import CoreGraphics
 import Combine
 import AetherEngine
 
+private enum SceneMusicRecognitionPolicy {
+    static let automaticShazamRecognitionEnabled = false
+}
+
 @MainActor
 final class SceneCoordinator: ObservableObject {
     @Published private(set) var currentSnapshot: SceneSnapshot = .empty
@@ -613,6 +617,7 @@ final class SceneCoordinator: ObservableObject {
     // MARK: - Music Recognition
     
     private func startMusicRecognition(isPlaying: Bool, sourceTime: Double) {
+        guard SceneMusicRecognitionPolicy.automaticShazamRecognitionEnabled else { return }
         guard let audioTapBroker else {
             updateMusicStatus(.unavailable(reason: "Audio tap broker unavailable on this backend"))
             return

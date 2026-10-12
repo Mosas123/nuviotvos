@@ -51,8 +51,182 @@ private struct EmptySceneCastProvider: SceneCastProviding {
     func fetchCast(context: SceneContext) async throws -> [SceneCastCandidate] { [] }
 }
 
+private struct EmptySceneSoundtrackProvider: SceneSoundtrackProviding {
+    func fetchSoundtrack(context: SceneContext) async throws -> [SceneTimelineInterval] { [] }
+}
+
+private actor StartupCallbackGate {
+    private var isHeld = false
+    private var holdContinuation: CheckedContinuation<Void, Never>?
+    private var waitingContinuation: CheckedContinuation<Void, Never>?
+
+    func hold() async {
+        isHeld = true
+        waitingContinuation?.resume()
+        waitingContinuation = nil
+        await withCheckedContinuation { holdContinuation = $0 }
+    }
+
+    func waitUntilHeld() async {
+        guard !isHeld else { return }
+        await withCheckedContinuation { waitingContinuation = $0 }
+    }
+
+    func release() {
+        holdContinuation?.resume()
+        holdContinuation = nil
+    }
+}
+
 @MainActor
 final class SceneLifecycleTests: XCTestCase {
+
+    func testDispatchCheckpointEstablishesEngineBoundaryAndResetsForNextPlayback() {
+        var now = Date(timeIntervalSince1970: 100)
+        let benchmark = PlaybackStartupBenchmark(dateProvider: { now })
+
+        let firstToken = benchmark.start()
+        XCTAssertEqual(benchmark.t0_initiated, now)
+
+        now = now.addingTimeInterval(7)
+        benchmark.markEngineCheckpoint("dispatched", token: firstToken)
+        let dispatchTime = now
+        XCTAssertEqual(benchmark.t_engineDispatched, dispatchTime)
+
+        now = now.addingTimeInterval(3)
+        benchmark.markEngineCheckpoint("dispatched", token: firstToken)
+        XCTAssertEqual(benchmark.t_engineDispatched, dispatchTime, "The first dispatch checkpoint defines the engine boundary")
+
+        let nextToken = benchmark.start(title: "Next playback")
+        XCTAssertEqual(benchmark.t0_initiated, now)
+        XCTAssertNil(benchmark.t_engineDispatched, "A new playback must not inherit the prior engine boundary")
+
+        benchmark.markEngineCheckpoint("dispatched", token: firstToken)
+        benchmark.cancel(token: firstToken)
+        XCTAssertEqual(benchmark.activeToken, nextToken, "Cancelling an old request must leave the new owner intact")
+        XCTAssertEqual(benchmark.title, "Next playback")
+        benchmark.cancel(token: nextToken)
+        XCTAssertNil(benchmark.t_engineDispatched, "Cancelling startup must clear the engine boundary")
+    }
+
+    func testDelayedOlderOwnerSourceAndDebridCallbacksCannotMutateNewPlayback() async {
+        var now = Date(timeIntervalSince1970: 175)
+        let benchmark = PlaybackStartupBenchmark(dateProvider: { now })
+        let oldToken = benchmark.start(title: "Old playback")
+        let oldStream = NuvioStream(url: nil, name: "Old stream", description: nil, addonName: "Old addon")
+        let callbackGate = StartupCallbackGate()
+        let delayedCallback = Task {
+            await callbackGate.hold()
+            benchmark.markSourcePicked(stream: oldStream, token: oldToken)
+            benchmark.markDebridResolved(token: oldToken)
+        }
+        await callbackGate.waitUntilHeld()
+
+        now = now.addingTimeInterval(2)
+        let currentToken = benchmark.start(title: "Current playback")
+        let currentStream = NuvioStream(url: nil, name: "Current stream", description: nil, addonName: "Current addon")
+        now = now.addingTimeInterval(0.4)
+        benchmark.markSourcePicked(stream: currentStream, token: currentToken)
+        let currentSourceTime = benchmark.t1_sourcePicked
+        let currentStartTime = benchmark.t0_initiated
+
+        benchmark.cancel(token: oldToken)
+        await callbackGate.release()
+        await delayedCallback.value
+
+        XCTAssertEqual(benchmark.activeToken, currentToken)
+        XCTAssertEqual(benchmark.title, "Current playback")
+        XCTAssertEqual(benchmark.streamName, "Current stream")
+        XCTAssertEqual(benchmark.addonName, "Current addon")
+        XCTAssertEqual(benchmark.t0_initiated, currentStartTime)
+        XCTAssertEqual(benchmark.t1_sourcePicked, currentSourceTime)
+        XCTAssertNil(benchmark.t2_debridResolved)
+    }
+
+    func testMissingCanceledAndCompletedBenchmarkOwnersCannotMutateTiming() {
+        var now = Date(timeIntervalSince1970: 150)
+        let benchmark = PlaybackStartupBenchmark(dateProvider: { now })
+        let cancelledToken = benchmark.start(title: "Cancelled")
+        benchmark.cancel(token: cancelledToken)
+        XCTAssertNil(benchmark.activeToken)
+
+        let activeToken = benchmark.start(title: "Active")
+        let activeStartTime = benchmark.t0_initiated
+        let stream = NuvioStream(url: nil, name: "Current source", description: nil, addonName: "Addon")
+        benchmark.markSourcePicked(stream: stream, token: nil)
+        benchmark.markSourcePicked(stream: stream, token: cancelledToken)
+        benchmark.markDebridResolved(token: nil)
+        benchmark.markEngineCheckpoint("dispatched", token: cancelledToken)
+        XCTAssertEqual(benchmark.title, "Active")
+        XCTAssertEqual(benchmark.streamName, "")
+        XCTAssertEqual(benchmark.addonName, "")
+        XCTAssertEqual(benchmark.t0_initiated, activeStartTime)
+        XCTAssertNil(benchmark.t1_sourcePicked, "Nil and cancelled owners cannot write source metadata")
+        XCTAssertNil(benchmark.t2_debridResolved)
+        XCTAssertNil(benchmark.t_engineDispatched)
+
+        benchmark.markSourcePicked(stream: stream, token: activeToken)
+        let activeSourceTime = benchmark.t1_sourcePicked
+        let activeTitle = benchmark.title
+        let activeStreamName = benchmark.streamName
+        let activeAddonName = benchmark.addonName
+        now = now.addingTimeInterval(0.25)
+        XCTAssertNotNil(benchmark.markPlaybackStarted(token: activeToken))
+        let completedAt = benchmark.t3_playbackStarted
+
+        now = now.addingTimeInterval(1)
+        benchmark.markSourcePicked(stream: stream, token: activeToken)
+        benchmark.markDebridResolved(token: activeToken)
+        benchmark.markEngineCheckpoint("dispatched", token: activeToken)
+        benchmark.cancel(token: activeToken)
+        XCTAssertEqual(benchmark.title, activeTitle)
+        XCTAssertEqual(benchmark.streamName, activeStreamName)
+        XCTAssertEqual(benchmark.addonName, activeAddonName)
+        XCTAssertEqual(benchmark.t0_initiated, activeStartTime)
+        XCTAssertEqual(benchmark.t1_sourcePicked, activeSourceTime)
+        XCTAssertEqual(benchmark.t3_playbackStarted, completedAt)
+        XCTAssertNil(benchmark.t2_debridResolved)
+        XCTAssertNil(benchmark.t_engineDispatched)
+        XCTAssertNil(benchmark.activeToken)
+    }
+
+    func testSourceSelectionAndDebridCheckpointsCompleteStartupTiming() {
+        var now = Date(timeIntervalSince1970: 200)
+        let benchmark = PlaybackStartupBenchmark(dateProvider: { now })
+
+        let token = benchmark.start(title: "Episode 2")
+        XCTAssertEqual(benchmark.t0_initiated, now)
+
+        now = now.addingTimeInterval(0.4)
+        let dummyStream = NuvioStream(url: nil, name: "Debrid Stream", description: nil, addonName: "Torrentio")
+        benchmark.markSourcePicked(stream: dummyStream, token: token)
+        XCTAssertEqual(benchmark.t1_sourcePicked, now)
+        XCTAssertEqual(benchmark.streamName, "Debrid Stream")
+        XCTAssertEqual(benchmark.addonName, "Torrentio")
+
+        now = now.addingTimeInterval(0.1)
+        let fallbackStream = NuvioStream(url: nil, name: "Fallback Stream", description: nil, addonName: "Fallback addon")
+        benchmark.markSourcePicked(stream: fallbackStream, token: token)
+        XCTAssertEqual(benchmark.t1_sourcePicked, now)
+        XCTAssertEqual(benchmark.streamName, "Fallback Stream")
+        XCTAssertEqual(benchmark.addonName, "Fallback addon")
+
+        now = now.addingTimeInterval(0.2)
+        benchmark.markDebridResolved(token: token)
+        XCTAssertEqual(benchmark.t2_debridResolved, now)
+
+        now = now.addingTimeInterval(0.5)
+        benchmark.markEngineCheckpoint("dispatched", token: token)
+        XCTAssertEqual(benchmark.t_engineDispatched, now)
+
+        now = now.addingTimeInterval(0.2)
+        let total = benchmark.markPlaybackStarted(token: token)
+        XCTAssertNotNil(total)
+        if let total {
+            XCTAssertEqual(total, 1.4, accuracy: 0.001)
+        }
+        XCTAssertEqual(benchmark.t3_playbackStarted, now)
+    }
     
     func testSceneContextInitializationAndEquivalence() {
         let sessionID = UUID()
@@ -109,6 +283,48 @@ final class SceneLifecycleTests: XCTestCase {
         coordinator.openPanel()
         XCTAssertTrue(coordinator.currentSnapshot.actors.isEmpty)
         XCTAssertEqual(coordinator.currentSnapshot.actorStatus, .analyzing)
+        coordinator.closePanel()
+    }
+
+    func testTimelineSongAppearsWithoutAutomaticShazamSubscription() async {
+        let context = SceneContext(canonicalId: "timeline-song-test", mediaType: "movie", title: "Timeline Song Test")
+        let song = SceneRecognizedSong(
+            id: "timeline-song-1",
+            title: "Timeline Song",
+            artist: "Timeline Artist",
+            artworkURL: URL(string: "https://example.com/artwork.jpg"),
+            observedSourceTime: 20,
+            startTime: 10,
+            endTime: 30
+        )
+        let cache = SceneResultCache()
+        await cache.storeTimelineInterval(SceneTimelineInterval(
+            canonicalId: context.canonicalId,
+            startTime: 10,
+            endTime: 30,
+            actors: [],
+            song: song
+        ))
+
+        let broker = PlaybackAudioTapBroker(engine: nil)
+        let coordinator = SceneCoordinator(
+            frameProvider: UnsupportedSceneFrameProvider(),
+            castProvider: EmptySceneCastProvider(),
+            soundtrackProvider: EmptySceneSoundtrackProvider(),
+            audioTapBroker: broker,
+            resultCache: cache
+        )
+        coordinator.updateContext(context)
+        coordinator.setPlaybackProviders(isPlaying: { true }, sourceTime: { 20 })
+
+        coordinator.openPanel()
+
+        for _ in 0..<20 where coordinator.currentSnapshot.song == nil {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(coordinator.currentSnapshot.song?.title, "Timeline Song")
+        XCTAssertFalse(broker.hasActiveSubscribers, "Timeline song lookup must not subscribe to the audio tap")
         coordinator.closePanel()
     }
 
