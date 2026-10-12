@@ -2133,6 +2133,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // are already on disk; AVPlayer then receives them in <1ms via send200File with no slow-serve stall.
         if !isLiveSession, initialProducerBaseIndex > 0, !sequentialOriginPinsProducerToZero {
             primeInitialSegment(index: initialProducerBaseIndex, timeout: 10.0)
+        } else if !isLiveSession,
+                  !sequentialOriginPinsProducerToZero,
+                  initialProducerBaseIndex == 0 {
+            Self.primeColdVODStartupSegments(
+                cache: segmentCache,
+                plannedSegmentCount: plan.count,
+                timeout: 5.0
+            )
         }
 
         // URL routing: master playlist (VIDEO-RANGE=PQ + SUPPLEMENTAL-CODECS=dvh1) only when
@@ -2240,6 +2248,54 @@ hasAudioRendition: servedAudioLanguage != nil || servedAudioIsAtmosStreamCopy,
         EngineLog.emit(
             "[HLSVideoEngine] primed initial segment \(index) in \(String(format: "%.2f", totalElapsed))s "
             + "(init + seg\(index) ready on disk)",
+            category: .session
+        )
+        return true
+    }
+
+    /// Cold VOD starts need the init section and the first two finalized media
+    /// segments before AVPlayer sees the playlist. A single deadline keeps a
+    /// slow second cut from extending startup by another full timeout.
+    @discardableResult
+    static func primeColdVODStartupSegments(
+        cache: SegmentCache,
+        plannedSegmentCount: Int,
+        timeout: TimeInterval = 5.0
+    ) -> Bool {
+        let segmentCount = min(2, max(0, plannedSegmentCount))
+        guard segmentCount > 0 else { return true }
+
+        let start = Date()
+        let deadline = start.addingTimeInterval(max(0, timeout))
+        // Targeting only zero releases producer high-water backpressure while
+        // leaving both startup segments resident in the forward window.
+        cache.declareTarget(0)
+
+        let initRemaining = max(0, deadline.timeIntervalSinceNow)
+        guard cache.awaitInit(timeout: initRemaining) else {
+            EngineLog.emit(
+                "[HLSVideoEngine] cold VOD priming timed out awaiting init.mp4 within \(timeout)s",
+                category: .session
+            )
+            return false
+        }
+
+        for index in 0..<segmentCount {
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            guard cache.awaitSegment(index: index, timeout: remaining) else {
+                EngineLog.emit(
+                    "[HLSVideoEngine] cold VOD priming timed out awaiting seg\(index) "
+                        + "within shared \(timeout)s deadline",
+                    category: .session
+                )
+                return false
+            }
+        }
+
+        let elapsed = Date().timeIntervalSince(start)
+        EngineLog.emit(
+            "[HLSVideoEngine] cold VOD primed init + seg0..seg\(segmentCount - 1) "
+                + "in \(String(format: "%.2f", elapsed))s",
             category: .session
         )
         return true

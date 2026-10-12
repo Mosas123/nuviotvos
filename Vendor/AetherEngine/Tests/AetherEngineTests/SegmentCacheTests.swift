@@ -245,3 +245,126 @@ struct SegmentCacheTests {
     }
 }
 
+private final class ColdVODPrimingResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Bool?
+
+    func store(_ value: Bool) {
+        lock.lock()
+        storedValue = value
+        lock.unlock()
+    }
+
+    var value: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+}
+
+@Suite("ColdVODStartupPrimingTests")
+struct ColdVODStartupPrimingTests {
+    private func makeCache() -> SegmentCache {
+        SegmentCache(forwardWindow: 4, backwardWindow: 4)
+    }
+
+    @Test("Cold VOD priming waits for the second finalized segment")
+    func waitsForSecondFinalizedSegment() {
+        let cache = makeCache()
+        defer { cache.close() }
+        cache.setInit(Data([0x01]))
+
+        let finished = DispatchSemaphore(value: 0)
+        let result = ColdVODPrimingResult()
+        Thread.detachNewThread {
+            result.store(HLSVideoEngine.primeColdVODStartupSegments(
+                cache: cache,
+                plannedSegmentCount: 8,
+                timeout: 2.0
+            ))
+            finished.signal()
+        }
+
+        Thread.sleep(forTimeInterval: 0.05)
+        cache.store(index: 0, data: Data([0x10]))
+        #expect(finished.wait(timeout: .now() + 0.1) == .timedOut)
+
+        cache.store(index: 1, data: Data([0x11]))
+        #expect(finished.wait(timeout: .now() + 1.0) == .success)
+        #expect(result.value == true)
+    }
+
+    @Test("Ready cache returns immediately and one-segment plans clamp to seg0")
+    func readyCacheAndShortPlan() {
+        let ready = makeCache()
+        defer { ready.close() }
+        ready.setInit(Data([0x01]))
+        ready.store(index: 0, data: Data([0x10]))
+        ready.store(index: 1, data: Data([0x11]))
+
+        let readyStart = Date()
+        #expect(HLSVideoEngine.primeColdVODStartupSegments(cache: ready, plannedSegmentCount: 2))
+        #expect(Date().timeIntervalSince(readyStart) < 0.25)
+
+        let short = makeCache()
+        defer { short.close() }
+        short.setInit(Data([0x01]))
+        short.store(index: 0, data: Data([0x10]))
+
+        let shortStart = Date()
+        #expect(HLSVideoEngine.primeColdVODStartupSegments(
+            cache: short,
+            plannedSegmentCount: 1,
+            timeout: 0.5
+        ))
+        #expect(Date().timeIntervalSince(shortStart) < 0.25)
+    }
+
+    @Test("Both segments share one overall startup deadline")
+    func usesOneSharedDeadline() {
+        let cache = makeCache()
+        defer { cache.close() }
+        cache.setInit(Data([0x01]))
+
+        let started = Date()
+        let finished = DispatchSemaphore(value: 0)
+        let result = ColdVODPrimingResult()
+        Thread.detachNewThread {
+            result.store(HLSVideoEngine.primeColdVODStartupSegments(
+                cache: cache,
+                plannedSegmentCount: 2,
+                timeout: 1.0
+            ))
+            finished.signal()
+        }
+
+        Thread.sleep(forTimeInterval: 0.05)
+        Thread.sleep(forTimeInterval: 0.65)
+        cache.store(index: 0, data: Data([0x10]))
+        #expect(finished.wait(timeout: .now() + 0.5) == .success)
+        #expect(result.value == false)
+        #expect(Date().timeIntervalSince(started) < 1.4)
+    }
+
+    @Test("Closing the segment cache releases a waiting cold-start prime")
+    func closeUnblocksPrime() {
+        let cache = makeCache()
+        cache.setInit(Data([0x01]))
+        let finished = DispatchSemaphore(value: 0)
+        let result = ColdVODPrimingResult()
+        Thread.detachNewThread {
+            result.store(HLSVideoEngine.primeColdVODStartupSegments(
+                cache: cache,
+                plannedSegmentCount: 2,
+                timeout: 5.0
+            ))
+            finished.signal()
+        }
+
+        Thread.sleep(forTimeInterval: 0.05)
+        cache.close()
+        #expect(finished.wait(timeout: .now() + 0.5) == .success)
+        #expect(result.value == false)
+    }
+}
+

@@ -496,6 +496,7 @@ final class LiveTelemetrySampler {
             + "fwd=\(readings.forwardBufferSeconds.map { String(format: "%.1f", $0) } ?? "-") "
             + "keepUp=\(readings.isPlaybackLikelyToKeepUp ? "y" : "n") empty=\(readings.isPlaybackBufferEmpty ? "y" : "n") "
             + "drop=\(droppedSum)+\(dDrop) stall=\(engine.nativeHost?.stallCount ?? 0) "
+            + "seekGen=\(engine.nativeHost?.seekGeneration ?? 0) seekInFlight=\((engine.nativeHost?.seekInFlight ?? false) ? "y" : "n") "
             + "ready=\((engine.nativeHost?.playerLayer.isReadyForDisplay ?? false) ? "y" : "n") "
             + "\(engine.nativeSurfaceDiagnostic) "
             + "thermal=\(thermal) net=\(netMbps.map { String(format: "%.1f", $0) } ?? "-") "

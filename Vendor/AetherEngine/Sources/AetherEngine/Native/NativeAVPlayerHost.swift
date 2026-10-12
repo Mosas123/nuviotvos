@@ -221,7 +221,7 @@ final class NativeAVPlayerHost {
     // MARK: - Seek landing state
 
     /// Monotonic seek counter; only the latest generation clears seekInFlight and publishes the landed time (abandoned seeks complete with finished==false).
-    private var seekGeneration: UInt64 = 0
+    private(set) var seekGeneration: UInt64 = 0
 
     /// Suppresses currentTime publishing while a seek is in flight; the loopback source lands seeks seconds after the call, so the observer would otherwise bounce the clock back through the pre-seek position (issue #37).
     private(set) var seekInFlight: Bool = false
@@ -847,11 +847,17 @@ final class NativeAVPlayerHost {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            EngineLog.emit("[NativeAVPlayerHost] #\(sid) playbackStalled", category: .engine)
             // #93 residual: the engine opens its spurious-pause recovery window on every stall.
             // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
             MainActor.assumeIsolated {
-                self?.stallCount += 1
+                guard let self else { return }
+                self.stallCount += 1
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) playbackStalled "
+                    + "clock=\(String(format: "%.2f", self.currentTime)) "
+                    + "seekGen=\(self.seekGeneration) seekInFlight=\(self.seekInFlight) "
+                    + "t+\(String(format: "%.3f", Double(DispatchTime.now().uptimeNanoseconds - self.loadStartTime.uptimeNanoseconds) / 1_000_000_000))s",
+                    category: .engine)
             }
         }
         notificationObservers.append(stalledObs)
@@ -2009,7 +2015,7 @@ final class NativeAVPlayerHost {
                             }
                         }
                     }
-                    EngineLog.emit("[NativeAVPlayerHost] seek completion target=\(String(format: "%.2f", seconds)) actual=\(String(format: "%.2f", actual)) finished=\(finished) landed=\(landed) current=\(gen == self.seekGeneration)", category: .engine)
+                    EngineLog.emit("[NativeAVPlayerHost] #\(self.sessionID) seek completion gen=\(gen) target=\(String(format: "%.2f", seconds)) actual=\(String(format: "%.2f", actual)) finished=\(finished) landed=\(landed) current=\(gen == self.seekGeneration)", category: .engine)
                     if resumeGuard.claim() { cont.resume(returning: landed) }
                 }
             }
