@@ -1,14 +1,14 @@
 // swift-tools-version: 6.0
-// Nuvio pin of AetherEngine 7.33.2 with local FFmpegBuild integrations.
+// Nuvio pin of AetherEngine 7.34.1 with local FFmpegBuild integrations.
 
 import PackageDescription
 
 let package = Package(
     name: "AetherEngine",
     platforms: [
-        .iOS(.v16),
-        .tvOS(.v17),
-        .macOS(.v14),
+        .iOS(.v18),
+        .tvOS(.v18),
+        .macOS(.v15),
         .visionOS(.v1),
     ],
     products: [
@@ -26,6 +26,7 @@ let package = Package(
         .package(path: "../FFmpegBuild"),
         .package(url: "https://github.com/kishikawakatsumi/SMBClient", .upToNextMinor(from: "0.3.1")),
         .package(url: "https://github.com/superuser404notfound/LibDovi", .upToNextMinor(from: "2.1.0")),
+        .package(url: "https://github.com/superuser404notfound/LibTrueHD", exact: "2.2.0"),
     ],
     targets: [
         .target(
@@ -33,6 +34,7 @@ let package = Package(
             dependencies: [
                 .product(name: "AetherFFmpegBuild", package: "FFmpegBuild"),
                 .product(name: "Dovi", package: "LibDovi"),
+                .product(name: "TrueHD", package: "LibTrueHD"),
             ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
