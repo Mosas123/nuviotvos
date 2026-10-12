@@ -48,23 +48,22 @@ Download the latest Apple TV `.ipa` from [Releases](https://github.com/bobsupra/
 ## Latest tvOS Beta
 
 <!-- BEGIN LATEST_BETA -->
-**Beta 3.4.2** is the latest tvOS release.
+**Beta 3.4.3** is the latest tvOS release.
 
-[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.2/NuvioTV-3.4.2-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.2) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
+[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.3/NuvioTV-3.4.3-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.3) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
 <!-- END LATEST_BETA -->
 
 > 🎉 **Thank you for 200+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 200+ stars!
 
 The IPA requires a compatible tvOS development or sideloading signing workflow before installation.
 
-### New in Beta 3.4.2
+### New in Beta 3.4.3
 
-- **WeTrakr Integration & Unified Cloud Tracking:** Added full WeTrakr authentication, device pairing, scrobble tracking, watch status sync, and watchlist reconciliation across multi-service setups.
-- **Trakt OAuth PKCE & Multi-Account Support:** Modernized Trakt device and authorization workflows with PKCE support without requiring static client secrets.
-- **Playback Error Diagnostics & Host Formatting:** Refined stream diagnostic insight banners with formatted localized host labels and corrected translation placeholders.
-- **Catalog Payload Storage & Focus Safety:** Decoupled UserDefaults notification broadcasts from internal synchronization locks in `HomeCatalogPayloadStore`, and disarmed debug watchdogs for silky smooth 60fps Home scrolling.
-- **Media Identity Resolution:** Enhanced canonical identity conflict resolution across IMDb/TMDb entries while maintaining graceful fallback for third-party catalog feeds.
-- **Tests & Performance:** 640 automated unit tests passing with 0 failures, plus persistent build caching for sub-2-second test execution.
+- **Apple TV-Inspired Grid View Hero Redesign:** Completely overhauled the hero slideshow in Home Grid View (`TVGridHeroSlideshowView`) with full-bleed cinematic artwork, dynamic typography, responsive action controls, and fluid focus handoff designed to mirror the native Apple TV interface.
+- **Enhanced Rewatch Tracking & Dynamic Multi-Watch Badges:** Rewatching content now visually tracks your completion count directly on poster cards (`WatchedCheckmarkPresentation`). The first complete watch displays a clean checkmark, while subsequent rewatches dynamically present the watch count (`2`, `3`, etc.).
+- **Search Artwork Enrichment & Custom Addon Posters:** Search result deduplication and metadata enrichment now recognize third-party catalog feeds, preserving custom posters, backdrops, and card aspect ratios instead of overwriting them with generic Cinemeta assets.
+- **Player Subtitle Menu & UI Polish:** Streamlined subtitle track selector with hierarchical language grouping, sanitized provider tags, clean track subtitles, and instant selection feedback.
+- **Tests & Stability:** 791 automated unit and regression tests passing with 0 failures across playback backends, stream caching, subtitle rendering, sync services, and layout settings.
 
 ### Built-in Player
 
