@@ -110,6 +110,7 @@ enum PlaybackStreamCacheRedirectPolicy {
 private final class RangeProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let originalURL: URL
     private let customHeaders: [String: String]
+    private let expectedRange: Range<Int64>?
     private let lock = NSLock()
     private var storedResolvedURL: URL?
     private var response: HTTPURLResponse?
@@ -124,21 +125,47 @@ private final class RangeProbeDelegate: NSObject, URLSessionDataDelegate, @unche
         return storedResolvedURL
     }
 
-    init(originalURL: URL, customHeaders: [String: String]) {
+    init(originalURL: URL, customHeaders: [String: String], expectedRange: Range<Int64>?) {
         self.originalURL = originalURL
         self.customHeaders = customHeaders
+        self.expectedRange = expectedRange
     }
 
     func load(in session: URLSession, request: URLRequest) async throws -> (Data, HTTPURLResponse)? {
-        try await withCheckedThrowingContinuation { continuation in
-            let task = session.dataTask(with: request)
-            task.delegate = self
-            lock.lock()
-            self.continuation = continuation
-            self.task = task
-            lock.unlock()
-            task.resume()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request)
+                task.delegate = self
+                lock.lock()
+                guard !finished else {
+                    lock.unlock()
+                    task.cancel()
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                self.continuation = continuation
+                self.task = task
+                lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            self.cancel()
         }
+    }
+
+    func cancel() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        let task = self.task
+        lock.unlock()
+        task?.cancel()
+        continuation?.resume(throwing: CancellationError())
     }
 
     func urlSession(
@@ -152,7 +179,7 @@ private final class RangeProbeDelegate: NSObject, URLSessionDataDelegate, @unche
             request,
             response: response,
             originalURL: originalURL,
-            range: "bytes=0-1",
+            range: expectedRange.map { "bytes=\($0.lowerBound)-\($0.upperBound - 1)" },
             customHeaders: customHeaders
         )
         lock.lock()
@@ -167,17 +194,33 @@ private final class RangeProbeDelegate: NSObject, URLSessionDataDelegate, @unche
         didReceive response: URLResponse,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
-        guard let http = response as? HTTPURLResponse,
-              http.statusCode == 206,
-              let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
-              let parsedRange = PlaybackStreamCacheContentRange.parse(contentRange),
-              parsedRange.start == 0,
-              parsedRange.end == 1,
-              let total = parsedRange.total,
-              total >= 2,
-              http.expectedContentLength < 0 || http.expectedContentLength == 2 else {
+        guard let http = response as? HTTPURLResponse else {
             completionHandler(.cancel)
             finish(returning: nil)
+            return
+        }
+
+        let valid: Bool
+        if let expectedRange {
+            if http.statusCode == 206,
+               let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+               let parsedRange = PlaybackStreamCacheContentRange.parse(contentRange),
+               parsedRange.start == expectedRange.lowerBound,
+               parsedRange.end == expectedRange.upperBound - 1,
+               let total = parsedRange.total,
+               total > parsedRange.end,
+               http.expectedContentLength < 0 || http.expectedContentLength == expectedRange.count {
+                valid = true
+            } else {
+                valid = false
+            }
+        } else {
+            valid = http.statusCode == 200 || http.statusCode == 206
+        }
+        guard valid else {
+            completionHandler(.cancel)
+            finish(returning: nil)
+            dataTask.cancel()
             return
         }
 
@@ -194,7 +237,8 @@ private final class RangeProbeDelegate: NSObject, URLSessionDataDelegate, @unche
             lock.unlock()
             return
         }
-        let exceedsExpectedBody = body.count + data.count > 2
+        let expectedBodyLength = expectedRange.map { Int($0.count) } ?? 0
+        let exceedsExpectedBody = body.count + data.count > expectedBodyLength
         if !exceedsExpectedBody { body.append(data) }
         let task = self.task
         lock.unlock()
@@ -212,7 +256,8 @@ private final class RangeProbeDelegate: NSObject, URLSessionDataDelegate, @unche
         }
         lock.lock()
         let result: (Data, HTTPURLResponse)?
-        if body.count == 2, let response {
+        let expectedBodyLength = expectedRange.map { Int($0.count) } ?? 0
+        if body.count == expectedBodyLength, let response {
             result = (body, response)
         } else {
             result = nil
@@ -248,48 +293,23 @@ private final class RangeProbeDelegate: NSObject, URLSessionDataDelegate, @unche
     }
 }
 
-/// A task delegate that preserves caller-supplied Range and headers across HTTP redirect hops
-/// and records the final resolved resource URL.
-private final class ProbeRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private(set) var resolvedURL: URL?
-    private let originalRange: String?
-    private let customHeaders: [String: String]
-
-    init(originalRange: String?, customHeaders: [String: String]) {
-        self.originalRange = originalRange
-        self.customHeaders = customHeaders
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        if let target = request.url {
-            self.resolvedURL = target
-        }
-        let updated = PlaybackStreamCacheRedirectPolicy.redirectedRequest(
-            request,
-            response: response,
-            originalURL: task.originalRequest?.url,
-            range: originalRange,
-            customHeaders: customHeaders
-        )
-        completionHandler(updated)
-    }
-}
-
 /// Manages active HTTP stream disk cache servers for playback sessions.
 actor PlaybackStreamCacheManager {
     static let shared = PlaybackStreamCacheManager()
+    static let defaultProbePreparationBudget: TimeInterval = 5
+
+    private struct ActiveProbe {
+        let id: UUID
+        let sessionToken: String?
+        let task: Task<StreamProbeResult, Never>
+    }
 
     private let serverStopper: @Sendable (PlaybackStreamCacheServer) async -> Void
     private var activeServer: PlaybackStreamCacheServer?
     private var activeSessionURL: URL?
     private(set) var activeSessionToken: String?
     private var pendingSessionToken: String?
+    private var activeProbe: ActiveProbe?
 
     var hasActiveServer: Bool {
         activeServer != nil
@@ -307,61 +327,138 @@ actor PlaybackStreamCacheManager {
     func probeRangeSupport(
         url: URL,
         headers: [String: String] = [:],
-        sessionConfiguration: URLSessionConfiguration? = nil
+        sessionConfiguration: URLSessionConfiguration? = nil,
+        preparationBudget: TimeInterval = PlaybackStreamCacheManager.defaultProbePreparationBudget
     ) async -> StreamProbeResult {
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
             return StreamProbeResult(supportsRange: false, contentLength: 0, etag: nil, lastModified: nil)
         }
 
         let session = sessionConfiguration.map { URLSession(configuration: $0) } ?? URLSession.shared
+        return await performRangeProbe(
+            url: url, headers: headers, session: session, preparationBudget: preparationBudget
+        )
+    }
 
-        // 1. Gather metadata with HEAD, but verify range support with a Range GET below.
-        let headDelegate = ProbeRedirectDelegate(originalRange: nil, customHeaders: headers)
-        var req = URLRequest(url: url)
-        req.httpMethod = "HEAD"
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+    private func performRangeProbe(
+        url: URL, headers: [String: String], session: URLSession, preparationBudget: TimeInterval
+    ) async -> StreamProbeResult {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let budget = preparationBudget.isFinite
+            ? max(0, preparationBudget)
+            : Self.defaultProbePreparationBudget
+        func remainingBudget() -> TimeInterval {
+            max(0, budget - (ProcessInfo.processInfo.systemUptime - startedAt))
+        }
+        func elapsedMilliseconds() -> Int {
+            Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000)
+        }
 
-        var headETag: String?
-        var headLastModified: String?
-        do {
-            let (_, response) = try await session.data(for: req, delegate: headDelegate)
-            if let http = response as? HTTPURLResponse, (http.statusCode == 200 || http.statusCode == 206) {
-                headETag = http.value(forHTTPHeaderField: "ETag")?.trimmingCharacters(in: .whitespacesAndNewlines)
-                headLastModified = http.value(forHTTPHeaderField: "Last-Modified")?.trimmingCharacters(in: .whitespacesAndNewlines)
-            } else if let http = response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+        let rangeDelegate = RangeProbeDelegate(originalURL: url, customHeaders: headers, expectedRange: 0..<2)
+        var rangeRequest = URLRequest(url: url)
+        rangeRequest.httpMethod = "GET"
+        for (name, value) in headers { rangeRequest.setValue(value, forHTTPHeaderField: name) }
+        rangeRequest.setValue("bytes=0-1", forHTTPHeaderField: "Range")
+
+        guard let (data, http) = await loadProbeResponse(
+            delegate: rangeDelegate, session: session, request: rangeRequest, timeout: remainingBudget()
+        ), let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
+           let parsedRange = PlaybackStreamCacheContentRange.parse(contentRange),
+           parsedRange.start == 0, parsedRange.end == 1,
+           let total = parsedRange.total, total >= 2, data.count == 2 else {
+            diskCacheLog.warning("Cache probe phase=range outcome=failed elapsed_ms=\(elapsedMilliseconds())")
+            return StreamProbeResult(supportsRange: false, contentLength: 0, etag: nil, lastModified: nil)
+        }
+
+        var etag = Self.nonemptyHeader("ETag", in: http)
+        var lastModified = Self.nonemptyHeader("Last-Modified", in: http)
+        diskCacheLog.info("Cache probe phase=range outcome=success elapsed_ms=\(elapsedMilliseconds())")
+
+        // A valid byte-range response proves support. HEAD is only a bounded,
+        // optional metadata fallback when the range response has no validator.
+        if etag == nil, lastModified == nil {
+            if remainingBudget() > 0 {
+                let headDelegate = RangeProbeDelegate(originalURL: url, customHeaders: headers, expectedRange: nil)
+                var headRequest = URLRequest(url: url)
+                headRequest.httpMethod = "HEAD"
+                for (name, value) in headers { headRequest.setValue(value, forHTTPHeaderField: name) }
+                if let (_, headResponse) = await loadProbeResponse(
+                    delegate: headDelegate, session: session, request: headRequest, timeout: remainingBudget()
+                ), Self.headLengthMatches(headResponse, expectedLength: total) {
+                    etag = Self.nonemptyHeader("ETag", in: headResponse)
+                    lastModified = Self.nonemptyHeader("Last-Modified", in: headResponse)
+                    diskCacheLog.info("Cache probe phase=head outcome=success elapsed_ms=\(elapsedMilliseconds())")
+                } else {
+                    diskCacheLog.info("Cache probe phase=head outcome=failed elapsed_ms=\(elapsedMilliseconds())")
+                }
+            } else {
+                diskCacheLog.info("Cache probe phase=head outcome=budget_exhausted elapsed_ms=\(elapsedMilliseconds())")
+            }
+        } else {
+            diskCacheLog.info("Cache probe phase=head outcome=skipped_validators elapsed_ms=\(elapsedMilliseconds())")
+        }
+
+        return StreamProbeResult(
+            supportsRange: true, contentLength: total, etag: etag,
+            lastModified: lastModified, resolvedURL: rangeDelegate.resolvedURL ?? http.url
+        )
+    }
+
+    private func loadProbeResponse(
+        delegate: RangeProbeDelegate, session: URLSession, request: URLRequest, timeout: TimeInterval
+    ) async -> (Data, HTTPURLResponse)? {
+        guard timeout > 0 else {
+            delegate.cancel()
+            return nil
+        }
+        let nanoseconds = UInt64(min(timeout, 3_600) * 1_000_000_000)
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+                delegate.cancel()
+            } catch {}
+        }
+        defer { timeoutTask.cancel() }
+        return try? await delegate.load(in: session, request: request)
+    }
+
+    private static func nonemptyHeader(_ name: String, in response: HTTPURLResponse) -> String? {
+        guard let value = response.value(forHTTPHeaderField: name)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+
+    private static func headLengthMatches(_ response: HTTPURLResponse, expectedLength: Int64) -> Bool {
+        guard let value = response.value(forHTTPHeaderField: "Content-Length") else { return true }
+        guard let length = Int64(value.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        return length == expectedLength
+    }
+
+    private func trackRangeProbe(
+        url: URL, headers: [String: String], sessionConfiguration: URLSessionConfiguration?,
+        preparationBudget: TimeInterval, sessionToken: String
+    ) async -> StreamProbeResult {
+        let session = sessionConfiguration.map { URLSession(configuration: $0) } ?? URLSession.shared
+        let id = UUID()
+        let task = Task<StreamProbeResult, Never> { [weak self] in
+            guard let self else {
                 return StreamProbeResult(supportsRange: false, contentLength: 0, etag: nil, lastModified: nil)
             }
-        } catch {
-            diskCacheLog.warning("HEAD probe failed for \(url.absoluteString): \(error.localizedDescription)")
+            return await self.performRangeProbe(
+                url: url, headers: headers, session: session, preparationBudget: preparationBudget
+            )
         }
+        let previousProbe = activeProbe
+        activeProbe = ActiveProbe(id: id, sessionToken: sessionToken, task: task)
+        previousProbe?.task.cancel()
 
-        // 2. Some providers reject HEAD or require byte ranges. Send Range GET with redirect-aware delegate.
-        let rangeDelegate = RangeProbeDelegate(originalURL: url, customHeaders: headers)
-        var rangeReq = URLRequest(url: url)
-        rangeReq.httpMethod = "GET"
-        for (k, v) in headers { rangeReq.setValue(v, forHTTPHeaderField: k) }
-        rangeReq.setValue("bytes=0-1", forHTTPHeaderField: "Range")
-        do {
-            if let (data, http) = try await rangeDelegate.load(in: session, request: rangeReq),
-               let contentRange = http.value(forHTTPHeaderField: "Content-Range"),
-               let parsedRange = PlaybackStreamCacheContentRange.parse(contentRange),
-               parsedRange.start == 0,
-               parsedRange.end == 1,
-               let total = parsedRange.total,
-               total >= 2,
-               data.count == 2 {
-                return StreamProbeResult(
-                    supportsRange: true, contentLength: total,
-                    etag: http.value(forHTTPHeaderField: "ETag")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? headETag,
-                    lastModified: http.value(forHTTPHeaderField: "Last-Modified")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? headLastModified,
-                    resolvedURL: rangeDelegate.resolvedURL ?? http.url
-                )
-            }
-        } catch {
-            diskCacheLog.warning("Range probe failed for \(url.absoluteString): \(error.localizedDescription)")
+        let result = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
         }
-
-        return StreamProbeResult(supportsRange: false, contentLength: 0, etag: nil, lastModified: nil)
+        if activeProbe?.id == id { activeProbe = nil }
+        return result
     }
 
     /// Reuse is scoped to the exact request URL and its validator snapshot. A title,
@@ -491,17 +588,25 @@ actor PlaybackStreamCacheManager {
         targetLeadSeconds: Double? = nil,
         cacheRoot: URL? = nil,
         sessionConfiguration: URLSessionConfiguration? = nil,
-        freeSpaceProvider: PlaybackStreamDiskCache.FreeSpaceProvider? = nil
+        freeSpaceProvider: PlaybackStreamDiskCache.FreeSpaceProvider? = nil,
+        preparationBudget: TimeInterval = PlaybackStreamCacheManager.defaultProbePreparationBudget
     ) async -> URL? {
         pendingSessionToken = sessionToken
 
-        let probe = await probeRangeSupport(url: remoteURL, headers: headers, sessionConfiguration: sessionConfiguration)
+        let probe = await trackRangeProbe(
+            url: remoteURL, headers: headers, sessionConfiguration: sessionConfiguration,
+            preparationBudget: preparationBudget, sessionToken: sessionToken
+        )
+        guard !Task.isCancelled else {
+            if pendingSessionToken == sessionToken { pendingSessionToken = nil }
+            return nil
+        }
         guard pendingSessionToken == sessionToken else {
-            diskCacheLog.info("Cache session token changed during probe for \(remoteURL.lastPathComponent). Aborting.")
+            diskCacheLog.info("Cache preparation outcome=superseded origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL))")
             return nil
         }
         guard probe.supportsRange, (probe.contentLength > 10 * 1024 * 1024 || cacheRoot != nil) else {
-            diskCacheLog.info("Stream does not support range requests or length is unknown. Bypassing disk cache proxy.")
+            diskCacheLog.info("Cache preparation outcome=range_unsupported")
             pendingSessionToken = nil
             return nil
         }
@@ -538,18 +643,18 @@ actor PlaybackStreamCacheManager {
         )
         if let durationSeconds, durationSeconds > 0 {
             await server.updateTimeline(playheadOffset: 0, durationSeconds: durationSeconds)
-            guard pendingSessionToken == sessionToken else {
-                diskCacheLog.info("Cache session token changed during timeline update for \(remoteURL.lastPathComponent). Aborting.")
-                await serverStopper(server)
+            guard !Task.isCancelled, pendingSessionToken == sessionToken else {
+                diskCacheLog.info("Cache preparation outcome=superseded_after_timeline origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL))")
+                await discardPreparedServer(server, sessionToken: sessionToken, wasPublished: false)
                 return nil
             }
         }
 
         do {
             let localURL = try await server.start()
-            guard pendingSessionToken == sessionToken else {
-                diskCacheLog.info("Cache session token changed during server start for \(remoteURL.lastPathComponent). Cleaning up abandoned server.")
-                await serverStopper(server)
+            guard !Task.isCancelled, pendingSessionToken == sessionToken else {
+                diskCacheLog.info("Cache preparation outcome=superseded_after_start origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL))")
+                await discardPreparedServer(server, sessionToken: sessionToken, wasPublished: false)
                 return nil
             }
 
@@ -563,19 +668,24 @@ actor PlaybackStreamCacheManager {
 
             if let oldServer, oldServer !== server {
                 await serverStopper(oldServer)
+                guard !Task.isCancelled else {
+                    diskCacheLog.info("Cache preparation outcome=cancelled_after_old_server_stop origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL))")
+                    await discardPreparedServer(server, sessionToken: sessionToken, wasPublished: true)
+                    return nil
+                }
                 guard activeServer === server, activeSessionToken == sessionToken else {
-                    diskCacheLog.info("Cache session token changed during previous server shutdown for \(remoteURL.lastPathComponent). Aborting.")
+                    diskCacheLog.info("Cache preparation outcome=superseded_after_old_server_stop origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL))")
                     return nil
                 }
             }
-            diskCacheLog.notice("Hybrid Disk Cache engaged for \(remoteURL.lastPathComponent) [session=\(sessionID)] -> \(localURL.absoluteString)")
+            diskCacheLog.notice("Hybrid Disk Cache engaged for origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL)) [session=\(sessionID)] -> \(localURL.absoluteString)")
             return localURL
         } catch {
             if pendingSessionToken == sessionToken {
                 pendingSessionToken = nil
             }
             await serverStopper(server)
-            diskCacheLog.error("Failed to start PlaybackStreamCacheServer: \(error.localizedDescription)")
+            diskCacheLog.error("Failed to start PlaybackStreamCacheServer origin=\(AddonTransportUrls.diagnosticDescription(for: remoteURL, error: error))")
             return nil
         }
     }
@@ -594,6 +704,7 @@ actor PlaybackStreamCacheManager {
 
         if token == nil || pendingSessionToken == token {
             pendingSessionToken = nil
+            cancelActiveProbe(forSessionToken: token)
         }
 
         let serverToStop: PlaybackStreamCacheServer?
@@ -608,6 +719,29 @@ actor PlaybackStreamCacheManager {
 
         if let serverToStop {
             await serverStopper(serverToStop)
+        }
+    }
+
+    private func cancelActiveProbe(forSessionToken token: String?) {
+        guard let probe = activeProbe,
+              token == nil || probe.sessionToken == token else { return }
+        activeProbe = nil
+        probe.task.cancel()
+    }
+
+    private func discardPreparedServer(
+        _ server: PlaybackStreamCacheServer, sessionToken: String, wasPublished: Bool
+    ) async {
+        let ownsActiveServer = activeServer === server && activeSessionToken == sessionToken
+        if ownsActiveServer {
+            activeServer = nil
+            activeSessionURL = nil
+            activeSessionToken = nil
+        }
+        if pendingSessionToken == sessionToken { pendingSessionToken = nil }
+        // A successor takes responsibility for stopping the server it replaces.
+        if !wasPublished || ownsActiveServer {
+            await serverStopper(server)
         }
     }
 

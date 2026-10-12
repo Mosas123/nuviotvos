@@ -19,6 +19,14 @@ final class PlaybackStreamCacheTests: XCTestCase {
         try await super.tearDown()
     }
 
+    private func waitForProtocolCancellationIfStillLoading() async {
+        guard PlaybackStreamCacheURLProtocol.activeRequestCount > 0 else { return }
+        for _ in 0..<50 where PlaybackStreamCacheURLProtocol.activeRequestCount > 0
+            && PlaybackStreamCacheURLProtocol.cancellationCount == 0 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     func testChunkIndexAndByteRangeCalculations() async {
         let fileLength: Int64 = 10 * 1024 * 1024 // 10 MiB
         let chunkSize: Int64 = 2 * 1024 * 1024 // 2 MiB
@@ -485,6 +493,35 @@ private func serverDiskDirectory(for sessionID: String) -> URL {
     let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
     return caches.appendingPathComponent("PlaybackStreamCache", isDirectory: true)
         .appendingPathComponent(sessionID, isDirectory: true)
+}
+
+private actor PlaybackCacheStopBarrier {
+    private var armed = false
+    private var entered = false
+    private var enteredContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func arm() { armed = true }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { enteredContinuation = $0 }
+    }
+
+    func blockIfArmed() async {
+        guard armed else { return }
+        armed = false
+        entered = true
+        enteredContinuation?.resume()
+        enteredContinuation = nil
+        await withCheckedContinuation { releaseContinuation = $0 }
+        releaseContinuation = nil
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
 }
 
 extension PlaybackStreamCacheTests {
@@ -1042,6 +1079,7 @@ private final class PlaybackStreamCacheURLProtocol: URLProtocol {
         set { metricsLock.withLock { storedDelay = newValue } }
     }
     static var maximumActiveRequests: Int { metricsLock.withLock { maximumActive } }
+    static var activeRequestCount: Int { metricsLock.withLock { activeRequests } }
     static var requestCount: Int { metricsLock.withLock { starts.count } }
     static var requestStarts: [Date] { metricsLock.withLock { starts } }
     static var requestRanges: [String?] { metricsLock.withLock { ranges } }
@@ -1179,6 +1217,265 @@ private final class PlaybackStreamCacheURLProtocol: URLProtocol {
 }
 
 extension PlaybackStreamCacheTests {
+    func testRangeProbeIsRangeFirstAndSkipsHeadWithValidator() async {
+        let url = URL(string: "https://cache-test.invalid/range_first")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.Response(
+                data: Data([0x42, 0x43]), statusCode: 206, contentRange: "bytes 0-1/64",
+                retryAfter: nil, etag: "range-tag", lastModified: nil
+            )
+        }
+        defer { PlaybackStreamCacheURLProtocol.handler = nil }
+
+        let result = await PlaybackStreamCacheManager.shared.probeRangeSupport(
+            url: url, sessionConfiguration: configuration, preparationBudget: 1
+        )
+        XCTAssertTrue(result.supportsRange)
+        XCTAssertEqual(result.contentLength, 64)
+        XCTAssertEqual(result.etag, "range-tag")
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestSnapshots.first?.method, "GET")
+        XCTAssertTrue(PlaybackStreamCacheURLProtocol.requestRanges.contains { $0 == "bytes=0-1" })
+    }
+
+    func testHeadFailureDoesNotVetoVerifiedRangeResponse() async {
+        let url = URL(string: "https://cache-test.invalid/head_forbidden")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            if request.httpMethod == "HEAD" {
+                return PlaybackStreamCacheURLProtocol.Response(
+                    data: Data(), statusCode: 403, contentRange: "", retryAfter: nil,
+                    etag: nil, lastModified: nil
+                )
+            }
+            return PlaybackStreamCacheURLProtocol.Response(
+                data: Data([0x42, 0x43]), statusCode: 206, contentRange: "bytes 0-1/64",
+                retryAfter: nil, etag: nil, lastModified: nil
+            )
+        }
+        defer { PlaybackStreamCacheURLProtocol.handler = nil }
+
+        let result = await PlaybackStreamCacheManager.shared.probeRangeSupport(
+            url: url, sessionConfiguration: configuration, preparationBudget: 1
+        )
+        XCTAssertTrue(result.supportsRange)
+        XCTAssertEqual(result.contentLength, 64)
+        XCTAssertNil(result.etag)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestSnapshots.compactMap(\.method), ["GET", "HEAD"])
+    }
+
+    func testRangeProbeBudgetCancelsHangingGet() async {
+        let url = URL(string: "https://cache-test.invalid/hanging_get")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.delay = 5
+        PlaybackStreamCacheURLProtocol.handler = { _ in
+            PlaybackStreamCacheURLProtocol.Response(
+                data: Data([0x42, 0x43]), statusCode: 206, contentRange: "bytes 0-1/64",
+                retryAfter: nil, etag: "tag", lastModified: nil
+            )
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            PlaybackStreamCacheURLProtocol.delay = 0
+        }
+
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = await PlaybackStreamCacheManager.shared.probeRangeSupport(
+            url: url, sessionConfiguration: configuration, preparationBudget: 0.05
+        )
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertFalse(result.supportsRange)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+        await waitForProtocolCancellationIfStillLoading()
+        XCTAssertGreaterThan(PlaybackStreamCacheURLProtocol.cancellationCount, 0)
+        XCTAssertLessThan(elapsed, 0.5)
+    }
+
+    func testOptionalHeadBudgetCancelsHeadButKeepsVerifiedRange() async {
+        let url = URL(string: "https://cache-test.invalid/hanging_optional_head")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.delay = 0.15
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            if request.httpMethod == "HEAD" {
+                return PlaybackStreamCacheURLProtocol.response(for: request, body: Data(repeating: 0x42, count: 64), total: 64)
+            }
+            return PlaybackStreamCacheURLProtocol.Response(
+                data: Data([0x42, 0x43]), statusCode: 206, contentRange: "bytes 0-1/64",
+                retryAfter: nil, etag: nil, lastModified: nil
+            )
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            PlaybackStreamCacheURLProtocol.delay = 0
+        }
+
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = await PlaybackStreamCacheManager.shared.probeRangeSupport(
+            url: url, sessionConfiguration: configuration, preparationBudget: 0.25
+        )
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertTrue(result.supportsRange)
+        XCTAssertEqual(result.contentLength, 64)
+        XCTAssertNil(result.etag)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 2)
+        await waitForProtocolCancellationIfStillLoading()
+        XCTAssertGreaterThan(PlaybackStreamCacheURLProtocol.cancellationCount, 0)
+        XCTAssertLessThan(elapsed, 0.6)
+    }
+
+    func testManagerStopCancelsPendingRangeProbe() async throws {
+        let url = URL(string: "https://cache-test.invalid/manager_stop_probe")!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let token = "probe_stop_\(UUID().uuidString)"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.delay = 5
+        PlaybackStreamCacheURLProtocol.handler = { _ in
+            PlaybackStreamCacheURLProtocol.Response(
+                data: Data([0x42, 0x43]), statusCode: 206, contentRange: "bytes 0-1/64",
+                retryAfter: nil, etag: "tag", lastModified: nil
+            )
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            PlaybackStreamCacheURLProtocol.delay = 0
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let manager = PlaybackStreamCacheManager.shared
+        let pending = Task {
+            await manager.prepareCacheServer(
+                for: url, sessionToken: token, cacheRoot: root,
+                sessionConfiguration: configuration, preparationBudget: 5
+            )
+        }
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+        await manager.stopActiveSession(token: token)
+        let result = await pending.value
+        XCTAssertNil(result)
+        let hasActiveServer = await manager.hasActiveServer
+        XCTAssertFalse(hasActiveServer)
+        XCTAssertGreaterThan(PlaybackStreamCacheURLProtocol.cancellationCount, 0)
+    }
+
+    func testSupersedingProbeCannotPublishOrClearNewSession() async throws {
+        let firstURL = URL(string: "https://cache-test.invalid/first_probe")!
+        let secondURL = URL(string: "https://cache-test.invalid/second_probe")!
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let firstToken = "probe_first_\(UUID().uuidString)"
+        let secondToken = "probe_second_\(UUID().uuidString)"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.delay = 5
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.Response(
+                data: Data([0x42, 0x43]), statusCode: 206, contentRange: "bytes 0-1/64",
+                retryAfter: nil, etag: request.url == secondURL ? "second-tag" : "first-tag", lastModified: nil
+            )
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            PlaybackStreamCacheURLProtocol.delay = 0
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let manager = PlaybackStreamCacheManager.shared
+        let firstPending = Task {
+            await manager.prepareCacheServer(
+                for: firstURL, sessionToken: firstToken, cacheRoot: root,
+                sessionConfiguration: configuration, preparationBudget: 5
+            )
+        }
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+
+        PlaybackStreamCacheURLProtocol.delay = 0
+        let secondPending = Task {
+            await manager.prepareCacheServer(
+                for: secondURL, sessionToken: secondToken, cacheRoot: root,
+                sessionConfiguration: configuration, preparationBudget: 1
+            )
+        }
+        let secondLocalURL = await secondPending.value
+        let firstLocalURL = await firstPending.value
+        XCTAssertNotNil(secondLocalURL)
+        XCTAssertNil(firstLocalURL)
+        let activeSessionToken = await manager.activeSessionToken
+        let hasActiveServer = await manager.hasActiveServer
+        XCTAssertEqual(activeSessionToken, secondToken)
+        XCTAssertTrue(hasActiveServer)
+        await manager.stopActiveSession(token: secondToken)
+    }
+
+    func testCancelledPreparationAfterOldServerStopRemovesOnlyItsPublishedServer() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            PlaybackStreamCacheURLProtocol.response(
+                for: request, body: Data([0x42, 0x43]), total: 64, etag: "probe-tag"
+            )
+        }
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let barrier = PlaybackCacheStopBarrier()
+        let manager = PlaybackStreamCacheManager(serverStopper: { server in
+            await barrier.blockIfArmed()
+            await server.stop()
+        })
+        let firstURL = URL(string: "https://cache-test.invalid/old_server")!
+        let secondURL = URL(string: "https://cache-test.invalid/cancelled_server")!
+        let firstToken = "post_probe_owner_\(UUID().uuidString)"
+        let secondToken = "post_probe_cancel_\(UUID().uuidString)"
+        let firstLocalURL = await manager.prepareCacheServer(
+            for: firstURL, sessionToken: firstToken, cacheRoot: root,
+            sessionConfiguration: configuration, freeSpaceProvider: { _ in 0 }
+        )
+        guard firstLocalURL != nil else {
+            XCTFail("Expected the first cache server to become active")
+            return
+        }
+
+        await barrier.arm()
+        let cancelledPreparation = Task {
+            await manager.prepareCacheServer(
+                for: secondURL, sessionToken: secondToken, cacheRoot: root,
+                sessionConfiguration: configuration, freeSpaceProvider: { _ in 0 }
+            )
+        }
+        await barrier.waitUntilEntered()
+        cancelledPreparation.cancel()
+        await barrier.release()
+
+        let cancelledLocalURL = await cancelledPreparation.value
+        let hasActiveServer = await manager.hasActiveServer
+        let activeSessionToken = await manager.activeSessionToken
+        XCTAssertNil(cancelledLocalURL)
+        XCTAssertFalse(hasActiveServer)
+        XCTAssertNil(activeSessionToken)
+        await manager.stopActiveSession()
+    }
+
     func testRangeProbeRequiresExactTwoBytePartialResponse() async {
         let url = URL(string: "https://cache-test.invalid/probe")!
         let body = Data(repeating: 0x42, count: 64)
@@ -1222,8 +1519,15 @@ extension PlaybackStreamCacheTests {
             } else {
                 XCTAssertEqual(result.contentLength, 0)
             }
-            XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestRanges.count, 2)
-            XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestRanges[1], "bytes=0-1")
+            let requestRanges = PlaybackStreamCacheURLProtocol.requestRanges
+            XCTAssertTrue(requestRanges.contains { $0 == "bytes=0-1" })
+            if testCase.supportsRange {
+                XCTAssertEqual(requestRanges.count, 2)
+                XCTAssertNil(requestRanges[1], "HEAD is only used as a validator fallback after a valid GET")
+                XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestSnapshots[1].method, "HEAD")
+            } else {
+                XCTAssertEqual(requestRanges.count, 1, "An invalid range response must not trigger HEAD")
+            }
             if testCase.name == "ignored range" {
                 XCTAssertLessThanOrEqual(PlaybackStreamCacheURLProtocol.totalDeliveredBodyBytes, testCase.data.count)
             }
@@ -2419,19 +2723,39 @@ extension PlaybackStreamCacheTests {
             remoteURL: URL(string: "https://cache-test.invalid/suffix_test.mkv")!,
             fileLength: fileLength,
             sessionID: session,
-            sessionConfiguration: configuration
+            sessionConfiguration: configuration,
+            freeSpaceProvider: { _ in 0 }
         )
         let localURL = try await server.start()
 
-        // 1. Test Suffix Range: bytes=-65536 (last 64 KB of the file)
-        var suffixReq = URLRequest(url: localURL)
-        suffixReq.setValue("bytes=-65536", forHTTPHeaderField: "Range")
-        let (suffixData, suffixResp) = try await URLSession.shared.data(for: suffixReq)
+        // Concurrent suffix and final-packet reads share one bounded upstream span.
+        let suffixReq: URLRequest = {
+            var request = URLRequest(url: localURL)
+            request.setValue("bytes=-65536", forHTTPHeaderField: "Range")
+            return request
+        }()
+        let finalPacketReq: URLRequest = {
+            var request = URLRequest(url: localURL)
+            request.setValue("bytes=\(fileLength - 3122)-\(fileLength - 1)", forHTTPHeaderField: "Range")
+            return request
+        }()
+        async let suffixResult = URLSession.shared.data(for: suffixReq)
+        async let finalPacketResult = URLSession.shared.data(for: finalPacketReq)
+        let (suffixData, suffixResp) = try await suffixResult
+        let (finalPacketData, finalPacketResp) = try await finalPacketResult
         let httpSuffix = suffixResp as! HTTPURLResponse
+        let httpFinalPacket = finalPacketResp as! HTTPURLResponse
         XCTAssertEqual(httpSuffix.statusCode, 206)
         XCTAssertEqual(httpSuffix.value(forHTTPHeaderField: "Content-Range"), "bytes \(fileLength - 65536)-\(fileLength - 1)/\(fileLength)")
         XCTAssertEqual(suffixData.count, 65536)
         XCTAssertEqual(suffixData, fullBody.suffix(65536))
+        XCTAssertEqual(httpFinalPacket.statusCode, 206)
+        XCTAssertEqual(httpFinalPacket.value(forHTTPHeaderField: "Content-Range"), "bytes \(fileLength - 3122)-\(fileLength - 1)/\(fileLength)")
+        XCTAssertEqual(finalPacketData, fullBody.suffix(3122))
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestRanges, ["bytes=\(fileLength - 65536)-\(fileLength - 1)"])
+        let tailCachedFraction = await server.cachedFraction()
+        XCTAssertEqual(tailCachedFraction, 0, "A short tail span must not be persisted as a chunk")
 
         // 2. Test Open-Ended Range: bytes=2097152- (from offset 2MB to end)
         var openEndedReq = URLRequest(url: localURL)
@@ -2444,6 +2768,191 @@ extension PlaybackStreamCacheTests {
         XCTAssertEqual(openData, fullBody.subdata(in: chunkSize..<Int(fileLength)))
 
         await server.stop()
+    }
+
+    func testTailSpanRejectsUnknownFileLengthAndShortBodyThenFallsBackToChunk() async throws {
+        let chunkSize = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunkSize * 4)
+        let body = Data(repeating: 0x6A, count: Int(fileLength))
+        let tailRange = "bytes=\(fileLength - 65536)-\(fileLength - 1)"
+        let finalChunkRange = "bytes=\(chunkSize * 3)-\(fileLength - 1)"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+
+        for invalidTail in ["unknown total", "short body"] {
+            PlaybackStreamCacheURLProtocol.resetMetrics()
+            PlaybackStreamCacheURLProtocol.handler = { request in
+                let response = PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+                guard request.value(forHTTPHeaderField: "Range") == tailRange else { return response }
+                if invalidTail == "unknown total" {
+                    return PlaybackStreamCacheURLProtocol.Response(
+                        data: response.data, statusCode: 206,
+                        contentRange: "bytes \(fileLength - 65536)-\(fileLength - 1)/*",
+                        retryAfter: nil, etag: nil, lastModified: nil
+                    )
+                }
+                return PlaybackStreamCacheURLProtocol.Response(
+                    data: Data(response.data.prefix(17)), statusCode: 206,
+                    contentRange: response.contentRange, retryAfter: nil, etag: nil, lastModified: nil,
+                    declaredContentLength: response.data.count
+                )
+            }
+            let session = "test_tail_fallback_\(UUID().uuidString)"
+            let server = PlaybackStreamCacheServer(
+                remoteURL: URL(string: "https://cache-test.invalid/tail_fallback")!,
+                fileLength: fileLength, sessionID: session, sessionConfiguration: configuration,
+                freeSpaceProvider: { _ in 0 }
+            )
+            let localURL = try await server.start()
+            var request = URLRequest(url: localURL)
+            request.setValue("bytes=-65536", forHTTPHeaderField: "Range")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let http = response as! HTTPURLResponse
+            XCTAssertEqual(http.statusCode, 206, invalidTail)
+            XCTAssertEqual(data, body.suffix(65536), invalidTail)
+            XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestRanges, [tailRange, finalChunkRange], invalidTail)
+            let cachedFraction = await server.cachedFraction()
+            XCTAssertEqual(cachedFraction, 0, "Tail failure must not publish partial data as a chunk")
+            await server.stop()
+            try? FileManager.default.removeItem(at: serverDiskDirectory(for: session))
+        }
+        PlaybackStreamCacheURLProtocol.handler = nil
+    }
+
+    func testTailRateLimitHonorsRetryAfterBeforeChunkFallback() async throws {
+        let chunkSize = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunkSize * 4)
+        let body = Data(repeating: 0x35, count: Int(fileLength))
+        let tailRange = "bytes=\(fileLength - 65536)-\(fileLength - 1)"
+        let finalChunkRange = "bytes=\(chunkSize * 3)-\(fileLength - 1)"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            if request.value(forHTTPHeaderField: "Range") == tailRange {
+                return PlaybackStreamCacheURLProtocol.Response(
+                    data: Data(), statusCode: 429, contentRange: "bytes */\(fileLength)",
+                    retryAfter: "0.3", etag: nil, lastModified: nil
+                )
+            }
+            return PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+        }
+        let session = "test_tail_rate_limit_\(UUID().uuidString)"
+        let server = PlaybackStreamCacheServer(
+            remoteURL: URL(string: "https://cache-test.invalid/tail_rate_limit")!,
+            fileLength: fileLength, sessionID: session, sessionConfiguration: configuration,
+            rateLimitCooldown: 0.1, freeSpaceProvider: { _ in 0 }
+        )
+        let localURL = try await server.start()
+        var request = URLRequest(url: localURL)
+        request.setValue("bytes=-65536", forHTTPHeaderField: "Range")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(data, body.suffix(65536))
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestRanges, [tailRange, finalChunkRange])
+        let starts = PlaybackStreamCacheURLProtocol.requestStarts
+        XCTAssertEqual(starts.count, 2)
+        if starts.count == 2 {
+            XCTAssertGreaterThanOrEqual(starts[1].timeIntervalSince(starts[0]), 0.25)
+        }
+        await server.stop()
+        try? FileManager.default.removeItem(at: serverDiskDirectory(for: session))
+        PlaybackStreamCacheURLProtocol.handler = nil
+    }
+
+    func testTailRateLimitReleasesDemandSlotForUnrelatedRead() async throws {
+        let chunkSize = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunkSize * 4)
+        let body = Data(repeating: 0x49, count: Int(fileLength))
+        let tailRange = "bytes=\(fileLength - 65536)-\(fileLength - 1)"
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            if request.value(forHTTPHeaderField: "Range") == tailRange {
+                return PlaybackStreamCacheURLProtocol.Response(
+                    data: Data(), statusCode: 429, contentRange: "bytes */\(fileLength)",
+                    retryAfter: "0.5", etag: nil, lastModified: nil
+                )
+            }
+            return PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+        }
+        let session = "test_tail_slot_release_\(UUID().uuidString)"
+        let server = PlaybackStreamCacheServer(
+            remoteURL: URL(string: "https://cache-test.invalid/tail_slot_release")!,
+            fileLength: fileLength, sessionID: session, sessionConfiguration: configuration,
+            rateLimitCooldown: 0.1, maxConcurrentUpstream: 1, freeSpaceProvider: { _ in 0 }
+        )
+        let localURL = try await server.start()
+        let tailRequest: URLRequest = {
+            var request = URLRequest(url: localURL)
+            request.setValue("bytes=-65536", forHTTPHeaderField: "Range")
+            return request
+        }()
+        let tailClient = Task { try? await URLSession.shared.data(for: tailRequest) }
+
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+
+        let unrelatedRequest: URLRequest = {
+            var request = URLRequest(url: localURL)
+            request.setValue("bytes=0-63", forHTTPHeaderField: "Range")
+            return request
+        }()
+        let (unrelatedData, unrelatedResponse) = try await URLSession.shared.data(for: unrelatedRequest)
+        XCTAssertEqual((unrelatedResponse as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(unrelatedData, body.prefix(64))
+        let starts = PlaybackStreamCacheURLProtocol.requestStarts
+        XCTAssertGreaterThanOrEqual(starts.count, 2)
+        if starts.count >= 2 {
+            XCTAssertLessThan(starts[1].timeIntervalSince(starts[0]), 0.4)
+        }
+
+        _ = await tailClient.value
+        await server.stop()
+        try? FileManager.default.removeItem(at: serverDiskDirectory(for: session))
+        PlaybackStreamCacheURLProtocol.handler = nil
+    }
+
+    func testStoppingServerCancelsTailSpanDemandAndReleasesItsSlot() async throws {
+        let chunkSize = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunkSize * 4)
+        let body = Data(repeating: 0x7B, count: Int(fileLength))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            var response = PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+            response.bodyChunkBytes = 1024
+            response.bodyChunkDelay = 0.5
+            return response
+        }
+        let session = "test_tail_stop_\(UUID().uuidString)"
+        let server = PlaybackStreamCacheServer(
+            remoteURL: URL(string: "https://cache-test.invalid/tail_stop")!,
+            fileLength: fileLength, sessionID: session, sessionConfiguration: configuration,
+            freeSpaceProvider: { _ in 0 }
+        )
+        let localURL = try await server.start()
+        let request: URLRequest = {
+            var request = URLRequest(url: localURL)
+            request.setValue("bytes=-65536", forHTTPHeaderField: "Range")
+            return request
+        }()
+        let clientRequest = Task { try? await URLSession.shared.data(for: request) }
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.totalDeliveredBodyBytes == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertGreaterThan(PlaybackStreamCacheURLProtocol.totalDeliveredBodyBytes, 0)
+        await server.stop()
+        _ = await clientRequest.value
+        XCTAssertGreaterThan(PlaybackStreamCacheURLProtocol.cancellationCount, 0)
+        let hasActiveDemand = await server.hasActiveDemand
+        XCTAssertFalse(hasActiveDemand)
+        try? FileManager.default.removeItem(at: serverDiskDirectory(for: session))
+        PlaybackStreamCacheURLProtocol.handler = nil
     }
 
     // MARK: - Orivio Buffering Supercharge Tests

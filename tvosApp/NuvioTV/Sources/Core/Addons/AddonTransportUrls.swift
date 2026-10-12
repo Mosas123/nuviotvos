@@ -9,6 +9,25 @@
 import Foundation
 
 public enum AddonTransportUrls {
+    /// Configured URLs may carry credentials in user info, paths, queries, or fragments.
+    /// Diagnostics retain only the origin and an error code, never the error's URL-bearing text.
+    static func diagnosticDescription(for url: URL, error: Error? = nil) -> String {
+        var origin = "<redacted URL>"
+        if var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+           components.host != nil {
+            components.user = nil
+            components.password = nil
+            components.path = ""
+            components.query = nil
+            components.fragment = nil
+            origin = components.string ?? origin
+        }
+        guard let error else { return origin }
+        let nsError = error as NSError
+        return "\(origin) errorDomain=\(nsError.domain) code=\(nsError.code)"
+    }
+
     /// Extracts the base URL of a manifest (everything before `?` and without trailing `/manifest.json`).
     public static func baseUrl(from manifestURL: URL) -> String {
         let full = manifestURL.absoluteString

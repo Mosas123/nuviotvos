@@ -27,6 +27,7 @@ private final class PlaybackStreamRangeDelegate: NSObject, URLSessionDataDelegat
     private let expectedRange: Range<Int64>
     private let expectedFileLength: Int64
     private let customHeaders: [String: String]
+    private let requiresExactFileLength: Bool
     private let condition = NSCondition()
     private var queuedData: [Data] = []
     private var queuedBytes = 0
@@ -42,10 +43,14 @@ private final class PlaybackStreamRangeDelegate: NSObject, URLSessionDataDelegat
     private var completedAtNanoseconds: UInt64?
     private weak var task: URLSessionDataTask?
 
-    init(expectedRange: Range<Int64>, expectedFileLength: Int64, customHeaders: [String: String] = [:]) {
+    init(
+        expectedRange: Range<Int64>, expectedFileLength: Int64, customHeaders: [String: String] = [:],
+        requiresExactFileLength: Bool = false
+    ) {
         self.expectedRange = expectedRange
         self.expectedFileLength = expectedFileLength
         self.customHeaders = customHeaders
+        self.requiresExactFileLength = requiresExactFileLength
     }
 
     func start(in session: URLSession, request: URLRequest) {
@@ -158,7 +163,8 @@ private final class PlaybackStreamRangeDelegate: NSObject, URLSessionDataDelegat
             range: expectedRange,
             response: http,
             bodyCount: nil,
-            expectedFileLength: expectedFileLength
+            expectedFileLength: expectedFileLength,
+            requiresExactFileLength: requiresExactFileLength
         ) else {
             fail(.invalidContentRange)
             completionHandler(.cancel)
@@ -262,13 +268,16 @@ private final class PlaybackStreamRangeDelegate: NSObject, URLSessionDataDelegat
     }
 
     private static func responseMatches(
-        range: Range<Int64>, response: HTTPURLResponse, bodyCount: Int?, expectedFileLength: Int64
+        range: Range<Int64>, response: HTTPURLResponse, bodyCount: Int?, expectedFileLength: Int64,
+        requiresExactFileLength: Bool
     ) -> Bool {
         guard let contentRange = response.value(forHTTPHeaderField: "Content-Range") else { return false }
         guard let parsedRange = PlaybackStreamCacheContentRange.parse(contentRange),
               parsedRange.start == range.lowerBound,
               parsedRange.end == range.upperBound - 1 else { return false }
-        let totalMatches = parsedRange.total == nil || parsedRange.total == expectedFileLength
+        let totalMatches = requiresExactFileLength
+            ? parsedRange.total == expectedFileLength
+            : parsedRange.total == nil || parsedRange.total == expectedFileLength
         guard totalMatches else { return false }
         if let bodyCount { return bodyCount == Int(range.count) }
         return true
@@ -486,6 +495,17 @@ actor PlaybackStreamCacheServer {
     private let burstSeconds: Double = 60.0
     private let burstFallbackBytes: Int64 = 256 * 1024 * 1024 // 256 MB fallback
     static let maxBatchChunks = 4 // Batch up to 4 chunks (8 MiB) per upstream request
+    private static let tailFetchSpanBytes: Int64 = 64 * 1024
+
+    private struct InFlightTailFetch {
+        let id: UUID
+        let task: Task<Data?, Never>
+    }
+
+    // A tail read never becomes a cache chunk: retain at most this one short
+    // span separately from the complete chunk cache.
+    private var transientTailSpan: Data?
+    private var inFlightTailFetch: InFlightTailFetch?
 
     /// Target bytes for the high-priority opening burst (60 seconds of video or 256 MB).
     var burstTargetBytes: Int64 {
@@ -723,12 +743,19 @@ actor PlaybackStreamCacheServer {
         let demandOwnedAtStop = demandOwnedBatchIDs
         stoppedBatches.values.forEach { $0.finish() }
         inFlightBatchFetches.values.forEach { $0.task.cancel() }
+        let stoppedTailFetch = inFlightTailFetch
+        stoppedTailFetch?.task.cancel()
         inFlightBatchFetches.removeAll()
         demandOwnedBatchIDs.removeAll()
         preemptedBackgroundBatchIDs.removeAll()
         recentChunks.removeAll()
         recentChunkOrder.removeAll()
         urlSession.invalidateAndCancel()
+        if let stoppedTailFetch {
+            _ = await stoppedTailFetch.task.value
+        }
+        inFlightTailFetch = nil
+        transientTailSpan = nil
         await persistenceTask?.value
         for batch in stoppedBatches.values {
             await persistBatch(batch, priority: demandOwnedAtStop.contains(batch.id) ? .demand : batch.priority)
@@ -1008,6 +1035,132 @@ actor PlaybackStreamCacheServer {
             inFlightDemandFetches.removeValue(forKey: index)
         }
         return result
+    }
+
+    private func cachedCompleteChunk(_ index: Int) async -> Data? {
+        if let cached = recentChunks[index] { return cached }
+        if let write = activeWrite, write.index == index { return write.data }
+        if let pending = pendingWrites.first(where: { $0.index == index }) { return pending.data }
+        guard knownDiskChunks.contains(index) else { return nil }
+        if let cached = await diskCache.readChunk(index) { return cached }
+        knownDiskChunks.remove(index)
+        return nil
+    }
+
+    /// Reads a requested tail slice only from already complete cache chunks.
+    /// A cache miss leaves the range untouched for the bounded tail fetch path.
+    private func cachedCompleteData(in range: Range<Int64>) async -> Data? {
+        guard !range.isEmpty else { return Data() }
+        var result = Data(capacity: Int(range.count))
+        var offset = range.lowerBound
+        while offset < range.upperBound {
+            let chunk = diskCache.chunkIndex(forByteOffset: offset)
+            guard let completeChunk = await cachedCompleteChunk(chunk) else { return nil }
+            let chunkRange = diskCache.byteRange(forChunk: chunk)
+            let end = min(range.upperBound, chunkRange.upperBound)
+            let startIndex = Int(offset - chunkRange.lowerBound)
+            let endIndex = Int(end - chunkRange.lowerBound)
+            guard startIndex >= 0, endIndex <= completeChunk.count, endIndex > startIndex else { return nil }
+            result.append(completeChunk[startIndex..<endIndex])
+            offset = end
+        }
+        return result
+    }
+
+    private func tailSpanRange() -> Range<Int64>? {
+        let fileLength = diskCache.fileLength
+        guard fileLength > 0 else { return nil }
+        return max(0, fileLength - Self.tailFetchSpanBytes)..<fileLength
+    }
+
+    private func tailSlice(_ span: Data, range: Range<Int64>, spanRange: Range<Int64>) -> Data? {
+        guard range.lowerBound >= spanRange.lowerBound, range.upperBound <= spanRange.upperBound else { return nil }
+        let start = Int(range.lowerBound - spanRange.lowerBound)
+        let end = Int(range.upperBound - spanRange.lowerBound)
+        guard start >= 0, end <= span.count, end > start else { return nil }
+        return Data(span[start..<end])
+    }
+
+    private func fetchTransientTailSpan() async -> Data? {
+        guard !stopped, !Task.isCancelled, let range = tailSpanRange() else { return nil }
+        if let transientTailSpan { return transientTailSpan }
+
+        if let existing = inFlightTailFetch {
+            let data = await existing.task.value
+            if inFlightTailFetch?.id == existing.id {
+                inFlightTailFetch = nil
+                if !stopped, let data { transientTailSpan = data }
+            }
+            return data
+        }
+
+        let id = UUID()
+        let task = Task<Data?, Never> { [weak self] in
+            guard let self else { return nil }
+            return await self.executeTailSpanFetch(range)
+        }
+        inFlightTailFetch = InFlightTailFetch(id: id, task: task)
+        let data = await task.value
+        if inFlightTailFetch?.id == id {
+            inFlightTailFetch = nil
+            if !stopped, let data { transientTailSpan = data }
+        }
+        return data
+    }
+
+    private func executeTailSpanFetch(_ range: Range<Int64>) async -> Data? {
+        guard !stopped, !Task.isCancelled, await acquireFetchSlot(priority: .demand) else { return nil }
+        var holdsDemandSlot = true
+        defer {
+            if holdsDemandSlot { releaseFetchSlot(priority: .demand) }
+        }
+        guard !stopped, !Task.isCancelled else { return nil }
+
+        var request = URLRequest(url: remoteURL)
+        request.httpMethod = "GET"
+        for (key, value) in customHeaders { request.setValue(value, forHTTPHeaderField: key) }
+        request.setValue("bytes=\(range.lowerBound)-\(range.upperBound - 1)", forHTTPHeaderField: "Range")
+
+        let stream = PlaybackStreamRangeDelegate(
+            expectedRange: range,
+            expectedFileLength: diskCache.fileLength,
+            customHeaders: customHeaders,
+            requiresExactFileLength: true
+        )
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        do {
+            guard !stopped, !Task.isCancelled else { return nil }
+            stream.start(in: urlSession, request: request)
+            var data = Data(capacity: Int(range.count))
+            while let piece = try await stream.next() {
+                guard !stopped, !Task.isCancelled else { throw CancellationError() }
+                data.append(piece)
+                guard Int64(data.count) <= range.count else { throw PlaybackStreamRangeError.invalidBodyLength }
+            }
+            guard data.count == Int(range.count), !stopped, !Task.isCancelled else {
+                throw PlaybackStreamRangeError.invalidBodyLength
+            }
+            let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
+            if elapsed > 0.05 { updateThroughput(Double(range.count) / elapsed) }
+            lastSuccessfulFetchAt = Date()
+            return data
+        } catch {
+            stream.cancel()
+            if holdsDemandSlot {
+                releaseFetchSlot(priority: .demand)
+                holdsDemandSlot = false
+            }
+            if case let PlaybackStreamRangeError.httpStatus(status, retryAfter) = error,
+               status == 429 || status == 503 {
+                let delay = applyRateLimitThrottle(retryAfter: retryAfter)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorTimedOut {
+                noteUpstreamTimeout()
+            }
+            return nil
+        }
     }
 
     private enum BatchJoinOutcome {
@@ -1623,8 +1776,31 @@ actor PlaybackStreamCacheServer {
         }
         headers += "Connection: close\r\n\r\n"
 
+        var prefetchedTailData: Data?
+        if method.uppercased() == "GET", isRangeRequest,
+           let spanRange = tailSpanRange() {
+            let requestedRange = requestedStart..<(requestedEnd + 1)
+            if requestedRange.lowerBound >= spanRange.lowerBound,
+               requestedRange.upperBound <= spanRange.upperBound {
+                // Complete chunk data remains the first choice. The short span
+                // path is only used when no complete cached chunk can satisfy it.
+                prefetchedTailData = await cachedCompleteData(in: requestedRange)
+                if prefetchedTailData == nil, let transientTailSpan {
+                    prefetchedTailData = tailSlice(transientTailSpan, range: requestedRange, spanRange: spanRange)
+                }
+                if prefetchedTailData == nil, let fetchedSpan = await fetchTransientTailSpan() {
+                    prefetchedTailData = tailSlice(fetchedSpan, range: requestedRange, spanRange: spanRange)
+                }
+            }
+        }
+
         try await NetworkIO.send(connection, Data(headers.utf8))
-        if method == "HEAD" { return false }
+        if method.uppercased() == "HEAD" { return false }
+        if let prefetchedTailData {
+            try await NetworkIO.send(connection, prefetchedTailData)
+            diskCacheLog.info("[DiskCacheWatchdog] 📤 Served tail range from complete cache or bounded span (\(prefetchedTailData.count)B)")
+            return false
+        }
 
         // Stream range to client using Demand Priority, clamped to chunk boundaries
         var currentOffset = requestedStart
