@@ -8,18 +8,44 @@ import XCTest
 /// that still has a legacy secret keeps sending it. OAuth now targets auth.trakt.tv.
 final class TraktPkceAuthTests: XCTestCase {
     private var suiteName = ""
+    private var profileID = ""
     private var store: UserDefaults!
+    private var previousSettingsProfileID: String?
+    private var previousSettingsProfileIsPrimary = false
+    private var previousWatchedProfileID: String?
 
     override func setUp() {
         super.setUp()
-        suiteName = "trakt-pkce-\(UUID().uuidString)"
-        store = UserDefaults(suiteName: suiteName)!
+        previousSettingsProfileID = ProfileSettings.activeProfileID
+        previousSettingsProfileIsPrimary = ProfileSettings.isPrimaryProfileStore(ProfileSettings.current)
+        previousWatchedProfileID = WatchedStore.activeProfileId
+        profileID = "trakt-pkce-\(UUID().uuidString)"
+        suiteName = "nuvio.tv.profile.settings.\(profileID)"
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+        WatchedStore.eraseProfile(profileID)
+        ProfileSettings.setActiveProfile(profileID, isPrimary: false)
+        WatchedStore.setActiveProfile(profileID)
+        store = ProfileSettings.current
         TraktStubURLProtocol.reset()
     }
 
     override func tearDown() {
-        store.removePersistentDomain(forName: suiteName)
         TraktStubURLProtocol.reset()
+        WatchedStore.eraseProfile(profileID)
+        if let previousWatchedProfileID {
+            WatchedStore.setActiveProfile(previousWatchedProfileID)
+        } else {
+            WatchedStore.setActiveProfile(nil)
+        }
+        if let previousSettingsProfileID {
+            ProfileSettings.setActiveProfile(
+                previousSettingsProfileID,
+                isPrimary: previousSettingsProfileIsPrimary
+            )
+        } else {
+            ProfileSettings.clearActiveProfile()
+        }
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
         super.tearDown()
     }
 

@@ -6931,6 +6931,7 @@ enum WatchedStore {
                         season: season,
                         episode: episode,
                         isWatched: isWatched,
+                        store: store,
                         profileId: profileId
                     )
                 }
@@ -7063,6 +7064,7 @@ enum WatchedStore {
                     season: season,
                     episode: episode,
                     isWatched: isWatched,
+                    store: traktStore,
                     profileId: profileId
                 )
             }
@@ -7584,6 +7586,7 @@ enum WatchedStore {
                 season: season,
                 episode: episode,
                 isWatched: true,
+                store: traktStore,
                 profileId: profileId
             )
             schedulePendingProviderFlush(.trakt, store: traktStore, profileId: profileId)
@@ -7819,6 +7822,7 @@ enum WatchedStore {
                 season: season,
                 episode: episode,
                 isWatched: false,
+                store: traktStore,
                 profileId: profileId
             )
             schedulePendingProviderFlush(.trakt, store: traktStore, profileId: profileId)
@@ -8744,9 +8748,10 @@ enum WatchedStore {
         season: Int?,
         episode: Int?,
         isWatched: Bool,
+        store: UserDefaults? = nil,
         profileId: String?
     ) -> Bool {
-        let settings = ProfileSettings.store(for: profileId)
+        let settings = store ?? ProfileSettings.store(for: profileId)
         return enqueuePendingProviderMutation(
             meta: meta,
             season: season,
@@ -9543,9 +9548,6 @@ enum ProfileSettings {
         if let scope = store.string(forKey: profileScopeKey) {
             guard let activeID = activeProfileID else { return false }
             return scope == activeID
-        }
-        if NSClassFromString("XCTestCase") != nil {
-            return true
         }
         guard activeProfileID != nil else { return true }
         return store === current || store === UserDefaults.standard

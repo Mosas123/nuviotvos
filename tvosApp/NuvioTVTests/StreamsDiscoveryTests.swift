@@ -179,6 +179,20 @@ final class StreamsDiscoveryTests: XCTestCase {
         XCTAssertNotEqual(idA, idB, "Same manifest.id with different URLs must not collide")
     }
 
+    func testAddonDiagnosticsOmitCredentialsFromURLAndErrorText() {
+        let url = URL(string: "https://user:password@example.com:8443/%7B%22auth_token%22%3A%22path-secret%22%7D/manifest.json?token=query-secret#fragment-secret")!
+        let error = NSError(
+            domain: NSURLErrorDomain, code: URLError.cancelled.rawValue,
+            userInfo: [NSLocalizedDescriptionKey: "Request failed: \(url.absoluteString)"]
+        )
+        let diagnostic = AddonTransportUrls.diagnosticDescription(for: url, error: error)
+        XCTAssertTrue(diagnostic.contains("https://example.com:8443"))
+        XCTAssertTrue(diagnostic.contains("code=-999"))
+        for credential in ["user:", "password", "auth_token", "path-secret", "query-secret", "fragment-secret", "manifest.json"] {
+            XCTAssertFalse(diagnostic.contains(credential), "Diagnostics exposed \(credential)")
+        }
+    }
+
     func testAddonStreamGroupUsesStableIdNotDisplayName() {
         let group = AddonStreamGroup(
             addonId: "addon:com.stremio.torrentio.addon:https://example.com/manifest.json",

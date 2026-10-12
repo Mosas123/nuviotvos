@@ -437,7 +437,7 @@ final class StreamsRepository: ObservableObject {
             let message = (error as? URLError)?.code == .timedOut
                 ? "Timed out"
                 : error.localizedDescription
-            print("[StreamsRepo] failed addon=\(target.displayName) id=\(target.addonId) error=\(message)")
+            print("[StreamsRepo] failed \(AddonTransportUrls.diagnosticDescription(for: target.manifestURL, error: error))")
             return GroupUpdate(
                 addonId: target.addonId,
                 group: AddonStreamGroup(
@@ -507,7 +507,7 @@ final class StreamsRepository: ObservableObject {
                     await manifestCache.storeSuccess(manifest, for: url)
                     result[url] = manifest
                 } else {
-                    print("[StreamsRepo] manifest fetch failed url=\(url.absoluteString) (not cached)")
+                    print("[StreamsRepo] manifest fetch failed origin=\(AddonTransportUrls.diagnosticDescription(for: url)) (not cached)")
                 }
             }
         }
@@ -635,7 +635,7 @@ final class StreamsRepository: ObservableObject {
             let decoded = try JSONDecoder().decode(StreamSubtitleResponse.self, from: data)
             return (decoded.subtitles ?? []).compactMap { $0.toNuvioSubtitle(source: source) }
         } catch {
-            print("[StreamsRepo] subtitles failed source=\(source) error=\(error.localizedDescription)")
+            print("[StreamsRepo] subtitles failed \(AddonTransportUrls.diagnosticDescription(for: url, error: error))")
             return []
         }
     }
