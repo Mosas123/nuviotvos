@@ -178,6 +178,7 @@ enum ExternalPlayer: String, CaseIterable, Identifiable {
     case nplayer = "nPlayer"
     case vidhub = "VidHub"
     case senplayer = "SenPlayer"
+    case nativePlayer = "Native Player"
 
     var id: String { rawValue }
 
@@ -194,6 +195,7 @@ enum ExternalPlayer: String, CaseIterable, Identifiable {
         case .nplayer: return "play.rectangle.fill"
         case .vidhub: return "play.square.fill"
         case .senplayer: return "play.rectangle.on.rectangle.fill"
+        case .nativePlayer: return "play.display"
         }
     }
 
@@ -206,13 +208,14 @@ enum ExternalPlayer: String, CaseIterable, Identifiable {
     /// The URL-scheme deep link that hands `streamURL` to this player, or `nil`
     /// for the built-in player (which plays in-app). Infuse supports multi-`sub=`,
     /// `filename=` (for accurate metadata/title scraping), and `position=`.
-    /// VLC takes the first subtitle. Source is percent-encoded so query separators
-    /// in the stream URL survive.
+    /// VLC takes the first subtitle. Native Player takes a display `name=` (title).
+    /// Source is percent-encoded so query separators in the stream URL survive.
     func launchURL(
         for streamURL: URL,
         filename: String? = nil,
         subtitleURLs: [URL] = [],
         position: Double? = nil,
+        title: String? = nil,
         successURL: URL? = nil,
         errorURL: URL? = nil
     ) -> URL? {
@@ -303,7 +306,59 @@ enum ExternalPlayer: String, CaseIterable, Identifiable {
                 }
             }
             return URL(string: query)
+        case .nativePlayer:
+            guard let scheme = streamURL.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  Self.pathExtension(of: streamURL) != "mpd"
+            else { return nil }
+            // Native Player (App Store, tvOS).
+            // Scheme: nativeplayer://play?url=<video>&name=<title>&sub=<subtitle>.
+            // For an externally launched URL, Native Player resumes only if the
+            // caller sends the start time, so we pass `position=<seconds>`, the same
+            // param Infuse takes. The x-callback-url form carries x-success/x-error
+            // so progress can come back here if Native Player reports it.
+            let wantsCallback = successURL != nil || errorURL != nil
+            var query = wantsCallback
+                ? "nativeplayer://x-callback-url/play?url=\(encoded)"
+                : "nativeplayer://play?url=\(encoded)"
+            if let position, position > 0 {
+                query += "&position=\(Int(position))"
+            }
+            if let title,
+               let encodedTitle = title.addingPercentEncoding(
+                   withAllowedCharacters: .externalPlayerURLValue
+               ) {
+                query += "&name=\(encodedTitle)"
+            }
+            let nativeSubs = subtitleURLs
+                .filter(Self.nativePlayerSupportsSubtitle)
+                .compactMap { $0.absoluteString.addingPercentEncoding(withAllowedCharacters: .externalPlayerURLValue) }
+            for sub in nativeSubs.prefix(8) {
+                query += "&sub=\(sub)"
+            }
+            if wantsCallback {
+                query += "&x-source=Nuvio"
+                for (name, callback) in [("x-success", successURL), ("x-error", errorURL)] {
+                    if let callback,
+                       let encodedCallback = callback.absoluteString.addingPercentEncoding(
+                           withAllowedCharacters: .externalPlayerURLValue
+                       ) {
+                        query += "&\(name)=\(encodedCallback)"
+                    }
+                }
+            }
+            return URL(string: query)
         }
+    }
+
+    private static func nativePlayerSupportsSubtitle(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
+        return !["vtt", "ass", "ssa"].contains(pathExtension(of: url))
+    }
+
+    private static func pathExtension(of url: URL) -> String {
+        let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.path ?? ""
+        return (path as NSString).pathExtension.lowercased()
     }
 
     /// Builds a sanitized, scraper-friendly media filename for external players
@@ -491,6 +546,54 @@ private extension CharacterSet {
     static let externalPlayerURLValue = CharacterSet(
         charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
     )
+}
+
+extension SubtitleLanguagePreferences {
+    /// Orders subtitles for external-player handoff so the best COMPLETE (non-forced)
+    /// subtitle in the user's preferred language comes first. VLC honors only the first
+    /// `sub=`, so index 0 must be the full dialogue track; forced / foreign-parts-only tracks sink to the
+    /// end (they don't carry the whole dialogue). Nothing is dropped; forced detection is
+    /// a best-effort text heuristic since `NuvioSubtitle` has no disposition flag.
+    static func bestCompleteFirst(
+        _ subs: [NuvioSubtitle],
+        preferredLanguages: [String]
+    ) -> [NuvioSubtitle] {
+        guard subs.count > 1 else { return subs }
+        func isForced(_ sub: NuvioSubtitle) -> Bool {
+            let path = URLComponents(string: sub.url)?.path ?? ""
+            let filename = (path as NSString).lastPathComponent
+            let markerTokens = [sub.label ?? "", sub.language, filename].map { value in
+                value.lowercased()
+                    .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+                    .split(separator: " ").map(String.init)
+            }
+            func hasExplicitNonForcedMarker(_ tokens: [String]) -> Bool {
+                if tokens.contains("unforced") || tokens.contains("nonforced") { return true }
+                return zip(tokens, tokens.dropFirst()).contains {
+                    ($0 == "not" && $1 == "forced") || ($0 == "non" && $1 == "forced")
+                }
+            }
+            if markerTokens.contains(where: hasExplicitNonForcedMarker) { return false }
+            return markerTokens.contains { tokens in
+                tokens.contains("forced") || zip(tokens, tokens.dropFirst()).contains {
+                    $0 == "foreign" && ($1 == "part" || $1 == "parts")
+                }
+            }
+        }
+        let complete = subs.filter { !isForced($0) }
+        let forced = subs.filter { isForced($0) }
+        var seen: Set<String> = []
+        var ordered: [NuvioSubtitle] = []
+        for language in preferredLanguages {
+            for sub in complete where matches(sub.language, target: language)
+                || matches(sub.label, target: language) {
+                if seen.insert(sub.url).inserted { ordered.append(sub) }
+            }
+        }
+        for sub in complete where seen.insert(sub.url).inserted { ordered.append(sub) }
+        for sub in forced where seen.insert(sub.url).inserted { ordered.append(sub) }
+        return ordered
+    }
 }
 
 /// A next-episode stream the player resolved and is ready to hand to mpv for a
