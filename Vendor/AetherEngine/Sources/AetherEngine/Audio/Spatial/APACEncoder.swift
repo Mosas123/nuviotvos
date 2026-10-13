@@ -2,6 +2,16 @@ import AVFAudio
 import AudioToolbox
 import Foundation
 
+@available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+protocol APACEncoding: AnyObject {
+    var magicCookie: Data { get }
+    var leadingFrames: Int { get }
+
+    func encode(planes: [UnsafePointer<Float>], frameCount: Int) throws -> [APACEncoder.Packet]
+    func flush() throws -> [APACEncoder.Packet]
+    func reset()
+}
+
 /// Apple Positional Audio Codec encoder over `AVAudioConverter`, fed planar float PCM in a
 /// `SpatialSpeakerLayout` bed and producing packets for the fMP4 muxer.
 ///
@@ -24,7 +34,7 @@ import Foundation
 ///   `.movie` more than 5 s before its first packet. A multi-second lookahead would leave the first
 ///   segment after every seek without audio, so DRC is off and the stream carries no DRC metadata.
 @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
-final class APACEncoder {
+final class APACEncoder: APACEncoding {
 
     struct Packet {
         let data: Data

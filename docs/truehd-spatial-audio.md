@@ -23,6 +23,7 @@ perfect reproduction on every speaker layout. The option remains experimental.
 - FFmpegBuild 3.7.0 with the existing AetherLib module names for MPVKit coexistence.
 - LibTrueHD 2.2.0, pinned exactly, with its licenses/notices in app resources.
 - Minimum app deployment target: tvOS 18, required by the decoder dependency.
+- LibTrueHD's tvOS simulator binary supports arm64 only; Intel/x86_64 tvOS simulator builds are unsupported.
 - APAC encoding requires tvOS 26 or later, independently of the app minimum.
 
 The two new localization keys have English fallback text in all supported locales.

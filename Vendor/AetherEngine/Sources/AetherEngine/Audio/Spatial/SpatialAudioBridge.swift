@@ -77,15 +77,19 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// Feeds in a row that threw, for a rate-limited log and the AE#641 report of a bridge that
     /// keeps failing (a decoder that panics on every unit, a rate the renderer refuses).
     private var consecutiveFeedFailures = 0
+    /// Failed APAC chunks in a row. Successful decoder output does not clear this; only an APAC
+    /// packet that the bridge wraps for muxing proves that encoding recovered.
+    private var consecutiveEncodeFailures = 0
 
     private let opLock = NSLock()
     private var stats = AudioBridge.FeedStats()
     private(set) var outputBytesLifetime: Int64 = 0
 
-    /// AE#641: called once, on the pump thread, when the object decoder has been fed
-    /// `silentFeedPacketThreshold` packets in a row without returning a block. The APAC
-    /// sample entry is written up front, like FLAC's, so nothing downstream fails on its own and the
-    /// session would otherwise play the picture over silence. Set before the producer starts feeding.
+    /// AE#641: called once, on the pump thread, when the decoder has received
+    /// `silentFeedPacketThreshold` packets without returning a block, or APAC has failed to produce
+    /// output for `silentEncodeChunkThreshold` chunks. The APAC sample entry is written up front,
+    /// so either condition would otherwise leave the session playing the picture over silence. Set
+    /// before the producer starts feeding.
     var onDecoderProducedNothing: (@Sendable (AudioBridge.FeedStats) -> Void)?
     private var decodedNothingReported = false
 
@@ -99,12 +103,16 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// played, ignoring every seek after it. 1200 is a second of TrueHD, still a fraction of a second
     /// of the producer's time.
     static let silentFeedPacketThreshold = 1200
+    /// Three 2048-frame chunks are about 128 ms: enough to tolerate an isolated converter error,
+    /// while reporting a persistent silent APAC output quickly.
+    static let silentEncodeChunkThreshold = 3
 
     init(
         srcTimeBase: AVRational,
         layout: SpatialSpeakerLayout,
         decoder: ObjectAudioDecoding,
-        bitRate: Int? = nil
+        bitRate: Int? = nil,
+        encoderFactory: ((SpatialSpeakerLayout, Double, Int) throws -> APACEncoding)? = nil
     ) throws {
         self.srcTimeBase = srcTimeBase
         self.layout = layout
@@ -112,7 +120,12 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         levelMeter = BedLevelMeter(layout: layout, sampleRate: Self.sampleRate)
         limiter = PeakLimiter(sampleRate: Self.sampleRate)
         let rate = bitRate ?? layout.channelCount * Self.bitRatePerChannel
-        let encoder = try APACEncoder(layout: layout, sampleRate: Double(Self.sampleRate), bitRate: rate)
+        let encoder: APACEncoding
+        if let encoderFactory {
+            encoder = try encoderFactory(layout, Double(Self.sampleRate), rate)
+        } else {
+            encoder = try APACEncoder(layout: layout, sampleRate: Double(Self.sampleRate), bitRate: rate)
+        }
         let pipeline = APACEncodePipeline(
             encoder: encoder, channels: layout.channelCount, bufferFrames: Self.encodeChunkFrames * 4)
         self.pipeline = pipeline
@@ -184,7 +197,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
             noteFeedFailure(error)
             var results: [UnsafeMutablePointer<AVPacket>] = []
             // This feed has already counted as failed.
-            collectEncoded(into: &results, noteFailure: false)
+            collectEncoded(into: &results)
             return results
         }
         // The anchor is the first packet the decoder actually took, so its input offsets count from
@@ -257,8 +270,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         defer { opLock.unlock() }
         var results: [UnsafeMutablePointer<AVPacket>] = []
         let settled = pipeline.settle()
-        wrap(settled.packets, into: &results)
-        noteEncodeErrors(settled.errors)
+        consumeEncoded(settled.events, into: &results)
         return results
     }
 
@@ -271,8 +283,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         encodePending()
         logLevels(levelMeter.restart())
         let finished = pipeline.finish()
-        wrap(finished.packets, into: &results)
-        noteEncodeErrors(finished.errors)
+        consumeEncoded(finished.events, into: &results)
         if !results.isEmpty {
             EngineLog.emit("[SpatialAudioBridge] EOF flush emitted \(results.count) tail packet(s)", category: .session)
         }
@@ -296,6 +307,8 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         decoderSelfResetsSeen = decoder.selfResetCount
         reanchorPending = false
         consecutiveFeedFailures = 0
+        consecutiveEncodeFailures = 0
+        decodedNothingReported = false
     }
 
     func noteTimelineJump(deltaSeconds: Double) {
@@ -426,18 +439,44 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     }
 
     /// Caller holds `opLock`. Everything the encoder has finished since the last call.
-    private func collectEncoded(into results: inout [UnsafeMutablePointer<AVPacket>], noteFailure: Bool = true) {
+    private func collectEncoded(into results: inout [UnsafeMutablePointer<AVPacket>]) {
         let encoded = pipeline.collect()
-        wrap(encoded.packets, into: &results)
-        noteEncodeErrors(encoded.errors, noteFailure: noteFailure)
+        consumeEncoded(encoded.events, into: &results)
     }
 
-    /// Caller holds `opLock`. A failed chunk is a gap the pipeline already stepped over; it counts
-    /// as a failed feed for the log.
-    private func noteEncodeErrors(_ errors: [Error], noteFailure: Bool = true) {
-        guard let first = errors.first else { return }
-        stats.encodeErrors += errors.count
-        if noteFailure { noteFeedFailure(first) }
+    /// Caller holds `opLock`. Preserve pipeline order so only an emitted APAC packet resets the
+    /// encoder streak, including when a poll contains both successful and failed chunks.
+    private func consumeEncoded(_ events: [APACEncodePipeline.Event], into results: inout [UnsafeMutablePointer<AVPacket>]) {
+        for event in events {
+            switch event {
+            case .packet(let packet):
+                let emittedBefore = stats.packetsEmitted
+                wrap([packet], into: &results)
+                if stats.packetsEmitted > emittedBefore { consecutiveEncodeFailures = 0 }
+            case .encodeError(let error):
+                stats.encodeErrors += 1
+                noteEncodeFailure(error)
+            }
+        }
+    }
+
+    /// Caller holds `opLock`. Each failed chunk advances the independent encoder streak; normal
+    /// decoder output cannot reset it because the asynchronous conversion may still be failing.
+    private func noteEncodeFailure(_ error: Error) {
+        consecutiveEncodeFailures += 1
+        if consecutiveEncodeFailures == 1 || consecutiveEncodeFailures % Self.silentEncodeChunkThreshold == 0 {
+            EngineLog.emit(
+                "[SpatialAudioBridge] APAC encode failed (\(consecutiveEncodeFailures) chunks in a row): \(error)",
+                category: .session)
+        }
+        guard !decodedNothingReported,
+              consecutiveEncodeFailures >= Self.silentEncodeChunkThreshold else { return }
+        decodedNothingReported = true
+        EngineLog.emit(
+            "[SpatialAudioBridge] ERROR: AE#641 APAC conversion has produced no packets for "
+                + "\(consecutiveEncodeFailures) consecutive chunks: \(stats.summary)",
+            category: .session)
+        onDecoderProducedNothing?(stats)
     }
 
     /// The level line, with the limiter's work over the same window when it had any.

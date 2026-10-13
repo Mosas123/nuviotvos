@@ -4,6 +4,8 @@
 
 Local pin of [AetherEngine 7.34.1](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.34.1) with imports rewritten to the namespaced FFmpeg modules below.
 
+Retain the local spatial-bridge patch that reports persistent APAC encoding failures independently of successful TrueHD decoding, along with its regression tests.
+
 ## FFmpegBuild 3.7.0 (namespaced upstream)
 
 Local pin of [FFmpegBuild 3.7.0](https://github.com/superuser404notfound/FFmpegBuild/tree/3.7.0). The upstream release ships the nine dynamic frameworks and SwiftPM targets under the `AetherLib*` namespace so they can embed next to MPVKit’s `Libav*` stack in the same app binary. The umbrella product is `AetherFFmpegBuild`.

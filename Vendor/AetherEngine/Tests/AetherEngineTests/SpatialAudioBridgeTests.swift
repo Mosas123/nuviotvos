@@ -83,6 +83,75 @@ struct SpatialAudioBridgeTests {
         func reset() {}
     }
 
+    /// Delivers exactly one encoder-sized decoded chunk for every pushed packet.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    final class ChunkDecoder: ObjectAudioDecoding {
+        private let blocksOnFirstPush: Int
+        private var nextOffset: Int64 = 0
+        private var pushes = 0
+        private var pending: [Int64] = []
+        private let plane = UnsafeMutablePointer<Float>.allocate(capacity: 2048)
+
+        init(blocksOnFirstPush: Int = 2) {
+            self.blocksOnFirstPush = blocksOnFirstPush
+            plane.initialize(repeating: 0.1, count: 2048)
+        }
+        deinit { plane.deallocate() }
+
+        func push(_ bytes: UnsafeRawBufferPointer) throws {
+            pushes += 1
+            for _ in 0..<(pushes == 1 ? blocksOnFirstPush : 1) {
+                pending.append(nextOffset)
+                nextOffset += 2048
+            }
+        }
+
+        func nextBlock() throws -> ObjectAudioDecodedBlock? {
+            guard !pending.isEmpty else { return nil }
+            return ObjectAudioDecodedBlock(
+                sampleRate: 48_000, frameCount: 2048, inputFrameOffset: pending.removeFirst(),
+                configurationGeneration: 0, roles: [.bed(.left)], planes: [UnsafePointer(plane)], updates: [])
+        }
+
+        func reset() { nextOffset = 0; pushes = 0; pending = [] }
+    }
+
+    /// Scripted APAC outcomes keep bridge failure and recovery reporting deterministic.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    final class SequencedEncoder: APACEncoding {
+        enum Step { case failure, packet }
+        struct Failure: Error {}
+
+        let magicCookie = Data([0])
+        let leadingFrames = 0
+        private let steps: [Step]
+        private var nextStep = 0
+        let firstStarted = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        private let blockFirst: Bool
+
+        init(_ steps: [Step], blockFirst: Bool = false) {
+            self.steps = steps
+            self.blockFirst = blockFirst
+        }
+
+        func encode(planes: [UnsafePointer<Float>], frameCount: Int) throws -> [APACEncoder.Packet] {
+            let stepIndex = nextStep
+            nextStep += 1
+            if blockFirst, stepIndex == 0 {
+                firstStarted.signal()
+                releaseFirst.wait()
+            }
+            switch steps[stepIndex] {
+            case .failure: throw Failure()
+            case .packet: return [APACEncoder.Packet(data: Data([UInt8(stepIndex)]), isSync: true)]
+            }
+        }
+
+        func flush() throws -> [APACEncoder.Packet] { [] }
+        func reset() {}
+    }
+
     /// Stand-in decoder with something to find: one pushed byte is one 40-frame access unit,
     /// contiguous from the first push, and the left bed channel carries a 3 ms 1 kHz burst
     /// starting at input frame `clickFrame`.
@@ -184,8 +253,101 @@ struct SpatialAudioBridgeTests {
     final class Reports: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
-        func add() { lock.lock(); count += 1; lock.unlock() }
+        private var reportedStats: AudioBridge.FeedStats?
+        func add(_ stats: AudioBridge.FeedStats? = nil) {
+            lock.lock()
+            count += 1
+            reportedStats = stats
+            lock.unlock()
+        }
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+        var lastStats: AudioBridge.FeedStats? { lock.lock(); defer { lock.unlock() }; return reportedStats }
+    }
+
+    @Test("encoder errors report after three failed chunks, and only emitted packets reset the streak")
+    func encoderFailuresAreReportedAndRecoveryResetsStreak() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let encoder = SequencedEncoder([
+            .packet, .failure, .failure, .failure,
+            .packet, .failure, .failure, .failure,
+        ], blockFirst: true)
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714, decoder: ChunkDecoder(),
+            encoderFactory: { _, _, _ in encoder })
+        defer { bridge.close() }
+        let reports = Reports()
+        bridge.onDecoderProducedNothing = { stats in reports.add(stats) }
+
+        func settleAndFree() {
+            for packet in bridge.settle() {
+                var packet: UnsafeMutablePointer<AVPacket>? = packet
+                trackedPacketFree(&packet)
+            }
+        }
+
+        func feedOne(_ index: Int) throws {
+            _ = try feed(bridge, startMs: Int64(index * 43), count: 1)
+            settleAndFree()
+        }
+
+        // Keep the first successful chunk in flight while the next failed chunk is queued. The
+        // bridge then observes both events together and must preserve their packet-before-error order.
+        _ = try feed(bridge, startMs: 0, count: 1)
+        // The first call already submitted two chunks; release its gated success before the next poll.
+        let started = encoder.firstStarted.wait(timeout: .now() + 2) == .success
+        encoder.releaseFirst.signal()
+        #expect(started, "the first async encode reached the test gate")
+        settleAndFree()
+        #expect(reports.value == 0)
+        try feedOne(1)
+        #expect(reports.value == 0, "the first encode error follows the packet in the same batch")
+        try feedOne(2)
+        #expect(reports.value == 1)
+        #expect(reports.lastStats?.framesDecoded == 4, "the decoder succeeded while APAC conversion failed")
+        #expect(bridge.feedStats.encodeErrors == 3)
+        #expect(bridge.feedStats.packetsEmitted == 1)
+
+        bridge.startSegment() // The new segment gets an independent one-shot report window.
+        try feedOne(3) // A real APAC packet clears the streak before the two subsequent failures.
+        try feedOne(4)
+        #expect(reports.value == 1)
+        try feedOne(5)
+        #expect(reports.value == 2, "reset cleared both the failure streak and report latch")
+        #expect(bridge.feedStats.encodeErrors == 6)
+        #expect(bridge.feedStats.packetsEmitted == 2)
+    }
+
+    @Test("a successful APAC packet clears an existing encoder failure streak")
+    func successfulPacketResetsEncoderFailureStreak() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let encoder = SequencedEncoder([.failure, .failure, .packet, .failure, .failure, .failure])
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714,
+            decoder: ChunkDecoder(blocksOnFirstPush: 1), encoderFactory: { _, _, _ in encoder })
+        defer { bridge.close() }
+        let reports = Reports()
+        bridge.onDecoderProducedNothing = { stats in reports.add(stats) }
+
+        func feedOne(_ index: Int) throws {
+            _ = try feed(bridge, startMs: Int64(index * 43), count: 1)
+            for packet in bridge.settle() {
+                var packet: UnsafeMutablePointer<AVPacket>? = packet
+                trackedPacketFree(&packet)
+            }
+        }
+
+        try feedOne(0)
+        try feedOne(1)
+        #expect(reports.value == 0)
+        try feedOne(2) // This packet clears the two earlier encoder errors.
+        try feedOne(3)
+        try feedOne(4)
+        #expect(reports.value == 0, "two failures after recovery stay below threshold")
+        try feedOne(5)
+        #expect(reports.value == 1)
+        #expect(reports.lastStats?.framesDecoded == 6)
+        #expect(bridge.feedStats.encodeErrors == 5)
+        #expect(bridge.feedStats.packetsEmitted == 1)
     }
 
     @Test("a decoder that returns or accepts nothing is reported once, at the threshold, and a healthy one never")
