@@ -1,12 +1,14 @@
 # Vendored playback dependencies
 
-## AetherEngine (pin 7.33.2)
+## AetherEngine (pin 7.34.1)
 
-Local pin of [AetherEngine 7.33.2](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.33.2) with imports rewritten to the namespaced FFmpeg modules below.
+Local pin of [AetherEngine 7.34.1](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.34.1) with imports rewritten to the namespaced FFmpeg modules below.
 
-## FFmpegBuild 3.4.0 (namespaced upstream)
+Retain the local spatial-bridge patch that reports persistent APAC encoding failures independently of successful TrueHD decoding, along with its regression tests.
 
-Local pin of [FFmpegBuild 3.4.0](https://github.com/superuser404notfound/FFmpegBuild/tree/3.4.0). The upstream release ships the nine dynamic frameworks and SwiftPM targets under the `AetherLib*` namespace so they can embed next to MPVKit’s `Libav*` stack in the same app binary. The umbrella product is `AetherFFmpegBuild`.
+## FFmpegBuild 3.7.0 (namespaced upstream)
+
+Local pin of [FFmpegBuild 3.7.0](https://github.com/superuser404notfound/FFmpegBuild/tree/3.7.0). The upstream release ships the nine dynamic frameworks and SwiftPM targets under the `AetherLib*` namespace so they can embed next to MPVKit’s `Libav*` stack in the same app binary. The umbrella product is `AetherFFmpegBuild`.
 
 | Upstream module | Nuvio module / framework |
 |---|---|
@@ -28,3 +30,5 @@ Local pin of [FFmpegBuild 3.4.0](https://github.com/superuser404notfound/FFmpegB
 4. Rebase AetherEngine and retain its `../FFmpegBuild` path dependency and `import AetherLib*` names.
 
 Keep the AetherEngine patch surface minimal so rebases stay manageable.
+
+The Nuvio host offers an off-by-default setting for TrueHD Atmos object rendering to 9.1.6 APAC. LibTrueHD is pinned to 2.2.0; APAC rendering requires tvOS 26 or later and a supported 48 kHz TrueHD Atmos VOD source. The engine retains its ordinary audio bridge for other content.

@@ -51,7 +51,8 @@ let signingXCConfig: Path = .relativeToManifest("Configurations/Signing.xcconfig
 let bundleID = "com.pyksel.nuviotvos"
 let marketingVersion = "3.4.3"
 let projectVersion = "74"
-let tvOSDeployment = "17.5"
+// LibTrueHD 2.2.0 requires tvOS 18; APAC rendering itself is gated to tvOS 26+.
+let tvOSDeployment = "18.0"
 
 // MARK: - Project-level settings
 //
@@ -147,6 +148,7 @@ let appTarget: Target = .target(
         "NuvioTV/Images.xcassets",
         "NuvioTV/Resources/AppLanguageCatalog.json",
         "NuvioTV/Resources/AppIcon.png",
+        "NuvioTV/Resources/AudioLicenses/*.txt",
         "NuvioTV/Fonts/inter_variable.ttf",
         "NuvioTV/SplashScreen.storyboard",
         "NuvioTV/Resources/SceneModels/SFace.mlpackage",

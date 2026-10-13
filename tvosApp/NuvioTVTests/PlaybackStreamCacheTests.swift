@@ -1368,6 +1368,7 @@ extension PlaybackStreamCacheTests {
         XCTAssertNil(result)
         let hasActiveServer = await manager.hasActiveServer
         XCTAssertFalse(hasActiveServer)
+        await waitForProtocolCancellationIfStillLoading()
         XCTAssertGreaterThan(PlaybackStreamCacheURLProtocol.cancellationCount, 0)
     }
 

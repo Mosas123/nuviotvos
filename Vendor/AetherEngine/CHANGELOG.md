@@ -12,6 +12,40 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.34.1] - 2026-10-11
+
+### Changed
+
+- **TrueHD Atmos to APAC encodes while it decodes.** The object decoder and Apple's APAC encoder
+  each take about a core and ran one after the other on the producer thread, which is what a seek
+  past the produced range waited for. The bridge now hands each rendered chunk to a serial encode
+  queue and decodes the next one meanwhile. The producer waits for the queue only where its
+  segment cutter or open muxer is about to move, so every segment carries the same audio packets
+  as before, byte for byte, on pts-routed and sequential origins alike (#731).
+- **LibTrueHD 2.2.0: the TrueHD object decode is about 30% faster.** Its `truehd` crate copied
+  160-row sample buffers for blocks that are usually 40 samples; truehdd#42 sizes them to the
+  samples they hold, with byte-identical output. Together with the encode queue above, Dolby's
+  Unfold demo now takes 1.40 s instead of 2.73 s (M1, release), 19x real time instead of 10x,
+  which is what a seek past the produced range waits for (#731).
+
+## [7.34.0] - 2026-10-11
+
+### Added
+
+- **TrueHD Atmos keeps its heights.** Apple TV cannot bitstream TrueHD, so the bridge decoded its
+  7.1 presentation and every height and object position was gone. `LoadOptions.objectAudioRendering
+  = .apac(layout)` decodes the Atmos object presentation (bed, up to 15 objects and their metadata,
+  through the new [LibTrueHD](https://github.com/superuser404notfound/LibTrueHD) dependency), renders
+  it into the host's speaker bed (5.1.2 to 9.1.6) with an allocentric constant-power panner, and
+  delivers Apple Positional Audio, which tvOS sends to an Atmos receiver as Dolby MAT and iOS plays as
+  Spatial Audio. A linked peak limiter keeps the bed under full scale, because the APAC encoder carries
+  anything over it through (Dolby's Unfold demo reaches -1.2 dB of reduction). Opt-in and lossy, at
+  320 kbps per bed channel in place of the lossless 7.1; only TrueHD that FFmpeg marks Atmos, at
+  48 kHz, on OS 26+, and any failure to start falls back to `audioBridgeMode`. With the option on, the automatic
+  audio pick prefers TrueHD Atmos over the other tracks of the same language, never across one.
+  `aetherctl serve --atmos-bed 7.1.4 --audio-index N` serves it. Ported from Silo's fork, which offered its
+  implementation as the reference (Silo-Server/AetherEngine#6, #8, #17). (#731)
+
 ## [7.33.2] - 2026-10-09
 
 ### Fixed

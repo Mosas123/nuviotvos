@@ -259,6 +259,7 @@ enum SettingsKey {
     static let jellyfinLibraryIndex = "nuvio.tv.settings.integrations.jellyfinLibraryIndex"
     static let jellyfinLocalRowEnabled = "nuvio.tv.settings.integrations.jellyfinLocalRowEnabled"
 
+    static let trueHDSpatialAudio = "nuvio.tv.settings.playback.trueHDSpatialAudio"
     static let playerEngine = "nuvio.tv.settings.playback.playerEngine"
     static let trickplayServer = "nuvio.tv.settings.playback.trickplayServer"
     static let externalPlayer = "nuvio.tv.settings.playback.externalPlayer"
@@ -360,7 +361,7 @@ enum SettingsKey {
         cinemetaDisabled, deletedLocalAddons,
         smbServers, smbLibraryIndex, smbLocalRowEnabled,
         jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
-        playerEngine, trickplayServer, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
         focusedPosterBackdropEnabled, focusedPosterBackdropDelay, audioLanguage,
@@ -7463,6 +7464,7 @@ private struct PlaybackSettingsView: View {
     let onSubtitleLanguages: () -> Void
 
     @AppStorage(SettingsKey.playerEngine) private var playerEngine = "Auto"
+    @AppStorage(SettingsKey.trueHDSpatialAudio) private var trueHDSpatialAudio = false
     @AppStorage(SettingsKey.externalPlayer) private var externalPlayer = ExternalPlayer.builtIn.rawValue
     @AppStorage(SettingsKey.externalPlayerForwardSubtitles) private var externalPlayerForwardSubtitles = true
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
@@ -7540,6 +7542,18 @@ private struct PlaybackSettingsView: View {
                     accentColor: accentColor
                 )
                 .settingsEntryAnchor()
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_truehd_spatial_audio", fallback: "TrueHD Atmos Spatial Audio (Beta)"),
+                    subtitle: L10n.string(
+                        "tvos_settings_truehd_spatial_audio_subtitle",
+                        fallback: "Render height effects to 9.1.6 using lossy APAC audio. Requires tvOS 26+ and AetherEngine; MPVKit and external players are unaffected. Applies to the next playback."
+                    ),
+                    isOn: $trueHDSpatialAudio,
+                    accentColor: accentColor
+                )
+                .disabled(!SpatialAudioSettings.isSupported)
+                .opacity(SpatialAudioSettings.isSupported ? 1 : 0.46)
 
                 SettingsOptionRow(
                     title: L10n.string("tvos_settings_external_player", fallback: "External Player"),

@@ -11,7 +11,7 @@
 #
 set -eo pipefail  # pipefail so `... | tail -N` doesn't swallow configure/make errors
 
-FFMPEG_VERSION="n8.1.2"
+FFMPEG_VERSION="n8.1.3"
 FFMPEG_REPO="https://github.com/FFmpeg/FFmpeg.git"
 DAV1D_VERSION="1.5.4"
 DAV1D_REPO="https://code.videolan.org/videolan/dav1d.git"
@@ -287,6 +287,9 @@ patch_ffmpeg_dav1_tag() {
     # in that second table for the HEVC side already, which is why Profile 5 works.
     # The cross-compatible profiles (10.1 / 10.4) ride an 'av01' sample entry with
     # SUPPLEMENTAL-CODECS and are unaffected.
+    # Upstream as 4c6d67fe0f (PR 24556, merged 2026-09-18), master only, no release/8.1
+    # backport. The early return below makes this a no-op once FFMPEG_VERSION carries
+    # it, so drop this function on the FFmpeg 9.x bump.
     local T="${FFMPEG_SRC}/libavformat/isom_tags.c"
     local M="${FFMPEG_SRC}/libavformat/movenc.c"
     if grep -q "'d', 'a', 'v', '1'" "${T}" && grep -q "'d', 'a', 'v', '1'" "${M}"; then
@@ -648,6 +651,15 @@ COMMON_FLAGS=(
     # playback shows audio only. The h264/hevc raw demuxers above already
     # cover H.264/HEVC-in-PS; these add MPEG-2 (DVD) and MPEG-4 Part 2.
     --enable-demuxer=mpegvideo --enable-demuxer=m4v
+    # Raw DTS, TrueHD and LATM demuxers, for the same reason on the audio side. An
+    # MPEG-TS PID whose stream_type does not name its codec (0x06 without a descriptor,
+    # an unknown type, or 0x04/0x0f, which mpegts re-checks) is resolved by
+    # set_codec_from_probe_data() running these raw demuxers' probes over the payload.
+    # Every codec in that table whose demuxer is missing here can never be confirmed,
+    # and the lenient mp3 probe (score 1 on noise) names the track instead: a DTS-HD
+    # IPTV channel opened as mp3 and every packet failed with "Header missing"
+    # (AetherEngine #641). The decoders (dca, truehd, aac_latm) were always in.
+    --enable-demuxer=dts --enable-demuxer=truehd --enable-demuxer=loas
     --disable-decoders
     --enable-decoder=h264 --enable-decoder=hevc --enable-decoder=vp8
     --enable-decoder=vp9 --enable-decoder=av1 --enable-decoder=libdav1d
@@ -1175,6 +1187,94 @@ if [[ "${MODE}" == "package" ]]; then
     exit 0
 fi
 
+patch_ffmpeg_mpegts_mpeg1_probe() {
+    # AetherEngine #641. mpegts_set_stream_info() takes most PMT stream types at their
+    # word, but asks for a content probe on two of them (request_probe = 50): 0x04
+    # (MPEG-2 audio) and 0x0f (AAC), because muxers are known to mislabel those. 0x03
+    # (MPEG-1 audio) is not on the list, so a PID that a restreamer labels 0x03 while
+    # it carries something else is opened as mp3 with no probe at all. The reporter's
+    # IPTV channel carries DTS-HD that way: every packet fails in mp3float ("Header
+    # missing") and the audio track never produces a frame. The same bytes labelled
+    # 0x04, 0x06, 0x0f or an unknown type all probe as DTS. Putting 0x03 on the list
+    # costs a genuine MPEG audio PID nothing: mp3 and mp2 both settle on the first
+    # PES packet, and a probe that finds nothing better keeps the PMT's codec.
+    # Proposed upstream as FFmpeg PR 24697.
+    local F="${FFMPEG_SRC}/libavformat/mpegts.c"
+    if grep -q "pes->stream_type == STREAM_TYPE_AUDIO_MPEG1 ||" "${F}"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: probe the content of a PID labelled MPEG-1 audio (AetherEngine #641)"
+    perl -0777 -pi -e '
+s!    if \(pes->stream_type == STREAM_TYPE_AUDIO_MPEG2 \|\| pes->stream_type == STREAM_TYPE_AUDIO_AAC\)\n!    if (pes->stream_type == STREAM_TYPE_AUDIO_MPEG1 ||\n        pes->stream_type == STREAM_TYPE_AUDIO_MPEG2 ||\n        pes->stream_type == STREAM_TYPE_AUDIO_AAC)\n!;
+' "${F}"
+    if ! grep -q "pes->stream_type == STREAM_TYPE_AUDIO_MPEG1 ||" "${F}"; then
+        echo "ERROR: mpegts MPEG-1 audio probe patch did not apply (upstream source changed?)"
+        exit 1
+    fi
+}
+
+patch_ffmpeg_eac3_dec3() {
+    # AetherEngine #728. movenc's handle_eac3() builds the dec3 box from the first
+    # access unit, and gets two fields wrong once a dependent substream is involved.
+    # A Blu-ray style track (AC-3 core plus an E-AC-3 dependent frame carrying the
+    # height channels and the Atmos objects) then reads as a bare 5.1 bed: tvOS
+    # decodes the core and an Atmos receiver reports multichannel PCM.
+    #
+    # 1. chan_loc was derived from chanmap with a plain shift and a five-bit mask,
+    #    but chanmap is read MSB-first and chan_loc spans nine bits, so 5.1.2
+    #    (chanmap 0x0010 / 0xA010) came out as 0 instead of Lvh/Rvh (0x040). This is
+    #    upstream f10fdd6310, master only; the block is skipped once the pinned tag
+    #    carries it.
+    # 2. complexity_index_type_a (the ETSI TS 103 420 JOC extension) was taken from
+    #    the independent substream only, and re-read on every packet. With the
+    #    objects in the dependent frame it is 0 there, so the box lost the extension.
+    #    It is now taken from every substream of the access unit and kept at its
+    #    maximum, like data_rate. Proposed upstream as FFmpeg PR 24963.
+    local F="${FFMPEG_SRC}/libavformat/movenc.c"
+    if ! grep -q "(hdr->channel_map >> (10 - j)) & 1" "${F}"; then
+        echo "→ Patching FFmpeg: dec3 chan_loc from a dependent substream's chanmap (upstream f10fdd6310, AetherEngine #728)"
+        perl -0777 -pi -e '
+s#\Q                if (hdr->channel_map_present)
+                    info->substream[parent].chan_loc |= (hdr->channel_map >> 5) & 0x1f;
+                else
+                    info->substream[parent].chan_loc |= hdr->channel_mode;
+\E#                if (hdr->channel_map_present) {
+                    /* chanmap is a 16-bit field read MSB-first, so flag index
+                     * i sits at bit (15 - i). chan_loc bits 0-7 carry flag
+                     * indices 5-12, i.e. chanmap bit (10 - j); index 13
+                     * (Lts/Rts) has no chan_loc bit, and chan_loc bit 8 carries
+                     * LFE2, index 14, chanmap bit 1. */
+                    for (int j = 0; j < 8; j++) {
+                        if ((hdr->channel_map >> (10 - j)) & 1)
+                            info->substream[parent].chan_loc |= 1 << j;
+                    }
+                    if ((hdr->channel_map >> 1) & 1)
+                        info->substream[parent].chan_loc |= 1 << 8;
+                } else {
+                    info->substream[parent].chan_loc |= hdr->channel_mode;
+                }
+#;
+' "${F}"
+        if ! grep -q "(hdr->channel_map >> (10 - j)) & 1" "${F}"; then
+            echo "ERROR: dec3 chan_loc patch did not apply (upstream source changed?)"
+            exit 1
+        fi
+    fi
+    if grep -q "carried by a dependent substream" "${F}"; then
+        return
+    fi
+    echo "→ Patching FFmpeg: dec3 keeps the JOC extension of a dependent substream (AetherEngine #728)"
+    perl -0777 -pi -e '
+s#\Q    info->complexity_index_type_a = hdr->complexity_index_type_a;\E\n#    info->complexity_index_type_a = FFMAX(info->complexity_index_type_a,\n                                          hdr->complexity_index_type_a);\n#;
+s#(\n)(                cumul_size \+= hdr->frame_size;\n)#$1                /* the JOC extension may be carried by a dependent substream\n                 * only, e.g. an AC-3 core with the objects in an E-AC-3\n                 * dependent frame (ETSI TS 103 420) */\n                info->complexity_index_type_a = FFMAX(info->complexity_index_type_a,\n                                                      hdr->complexity_index_type_a);\n$2#;
+' "${F}"
+    if ! grep -q "carried by a dependent substream" "${F}" || \
+       [ "$(grep -c "info->complexity_index_type_a = FFMAX" "${F}")" != "2" ]; then
+        echo "ERROR: dec3 JOC extension patch did not apply (upstream source changed?)"
+        exit 1
+    fi
+}
+
 echo "╔══════════════════════════════════════╗"
 echo "║  FFmpegBuild: FFmpeg + dav1d (AV1)  ║"
 echo "║  VideoToolbox HW + Metal ready      ║"
@@ -1188,6 +1288,8 @@ patch_ffmpeg_visionos
 patch_ffmpeg_matroska_tts
 patch_ffmpeg_vc1_parser
 patch_ffmpeg_dav1_tag
+patch_ffmpeg_mpegts_mpeg1_probe
+patch_ffmpeg_eac3_dec3
 fetch_dav1d
 fetch_zimg
 fetch_zvbi
