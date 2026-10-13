@@ -2734,7 +2734,9 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         let previousWatchedProfile = WatchedStore.activeProfileId
         let previousContinueWatchingProfile = ContinueWatchingStore.activeProfileId
         let previousProgressProfile = WatchProgressLedger.activeProfileId
+        ContinueWatchingBuilder.cancelScheduledRebuild()
         defer {
+            ContinueWatchingBuilder.cancelScheduledRebuild()
             ContinueWatchingStore.eraseProfile(profileA)
             ContinueWatchingStore.eraseProfile(profileB)
             WatchedStore.eraseProfile(profileA)
