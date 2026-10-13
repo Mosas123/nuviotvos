@@ -7544,10 +7544,10 @@ private struct PlaybackSettingsView: View {
                 .settingsEntryAnchor()
 
                 SettingsToggleRow(
-                    title: L10n.string("tvos_settings_truehd_spatial_audio", fallback: "TrueHD Atmos Spatial Audio (Beta)"),
+                    title: L10n.string("tvos_settings_truehd_spatial_audio", fallback: "Atmos & DTS:X Spatial Audio (Beta)"),
                     subtitle: L10n.string(
                         "tvos_settings_truehd_spatial_audio_subtitle",
-                        fallback: "Render height effects to 9.1.6 using lossy APAC audio. Requires tvOS 26+ and AetherEngine; MPVKit and external players are unaffected. Applies to the next playback."
+                        fallback: "Render TrueHD Atmos and DTS:X to 9.1.6 using lossy APAC. Requires tvOS 26+ and AetherEngine; applies to the next playback."
                     ),
                     isOn: $trueHDSpatialAudio,
                     accentColor: accentColor

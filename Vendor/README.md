@@ -1,14 +1,16 @@
 # Vendored playback dependencies
 
-## AetherEngine (pin 7.34.1)
+## AetherEngine (pin 7.36.0)
 
-Local pin of [AetherEngine 7.34.1](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.34.1) with imports rewritten to the namespaced FFmpeg modules below.
+Local pin of [AetherEngine 7.36.0](https://github.com/superuser404notfound/AetherEngine/releases/tag/7.36.0) with imports rewritten to the namespaced FFmpeg modules below and Nuvio's host integration patches retained.
 
 Retain the local spatial-bridge patch that reports persistent APAC encoding failures independently of successful TrueHD decoding, along with its regression tests.
 
-## FFmpegBuild 3.7.0 (namespaced upstream)
+Nuvio also retains its supplemental-codecs guard for non-Dolby-Vision displays, including the upstream Profile 7 to Profile 8.1 conversion. Explicit host DV assertions still enable the guarded route. The tagged API, architecture, and format docs are included for upstream documentation-consistency tests.
 
-Local pin of [FFmpegBuild 3.7.0](https://github.com/superuser404notfound/FFmpegBuild/tree/3.7.0). The upstream release ships the nine dynamic frameworks and SwiftPM targets under the `AetherLib*` namespace so they can embed next to MPVKit’s `Libav*` stack in the same app binary. The umbrella product is `AetherFFmpegBuild`.
+## FFmpegBuild 3.7.1 (namespaced upstream)
+
+Local pin of [FFmpegBuild 3.7.1](https://github.com/superuser404notfound/FFmpegBuild/tree/3.7.1). The upstream release ships the nine dynamic frameworks and SwiftPM targets under the `AetherLib*` namespace so they can embed next to MPVKit’s `Libav*` stack in the same app binary. The umbrella product is `AetherFFmpegBuild`.
 
 | Upstream module | Nuvio module / framework |
 |---|---|
@@ -31,4 +33,4 @@ Local pin of [FFmpegBuild 3.7.0](https://github.com/superuser404notfound/FFmpegB
 
 Keep the AetherEngine patch surface minimal so rebases stay manageable.
 
-The Nuvio host offers an off-by-default setting for TrueHD Atmos object rendering to 9.1.6 APAC. LibTrueHD is pinned to 2.2.0; APAC rendering requires tvOS 26 or later and a supported 48 kHz TrueHD Atmos VOD source. The engine retains its ordinary audio bridge for other content.
+The Nuvio host offers an off-by-default setting for TrueHD Atmos and DTS:X object rendering to 9.1.6 APAC. LibTrueHD is pinned to 2.3.0 and LibDTSX to 1.0.1; APAC rendering requires tvOS 26 or later and a supported 48 kHz VOD source. Their notices are bundled under `AudioLicenses`. The engine retains its ordinary audio bridge for other content, including ordinary DTS-HD MA.

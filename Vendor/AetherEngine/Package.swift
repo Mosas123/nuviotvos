@@ -1,5 +1,5 @@
 // swift-tools-version: 6.0
-// Nuvio pin of AetherEngine 7.34.1 with local FFmpegBuild integrations.
+// Nuvio pin of AetherEngine 7.36.0 with local FFmpegBuild integrations.
 
 import PackageDescription
 
@@ -26,7 +26,8 @@ let package = Package(
         .package(path: "../FFmpegBuild"),
         .package(url: "https://github.com/kishikawakatsumi/SMBClient", .upToNextMinor(from: "0.3.1")),
         .package(url: "https://github.com/superuser404notfound/LibDovi", .upToNextMinor(from: "2.1.0")),
-        .package(url: "https://github.com/superuser404notfound/LibTrueHD", exact: "2.2.0"),
+        .package(url: "https://github.com/superuser404notfound/LibTrueHD", exact: "2.3.0"),
+        .package(url: "https://github.com/superuser404notfound/LibDTSX", exact: "1.0.1"),
     ],
     targets: [
         .target(
@@ -35,7 +36,9 @@ let package = Package(
                 .product(name: "AetherFFmpegBuild", package: "FFmpegBuild"),
                 .product(name: "Dovi", package: "LibDovi"),
                 .product(name: "TrueHD", package: "LibTrueHD"),
+                .product(name: "DTSX", package: "LibDTSX"),
             ],
+            resources: [.copy("Resources/silent-atmos.mp4")],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("AVKit"),
