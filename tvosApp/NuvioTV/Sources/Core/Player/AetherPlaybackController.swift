@@ -1527,6 +1527,7 @@ struct AetherExternalSubtitleRegistration {
 
     static func make(
         subtitles: [NuvioSubtitle],
+        sourceURL: URL? = nil,
         httpHeaders: [String: String] = [:]
     ) -> AetherExternalSubtitleRegistration {
         var tracks: [ExternalSubtitleTrack] = []
@@ -1539,12 +1540,32 @@ struct AetherExternalSubtitleRegistration {
                     url: url,
                     name: subtitle.label ?? (language.isEmpty ? nil : language),
                     language: language.isEmpty ? nil : language,
-                    httpHeaders: [:]
+                    httpHeaders: headers(for: url, matching: sourceURL, from: httpHeaders)
                 )
             )
             urlsByTrackID[id] = subtitle.url
         }
         return AetherExternalSubtitleRegistration(tracks: tracks, urlsByTrackID: urlsByTrackID)
+    }
+
+    /// Reuse video request headers only for subtitles on that same HTTP origin.
+    static func headers(for subtitleURL: URL, matching sourceURL: URL?, from headers: [String: String]) -> [String: String] {
+        guard !headers.isEmpty,
+              let sourceURL,
+              let subtitleScheme = subtitleURL.scheme?.lowercased(),
+              let sourceScheme = sourceURL.scheme?.lowercased(),
+              let subtitleHost = subtitleURL.host,
+              let sourceHost = sourceURL.host,
+              ["http", "https"].contains(subtitleScheme),
+              subtitleScheme == sourceScheme,
+              subtitleHost.caseInsensitiveCompare(sourceHost) == .orderedSame else {
+            return [:]
+        }
+        let defaultPort = sourceScheme == "https" ? 443 : 80
+        guard (subtitleURL.port ?? defaultPort) == (sourceURL.port ?? defaultPort) else {
+            return [:]
+        }
+        return headers
     }
 }
 
@@ -2396,6 +2417,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var lastKnownSourceTimeSeconds: Double = 0
     private var externalSubtitleURLsByTrackID: [Int: String] = [:]
     private var currentHTTPHeaders: [String: String] = [:]
+    private var currentHTTPHeaderSourceURL: URL?
     private var didReportTerminalError = false
     private var sourceProbe: SourceProbe?
     private var subtitleDelaySeconds: Double = 0
@@ -3688,6 +3710,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         sourceProbe = nil
         let externalRegistration = AetherExternalSubtitleRegistration.make(
             subtitles: request.externalSubtitles,
+            sourceURL: request.httpHeaderSourceURL ?? request.videoURL,
             httpHeaders: request.httpHeaders
         )
         #if os(tvOS) || os(iOS)
@@ -3720,6 +3743,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         #endif
         externalSubtitleURLsByTrackID = externalRegistration.urlsByTrackID
         currentHTTPHeaders = request.httpHeaders
+        currentHTTPHeaderSourceURL = request.httpHeaderSourceURL ?? request.videoURL
         lastKnownPositionMs = 0
         lastKnownDurationMs = 0
         lastKnownSourceTimeSeconds = 0
@@ -3960,7 +3984,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             url: url,
             name: subtitle.label ?? (lang.isEmpty ? nil : lang),
             language: lang.isEmpty ? nil : lang,
-            httpHeaders: currentHTTPHeaders
+            httpHeaders: AetherExternalSubtitleRegistration.headers(
+                for: url,
+                matching: currentHTTPHeaderSourceURL,
+                from: currentHTTPHeaders
+            )
         )
         let info = engine.addExternalSubtitleTrack(track)
         externalSubtitleURLsByTrackID[info.id] = subtitle.url
@@ -4030,6 +4058,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         videoFrameSize = .zero
         externalSubtitleURLsByTrackID = [:]
         currentHTTPHeaders = [:]
+        currentHTTPHeaderSourceURL = nil
         currentErrorMessage = ""
         didReportTerminalError = false
         sourceProbe = nil
