@@ -73,9 +73,16 @@ actor TorrentSession {
             preferredFilename: filename
         )
         let magnetURI = buildMagnetURI(infoHash: infoHash, trackers: trackers)
-        try await session.begin(magnetURI: magnetURI, timeout: timeout)
-        let streamURL = try await session.startStreaming()
-        return (session, streamURL)
+        do {
+            try await session.begin(magnetURI: magnetURI, timeout: timeout)
+            try Task.checkCancellation()
+            let streamURL = try await session.startStreaming()
+            try Task.checkCancellation()
+            return (session, streamURL)
+        } catch {
+            await session.stop()
+            throw error
+        }
     }
 
     private func begin(magnetURI: String, timeout: TimeInterval) async throws {
@@ -151,11 +158,10 @@ actor TorrentSession {
             pieceLength: engine.pieceLength,
             port: port
         )
+        self.server = server
         await server.primeHeadAndTail()
         await server.updatePlayhead(absoluteOffset: file.offset)
-        let url = try await server.start()
-        self.server = server
-        return url
+        return try await server.start()
     }
 
     func currentStats() -> SwarmStats {
