@@ -122,54 +122,69 @@ struct LocalDebridService: Sendable {
             return cached
         }
 
-        await RealDebridAvailabilityCache.shared.waitPacer()
+        var merged = cached
+        var completedBatch = false
+        for batchStart in stride(from: 0, to: missing.count, by: 50) {
+            guard !Task.isCancelled else { break }
+            let batchEnd = min(batchStart + 50, missing.count)
+            let batch = Array(missing[batchStart..<batchEnd])
+            await RealDebridAvailabilityCache.shared.waitPacer()
+            guard !Task.isCancelled else { break }
 
-        let hashPath = missing.prefix(50).joined(separator: "/")
-        guard let url = URL(string: "https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/\(hashPath)") else { return cached }
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
-
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return cached.isEmpty ? nil : cached }
-            if http.statusCode == 429 {
-                print("[LocalDebridService] Real-Debrid instantAvailability returned 429 (rate limited)")
-                return cached.isEmpty ? nil : cached
+            let hashPath = batch.joined(separator: "/")
+            guard let url = URL(string: "https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/\(hashPath)") else {
+                continue
             }
-            guard 200..<300 ~= http.statusCode else { return cached.isEmpty ? nil : cached }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return cached.isEmpty ? nil : cached }
+            var request = URLRequest(url: url)
+            request.setValue(
+                "Bearer \(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))",
+                forHTTPHeaderField: "Authorization"
+            )
 
-            var fetched: [String: LocalDebridCachedItem] = [:]
-            for (hash, val) in json {
-                guard let providerDict = val as? [String: Any],
-                      let rdArray = providerDict["rd"] as? [[String: Any]],
-                      !rdArray.isEmpty else {
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else { continue }
+                if http.statusCode == 429 {
+                    print("[LocalDebridService] Real-Debrid instantAvailability returned 429 (rate limited)")
+                    break
+                }
+                guard 200..<300 ~= http.statusCode,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     continue
                 }
-                var firstName: String?
-                var totalSize: Int64?
-                if let firstVariant = rdArray.first {
-                    for (_, fileInfoVal) in firstVariant {
-                        if let fileInfo = fileInfoVal as? [String: Any] {
-                            firstName = fileInfo["filename"] as? String
-                            totalSize = (fileInfo["filesize"] as? NSNumber)?.int64Value
-                            break
+
+                var fetched: [String: LocalDebridCachedItem] = [:]
+                for (hash, val) in json {
+                    guard let providerDict = val as? [String: Any],
+                          let rdArray = providerDict["rd"] as? [[String: Any]],
+                          !rdArray.isEmpty else {
+                        continue
+                    }
+                    var firstName: String?
+                    var totalSize: Int64?
+                    if let firstVariant = rdArray.first {
+                        for (_, fileInfoVal) in firstVariant {
+                            if let fileInfo = fileInfoVal as? [String: Any] {
+                                firstName = fileInfo["filename"] as? String
+                                totalSize = (fileInfo["filesize"] as? NSNumber)?.int64Value
+                                break
+                            }
                         }
                     }
+                    fetched[hash.lowercased()] = LocalDebridCachedItem(name: firstName, size: totalSize)
                 }
-                fetched[hash.lowercased()] = LocalDebridCachedItem(name: firstName, size: totalSize)
+                await RealDebridAvailabilityCache.shared.store(items: fetched, checkedHashes: batch)
+                completedBatch = true
+                for (hash, item) in fetched {
+                    merged[hash] = item
+                }
+            } catch is CancellationError {
+                break
+            } catch {
+                continue
             }
-            let checkedBatch = Array(missing.prefix(50))
-            await RealDebridAvailabilityCache.shared.store(items: fetched, checkedHashes: checkedBatch)
-
-            var merged = cached
-            for (k, v) in fetched {
-                merged[k] = v
-            }
-            return merged
-        } catch {
-            return cached.isEmpty ? nil : cached
         }
+        return completedBatch || !merged.isEmpty ? merged : nil
     }
 
     // MARK: - Premiumize
