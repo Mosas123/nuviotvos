@@ -284,7 +284,10 @@ final class SearchAndDiscoverLifecycleTests: XCTestCase {
 
         // Fast search completes and is cached
         viewModel.performSearch(query: "Fast")
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let fastDeadline = Date().addingTimeInterval(1.0)
+        while viewModel.isLoading && Date() < fastDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertEqual(viewModel.results.first?.name, "Result for Fast")
 
         // Slow search starts
@@ -339,6 +342,58 @@ final class SearchAndDiscoverLifecycleTests: XCTestCase {
         // Stale slow search must NOT overwrite the cached fast search
         XCTAssertEqual(viewModel.results.first?.name, "Result for Fast")
         XCTAssertFalse(viewModel.isLoading)
+    }
+
+    @MainActor
+    func testSearchTimeoutGracefullyRecoversFromHangingRepository() async throws {
+        let repo = ControllableLifecycleRepository()
+        let viewModel = SearchViewModel(repository: repo, searchTimeout: 0.1)
+
+        let searchStarted = expectation(description: "search started")
+        repo.searchHandler = { query in
+            searchStarted.fulfill()
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            return [NuvioMeta(id: "too_late", name: "Too Late", type: "movie")]
+        }
+
+        viewModel.performSearch(query: "HangingQuery")
+        await fulfillment(of: [searchStarted], timeout: 2.0)
+        XCTAssertTrue(viewModel.isLoading)
+
+        let deadline = Date().addingTimeInterval(1.0)
+        while viewModel.isLoading && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertFalse(viewModel.isLoading)
+        XCTAssertNotNil(viewModel.error)
+        XCTAssertTrue(viewModel.results.isEmpty)
+    }
+
+    @MainActor
+    func testNetflixSearchTimeoutGracefullyRecoversFromHangingRepository() async throws {
+        let repo = ControllableLifecycleRepository()
+        let viewModel = NetflixSearchViewModel(repository: repo, searchTimeout: 0.1)
+
+        let searchStarted = expectation(description: "netflix search started")
+        repo.searchHandler = { query in
+            searchStarted.fulfill()
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            return [NuvioMeta(id: "too_late", name: "Too Late", type: "movie")]
+        }
+
+        viewModel.performSearch(query: "HangingQuery")
+        await fulfillment(of: [searchStarted], timeout: 2.0)
+        XCTAssertTrue(viewModel.isLoading)
+
+        let deadline = Date().addingTimeInterval(1.0)
+        while viewModel.isLoading && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertFalse(viewModel.isLoading)
+        XCTAssertNotNil(viewModel.error)
+        XCTAssertTrue(viewModel.results.isEmpty)
     }
 
     @MainActor
@@ -685,5 +740,11 @@ final class CloudLibraryLifecycleTests: XCTestCase {
         XCTAssertTrue(playerScreen.isPlayer)
         XCTAssertFalse(TVScreen.cloudLibrary.isPlayer)
         XCTAssertFalse(TVScreen.main.isPlayer)
+    }
+
+    func testTVOSKeyboardLayoutModeCases() {
+        XCTAssertEqual(TVOSKeyboardLayoutMode.linear.rawValue, "Linear")
+        XCTAssertEqual(TVOSKeyboardLayoutMode.grid.rawValue, "Grid")
+        XCTAssertEqual(TVOSKeyboardLayoutMode.allCases.count, 2)
     }
 }

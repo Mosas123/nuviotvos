@@ -2130,7 +2130,16 @@
     "type_movies": "أفلام",
     "type_series": "مسلسل",
     "type_series_plural": "مسلسلات",
-    "type_unknown": "غير معروف"
+    "type_unknown": "غير معروف",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "bg": {
     "about_check_updates": "Провери за актуализации",
@@ -4263,7 +4272,16 @@
     "type_movies": "Филми",
     "type_series": "Сериал",
     "type_series_plural": "Сериали",
-    "type_unknown": "Неизвестно"
+    "type_unknown": "Неизвестно",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "bs": {
     "about_check_updates": "Provjeri ažuriranja",
@@ -6396,7 +6414,16 @@
     "type_movies": "Film",
     "type_series": "Serija",
     "type_series_plural": "Serija",
-    "type_unknown": "Nepoznato"
+    "type_unknown": "Nepoznato",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "cs": {
     "about_check_updates": "Zkontrolovat aktualizace",
@@ -8529,7 +8556,16 @@
     "type_movies": "Filmy",
     "type_series": "Seriál",
     "type_series_plural": "Seriály",
-    "type_unknown": "Neznámé"
+    "type_unknown": "Neznámé",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "da": {
     "about_check_updates": "Søg efter opdateringer",
@@ -10662,7 +10698,16 @@
     "type_movies": "Film",
     "type_series": "Serie",
     "type_series_plural": "Serier",
-    "type_unknown": "Ukendt"
+    "type_unknown": "Ukendt",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "de": {
     "about_check_updates": "Nach Updates suchen",
@@ -12795,7 +12840,16 @@
     "type_movies": "Movies",
     "type_series": "Serie",
     "type_series_plural": "Series",
-    "type_unknown": "Unbekannt"
+    "type_unknown": "Unbekannt",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "el": {
     "about_check_updates": "Έλεγχος ενημερώσεων",
@@ -14928,7 +14982,16 @@
     "type_movies": "Ταινίες",
     "type_series": "Σειρά",
     "type_series_plural": "Σειρές",
-    "type_unknown": "Άγνωστο"
+    "type_unknown": "Άγνωστο",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "en": {
     "about_check_updates": "Check for updates",
@@ -17063,7 +17126,16 @@
     "type_movies": "Movies",
     "type_series": "Series",
     "type_series_plural": "Series",
-    "type_unknown": "Unknown"
+    "type_unknown": "Unknown",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "es": {
     "about_check_updates": "Buscar actualizaciones",
@@ -19196,7 +19268,16 @@
     "type_movies": "Película",
     "type_series": "Serie",
     "type_series_plural": "Series",
-    "type_unknown": "Desconocido"
+    "type_unknown": "Desconocido",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "es-419": {
     "about_check_updates": "Buscar actualizaciones",
@@ -21329,7 +21410,16 @@
     "type_movies": "Películas",
     "type_series": "Serie",
     "type_series_plural": "Series",
-    "type_unknown": "Desconocido"
+    "type_unknown": "Desconocido",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "fr": {
     "about_check_updates": "Vérifier les mises à jour",
@@ -23462,7 +23552,16 @@
     "type_movies": "Films",
     "type_series": "Série",
     "type_series_plural": "Séries",
-    "type_unknown": "Inconnu"
+    "type_unknown": "Inconnu",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "he": {
     "about_check_updates": "בדוק עדכונים",
@@ -25595,7 +25694,16 @@
     "type_movies": "סרטים",
     "type_series": "סדרה",
     "type_series_plural": "סדרות",
-    "type_unknown": "לא ידוע"
+    "type_unknown": "לא ידוע",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "hi": {
     "about_check_updates": "अपडेट जांचें",
@@ -27728,7 +27836,16 @@
     "type_movies": "फ़िल्म",
     "type_series": "सीरीज़",
     "type_series_plural": "सीरीज़",
-    "type_unknown": "अज्ञात"
+    "type_unknown": "अज्ञात",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "hu": {
     "about_check_updates": "Frissítések keresése",
@@ -29861,7 +29978,16 @@
     "type_movies": "Filmek",
     "type_series": "Sorozat",
     "type_series_plural": "Sorozatok",
-    "type_unknown": "Ismeretlen"
+    "type_unknown": "Ismeretlen",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "in": {
     "about_check_updates": "Periksa pembaruan",
@@ -31994,7 +32120,16 @@
     "type_movies": "Film",
     "type_series": "Serial",
     "type_series_plural": "Serial",
-    "type_unknown": "Tidak Diketahui"
+    "type_unknown": "Tidak Diketahui",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "it": {
     "about_check_updates": "Controlla aggiornamenti",
@@ -34127,7 +34262,16 @@
     "type_movies": "Film",
     "type_series": "Serie TV",
     "type_series_plural": "Serie TV",
-    "type_unknown": "Sconosciuto"
+    "type_unknown": "Sconosciuto",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ja": {
     "about_check_updates": "アップデートを確認",
@@ -36260,7 +36404,16 @@
     "type_movies": "映画",
     "type_series": "シリーズ",
     "type_series_plural": "シリーズ",
-    "type_unknown": "不明"
+    "type_unknown": "不明",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "lt": {
     "about_check_updates": "Tikrinti atnaujinimus",
@@ -38393,7 +38546,16 @@
     "type_movies": "Filmas",
     "type_series": "Serialas",
     "type_series_plural": "Serialas",
-    "type_unknown": "Nežinoma"
+    "type_unknown": "Nežinoma",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "nl": {
     "about_check_updates": "Controleren op updates",
@@ -40526,7 +40688,16 @@
     "type_movies": "Film",
     "type_series": "Serie",
     "type_series_plural": "Serie",
-    "type_unknown": "Onbekend"
+    "type_unknown": "Onbekend",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "no": {
     "about_check_updates": "Se etter oppdateringer",
@@ -42659,7 +42830,16 @@
     "type_movies": "Film",
     "type_series": "Serie",
     "type_series_plural": "Serie",
-    "type_unknown": "Ukjent"
+    "type_unknown": "Ukjent",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "pl": {
     "about_check_updates": "Sprawdź aktualizacje",
@@ -44792,7 +44972,16 @@
     "type_movies": "Filmy",
     "type_series": "Serial",
     "type_series_plural": "Seriale",
-    "type_unknown": "Nieznany"
+    "type_unknown": "Nieznany",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "pt-BR": {
     "about_check_updates": "Verificar atualizações",
@@ -46925,7 +47114,16 @@
     "type_movies": "Filmes",
     "type_series": "Série",
     "type_series_plural": "Séries",
-    "type_unknown": "Desconhecido"
+    "type_unknown": "Desconhecido",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "pt-PT": {
     "about_check_updates": "Procurar atualizações",
@@ -49058,7 +49256,16 @@
     "type_movies": "Filmes",
     "type_series": "Série",
     "type_series_plural": "Séries",
-    "type_unknown": "Desconhecido"
+    "type_unknown": "Desconhecido",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ro": {
     "about_check_updates": "Verifică actualizările",
@@ -51191,7 +51398,16 @@
     "type_movies": "Film",
     "type_series": "Serial",
     "type_series_plural": "Serial",
-    "type_unknown": "Necunoscut"
+    "type_unknown": "Necunoscut",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ru": {
     "about_check_updates": "Проверить обновления",
@@ -53324,7 +53540,16 @@
     "type_movies": "Фильмы",
     "type_series": "Сериал",
     "type_series_plural": "Сериалы",
-    "type_unknown": "Неизвестно"
+    "type_unknown": "Неизвестно",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "sk": {
     "about_check_updates": "Skontrolovať aktualizácie",
@@ -55457,7 +55682,16 @@
     "type_movies": "Filmy",
     "type_series": "Seriál",
     "type_series_plural": "Seriály",
-    "type_unknown": "Neznáme"
+    "type_unknown": "Neznáme",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "sl": {
     "about_check_updates": "Preveri za posodobitve",
@@ -57590,7 +57824,16 @@
     "type_movies": "Filmi",
     "type_series": "Serija",
     "type_series_plural": "Serije",
-    "type_unknown": "Neznano"
+    "type_unknown": "Neznano",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "sv": {
     "about_check_updates": "Sök efter uppdateringar",
@@ -59723,7 +59966,16 @@
     "type_movies": "Film",
     "type_series": "Serier",
     "type_series_plural": "Serier",
-    "type_unknown": "Okänd"
+    "type_unknown": "Okänd",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ta": {
     "about_check_updates": "புதுப்பிப்புகளை சரிபார்",
@@ -61856,7 +62108,16 @@
     "type_movies": "திரைப்படங்கள்",
     "type_series": "தொடர்",
     "type_series_plural": "தொடர்கள்",
-    "type_unknown": "தெரியாதது"
+    "type_unknown": "தெரியாதது",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "tr": {
     "about_check_updates": "Güncellemeleri kontrol et",
@@ -63989,7 +64250,16 @@
     "type_movies": "Filmler",
     "type_series": "Dizi",
     "type_series_plural": "Diziler",
-    "type_unknown": "Bilinmiyor"
+    "type_unknown": "Bilinmiyor",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "uk": {
     "about_check_updates": "Перевірити оновлення",
@@ -66122,7 +66392,16 @@
     "type_movies": "Фільми",
     "type_series": "Серіал",
     "type_series_plural": "Серіали",
-    "type_unknown": "Невідомо"
+    "type_unknown": "Невідомо",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "vi": {
     "about_check_updates": "Kiểm tra cập nhật",
@@ -68255,7 +68534,16 @@
     "type_movies": "Phim",
     "type_series": "Chương trình TV",
     "type_series_plural": "Chương trình TV",
-    "type_unknown": "Không xác định"
+    "type_unknown": "Không xác định",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "zh-CN": {
     "about_check_updates": "检查更新",
@@ -70388,7 +70676,16 @@
     "type_movies": "电影",
     "type_series": "剧集",
     "type_series_plural": "剧集",
-    "type_unknown": "未知"
+    "type_unknown": "未知",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "zh-TW": {
     "about_check_updates": "檢查更新",
@@ -72521,6 +72818,15 @@
     "type_movies": "電影",
     "type_series": "影集",
     "type_series_plural": "影集",
-    "type_unknown": "未知"
+    "type_unknown": "未知",
+    "settings_rating_provider_myanimelist": "MyAnimeList",
+    "settings_rating_provider_myanimelist_subtitle": "MyAnimeList user score",
+    "settings_rating_provider_tvdb": "TVDB",
+    "settings_rating_provider_tvdb_subtitle": "TheTVDB community rating",
+    "settings_addon_rating_providers_title": "Add-on Rating Providers",
+    "settings_addon_rating_providers_subtitle": "Choose rating badges provided by installed Stremio add-ons",
+    "settings_addon_rating_provider_from": "%@ (from %@)",
+    "settings_addon_rating_custom_icon": "Custom Icon URL",
+    "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   }
 }

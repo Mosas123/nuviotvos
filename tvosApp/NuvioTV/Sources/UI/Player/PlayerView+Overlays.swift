@@ -69,8 +69,10 @@ extension PlayerView {
                         logoUrl: meta.logoUrl,
                         title: meta.name,
                         message: viewModel.loadingStepMessage,
+                        startTime: PlaybackStartupTiming.requestDate(for: viewModel.startupBenchmarkToken),
                         onDismiss: onBack
                     )
+                    .id(viewModel.startupBenchmarkToken)
                     .transition(.opacity)
                 } else if !viewModel.hasRenderedFirstFrame {
                     ProgressView()
@@ -86,8 +88,10 @@ extension PlayerView {
                         logoUrl: meta.logoUrl,
                         title: meta.name,
                         message: viewModel.loadingStepMessage,
+                        startTime: PlaybackStartupTiming.requestDate(for: viewModel.startupBenchmarkToken),
                         onDismiss: onBack
                     )
+                    .id(viewModel.startupBenchmarkToken)
                     .transition(.opacity)
                 }
             default:

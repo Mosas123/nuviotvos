@@ -656,6 +656,455 @@ public enum TVMemoryDiagnostic {
     }
 }
 
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+struct MPVMemoryEngineSnapshot: Codable, Sendable {
+    let sampledAt: Date
+    let cacheTotalBytes: Int64?
+    let cacheForwardBytes: Int64?
+    let cacheDurationSeconds: Double?
+    let inputBytesPerSecond: Double?
+    let timePositionSeconds: Double?
+    let coreIdle: Bool?
+    let eofReached: Bool?
+    let cacheReaderIdle: Bool?
+    let cacheReaderEOF: Bool?
+    let cacheUnderrun: Bool?
+    let paused: Bool?
+    let seeking: Bool?
+    let pausedForCache: Bool?
+    let width: Int?
+    let height: Int?
+    let codec: String?
+    let hardwareDecoder: String?
+    let demuxerMaxBytes: String?
+    let demuxerMaxBackBytes: String?
+    let localOrDiskCache: Bool?
+}
+
+struct MPVMemoryProcessMetrics: Sendable {
+    let sampledAt: Date
+    let vmStatisticsAvailable: Bool
+    let footprintMiB: Double?
+    let residentMiB: Double?
+    let availableMiB: Double
+    let dirtyInternalMiB: Double?
+    let compressedMiB: Double?
+    let deviceMappedMiB: Double?
+    let totalPhysicalRAMMiB: Double
+    let thermalState: String
+    let appCacheMiB: Double
+    let cacheBreakdownMiB: [String: Double]
+
+    init(
+        sampledAt: Date,
+        vmStatisticsAvailable: Bool,
+        footprintMiB: Double?,
+        residentMiB: Double?,
+        availableMiB: Double,
+        dirtyInternalMiB: Double?,
+        compressedMiB: Double?,
+        deviceMappedMiB: Double?,
+        totalPhysicalRAMMiB: Double,
+        thermalState: String,
+        appCacheMiB: Double,
+        cacheBreakdownMiB: [String: Double]
+    ) {
+        self.sampledAt = sampledAt
+        self.vmStatisticsAvailable = vmStatisticsAvailable
+        self.footprintMiB = footprintMiB
+        self.residentMiB = residentMiB
+        self.availableMiB = availableMiB
+        self.dirtyInternalMiB = dirtyInternalMiB
+        self.compressedMiB = compressedMiB
+        self.deviceMappedMiB = deviceMappedMiB
+        self.totalPhysicalRAMMiB = totalPhysicalRAMMiB
+        self.thermalState = thermalState
+        self.appCacheMiB = appCacheMiB
+        self.cacheBreakdownMiB = cacheBreakdownMiB
+    }
+
+    init(snapshot: TVMemoryDiagnostic.Snapshot) {
+        let vmStatisticsAvailable = snapshot.physicalFootprintMB > 0
+        sampledAt = snapshot.timestamp
+        self.vmStatisticsAvailable = vmStatisticsAvailable
+        footprintMiB = vmStatisticsAvailable ? snapshot.physicalFootprintMB : nil
+        residentMiB = vmStatisticsAvailable ? snapshot.residentMB : nil
+        availableMiB = snapshot.availableMemoryMB
+        dirtyInternalMiB = vmStatisticsAvailable ? snapshot.dirtyInternalMB : nil
+        compressedMiB = vmStatisticsAvailable ? snapshot.compressedMB : nil
+        // task_vm_info.device is mapped device memory, not an exact GPU allocation.
+        deviceMappedMiB = vmStatisticsAvailable ? snapshot.ioSurfaceMB : nil
+        totalPhysicalRAMMiB = snapshot.totalPhysicalRAMMB
+        thermalState = snapshot.thermalState
+        appCacheMiB = snapshot.totalKnownAppCachesMB
+        cacheBreakdownMiB = [
+            "urlCacheMemory": snapshot.urlCacheMemoryMB,
+            "urlCacheDisk": snapshot.urlCacheDiskMB,
+            "posters": snapshot.posterCacheBytesMB,
+            "backdrops": snapshot.backdropCacheBytesMB,
+            "personProfiles": snapshot.personProfileCacheBytesMB,
+            "profileAvatars": snapshot.profileAvatarCacheBytesMB,
+            "animatedGIFs": snapshot.animatedGIFCacheBytesMB,
+            "stremioManifests": snapshot.stremioManifestCacheBytesKB / 1024.0
+        ]
+    }
+}
+
+struct MPVMemoryDiagnosticRecord: Codable, Sendable {
+    let timestamp: Date
+    let pid: Int32
+    let sessionID: String
+    let event: String
+    let cacheMode: String
+    let vmStatisticsAvailable: Bool
+    let footprintMiB: Double?
+    let residentMiB: Double?
+    let availableMiB: Double
+    let dirtyInternalMiB: Double?
+    let compressedMiB: Double?
+    let deviceMappedMiB: Double?
+    let totalPhysicalRAMMiB: Double
+    let thermalState: String
+    let appCacheMiB: Double
+    let cacheBreakdownMiB: [String: Double]
+    let footprintDeltaMiB: Double?
+    let footprintHighWaterMiB: Double?
+    let engineSnapshotAgeSeconds: Double?
+    let engineSnapshotStale: Bool
+    let engine: MPVMemoryEngineSnapshot?
+    let streamBridge: MPVStreamBridgeMemorySnapshot
+    let alerts: [String]
+}
+
+/// Bounded JSONL storage shared by all MPV controllers in this process.
+final class MPVMemoryDiagnosticLogStore: @unchecked Sendable {
+    struct StartupReport {
+        let currentPath: String
+        let previousPath: String
+        let previousTail: String?
+    }
+
+    static let shared = MPVMemoryDiagnosticLogStore(directory: defaultDirectory)
+
+    static var defaultDirectory: URL {
+        (FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("PlaybackDiagnostics", isDirectory: true)
+    }
+
+    let directory: URL
+    let currentURL: URL
+    let previousURL: URL
+    let maximumTotalBytes: Int
+
+    private let queue = DispatchQueue(label: "nuvio.mpv.memory-log-store", qos: .utility)
+    private var isPrepared = false
+    private var didReportStartup = false
+    private var didReportWriteFailure = false
+
+    init(directory: URL, maximumTotalBytes: Int = 256 * 1024) {
+        self.directory = directory
+        currentURL = directory.appendingPathComponent("current.jsonl")
+        previousURL = directory.appendingPathComponent("previous.jsonl")
+        self.maximumTotalBytes = max(1024, maximumTotalBytes)
+    }
+
+    func prepareForCurrentProcess() -> StartupReport? {
+        queue.sync {
+            prepareIfNeeded()
+            guard !didReportStartup else { return nil }
+            didReportStartup = true
+            let tail = boundedTail(readData(previousURL), maximumBytes: 8 * 1024)
+            return StartupReport(
+                currentPath: currentURL.path,
+                previousPath: previousURL.path,
+                previousTail: tail.isEmpty ? nil : String(data: tail, encoding: .utf8)
+            )
+        }
+    }
+
+    func append(jsonLine: String) {
+        queue.sync {
+            prepareIfNeeded()
+            var line = Data(jsonLine.utf8)
+            if line.last != 0x0A { line.append(0x0A) }
+            let currentBudget = maximumTotalBytes - previousBudget
+            guard line.count <= currentBudget else { return }
+
+            do {
+                var current = readData(currentURL)
+                if current.count + line.count > currentBudget {
+                    var combined = readData(previousURL)
+                    combined.append(current)
+                    try replaceData(boundedTail(combined, maximumBytes: previousBudget), at: previousURL)
+                    try replaceData(Data(), at: currentURL)
+                    current = Data()
+                }
+                try appendData(line, at: currentURL)
+            } catch {
+                if !didReportWriteFailure {
+                    didReportWriteFailure = true
+                    print("[MPVMemoryWatchdog] log write failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    var currentData: Data { queue.sync { readData(currentURL) } }
+    var previousData: Data { queue.sync { readData(previousURL) } }
+    var storedByteCount: Int { queue.sync { readData(currentURL).count + readData(previousURL).count } }
+
+    private var previousBudget: Int { maximumTotalBytes / 2 }
+
+    private func prepareIfNeeded() {
+        guard !isPrepared else { return }
+        isPrepared = true
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let oldCurrent = readData(currentURL)
+            if !oldCurrent.isEmpty {
+                var previous = boundedTail(readData(previousURL), maximumBytes: previousBudget / 2)
+                let currentTail = boundedTail(oldCurrent, maximumBytes: previousBudget - previousBudget / 2)
+                if !previous.isEmpty && previous.last != 0x0A { previous.append(0x0A) }
+                previous.append(currentTail)
+                try replaceData(previous, at: previousURL)
+            } else {
+                try replaceData(boundedTail(readData(previousURL), maximumBytes: previousBudget), at: previousURL)
+            }
+            try replaceData(Data(), at: currentURL)
+        } catch {
+            if !didReportWriteFailure {
+                didReportWriteFailure = true
+                print("[MPVMemoryWatchdog] log preparation failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func readData(_ url: URL) -> Data {
+        (try? Data(contentsOf: url)) ?? Data()
+    }
+
+    private func boundedTail(_ data: Data, maximumBytes: Int) -> Data {
+        guard data.count > maximumBytes else { return data }
+        var tail = Data(data.suffix(maximumBytes))
+        if let newline = tail.firstIndex(of: 0x0A) {
+            tail = Data(tail[tail.index(after: newline)...])
+        }
+        return tail
+    }
+
+    private func replaceData(_ data: Data, at url: URL) throws {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+    }
+
+    private func appendData(_ data: Data, at url: URL) throws {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        _ = try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+    }
+}
+
+/// Samples process and app-cache metrics independently of the main-thread mpv poll.
+final class MPVMemoryWatchdog: @unchecked Sendable {
+    private struct Context {
+        var sessionID: String
+        var cacheMode: String
+    }
+
+    private let queue = DispatchQueue(label: "nuvio.mpv.memory-watchdog", qos: .utility)
+    private let lifecycleLock = NSLock()
+    private let store: MPVMemoryDiagnosticLogStore
+    private let interval: TimeInterval
+    private let processID: Int32
+    private let processMetrics: () -> MPVMemoryProcessMetrics
+    private let bridgeMetrics: () -> MPVStreamBridgeMemorySnapshot
+    private var timer: DispatchSourceTimer?
+    private var context = Context(sessionID: "startup", cacheMode: "unknown")
+    private var engineSnapshot: MPVMemoryEngineSnapshot?
+    private var previousFootprintMiB: Double?
+    private var footprintHighWaterMiB: Double?
+    private var isStopped = true
+    private var stopRequested = false
+
+    init(
+        store: MPVMemoryDiagnosticLogStore = .shared,
+        interval: TimeInterval = 2,
+        processID: Int32 = Int32(getpid()),
+        processMetrics: @escaping () -> MPVMemoryProcessMetrics = {
+            MPVMemoryProcessMetrics(snapshot: TVMemoryDiagnostic.capture())
+        },
+        bridgeMetrics: @escaping () -> MPVStreamBridgeMemorySnapshot = {
+            MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot()
+        }
+    ) {
+        self.store = store
+        self.interval = max(0.05, interval)
+        self.processID = processID
+        self.processMetrics = processMetrics
+        self.bridgeMetrics = bridgeMetrics
+    }
+
+    deinit {
+        timer?.setEventHandler {}
+        timer?.cancel()
+    }
+
+    func start(sessionID: String, cacheMode: String, event: String) {
+        lifecycleLock.lock()
+        let mayStart = !stopRequested
+        lifecycleLock.unlock()
+        guard mayStart else { return }
+
+        queue.async { [self] in
+            guard !isStopRequested else { return }
+            if context.sessionID != sessionID { engineSnapshot = nil }
+            context = Context(sessionID: sessionID, cacheMode: cacheMode)
+            guard isStopped else {
+                sample(event: event)
+                return
+            }
+            isStopped = false
+            if let report = store.prepareForCurrentProcess() {
+                print("[MPVMemoryWatchdog] currentLog=\(report.currentPath) previousLog=\(report.previousPath)")
+                if let tail = report.previousTail {
+                    print("[MPVMemoryWatchdog] previousLogTailBegin\n\(tail)\n[MPVMemoryWatchdog] previousLogTailEnd")
+                }
+            }
+            sample(event: event)
+            let source = DispatchSource.makeTimerSource(queue: queue)
+            source.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(250))
+            source.setEventHandler { [weak self] in self?.sample(event: "sample") }
+            timer = source
+            source.resume()
+        }
+    }
+
+    func updateContext(sessionID: String, cacheMode: String) {
+        guard !isStopRequested else { return }
+        queue.async { [weak self] in
+            guard let self, !self.isStopped else { return }
+            if self.context.sessionID != sessionID { self.engineSnapshot = nil }
+            self.context = Context(sessionID: sessionID, cacheMode: cacheMode)
+        }
+    }
+
+    func updateEngineSnapshot(_ snapshot: MPVMemoryEngineSnapshot) {
+        guard !isStopRequested else { return }
+        queue.async { [weak self] in
+            guard let self, !self.isStopped else { return }
+            self.engineSnapshot = snapshot
+        }
+    }
+
+    func record(event: String) {
+        guard !isStopRequested else { return }
+        queue.async { [weak self] in
+            guard let self, !self.isStopped else { return }
+            self.sample(event: event, allowAfterStopRequest: true)
+        }
+    }
+
+    func stop(event: String) {
+        lifecycleLock.lock()
+        guard !stopRequested else {
+            lifecycleLock.unlock()
+            return
+        }
+        stopRequested = true
+        lifecycleLock.unlock()
+
+        // Retain this terminal operation until its sample is fully persisted.
+        queue.async { [self] in
+            guard !isStopped else { return }
+            timer?.setEventHandler {}
+            timer?.cancel()
+            timer = nil
+            sample(event: event, allowAfterStopRequest: true)
+            isStopped = true
+        }
+    }
+
+    /// Test seam that drains queued samples and writes without blocking production lifecycle calls.
+    func flushPendingWorkForTesting() {
+        queue.sync {}
+    }
+
+    private var isStopRequested: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return stopRequested
+    }
+
+    private func sample(event: String, allowAfterStopRequest: Bool = false) {
+        guard !isStopped else { return }
+        guard allowAfterStopRequest || !isStopRequested else { return }
+        let metrics = processMetrics()
+        let footprint = metrics.vmStatisticsAvailable
+            ? metrics.footprintMiB.flatMap { $0 > 0 ? $0 : nil }
+            : nil
+        let delta = footprint.flatMap { current in previousFootprintMiB.map { current - $0 } }
+        if let footprint {
+            footprintHighWaterMiB = max(footprintHighWaterMiB ?? footprint, footprint)
+            previousFootprintMiB = footprint
+        }
+
+        let engineAge = engineSnapshot.map {
+            max(0, metrics.sampledAt.timeIntervalSince($0.sampledAt))
+        }
+        var alerts = [String]()
+        if metrics.availableMiB < 128 { alerts.append("low_headroom") }
+        if let delta, delta >= 64 { alerts.append("sudden_footprint_rise") }
+
+        let record = MPVMemoryDiagnosticRecord(
+            timestamp: metrics.sampledAt,
+            pid: processID,
+            sessionID: context.sessionID,
+            event: event,
+            cacheMode: context.cacheMode,
+            vmStatisticsAvailable: footprint != nil,
+            footprintMiB: footprint,
+            residentMiB: metrics.residentMiB,
+            availableMiB: metrics.availableMiB,
+            dirtyInternalMiB: metrics.dirtyInternalMiB,
+            compressedMiB: metrics.compressedMiB,
+            deviceMappedMiB: metrics.deviceMappedMiB,
+            totalPhysicalRAMMiB: metrics.totalPhysicalRAMMiB,
+            thermalState: metrics.thermalState,
+            appCacheMiB: metrics.appCacheMiB,
+            cacheBreakdownMiB: metrics.cacheBreakdownMiB,
+            footprintDeltaMiB: delta,
+            footprintHighWaterMiB: footprintHighWaterMiB,
+            engineSnapshotAgeSeconds: engineAge,
+            engineSnapshotStale: engineAge.map { $0 > 3 } ?? true,
+            engine: engineSnapshot,
+            streamBridge: bridgeMetrics(),
+            alerts: alerts
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(record), let line = String(data: data, encoding: .utf8) else { return }
+        store.append(jsonLine: line)
+        print("[MPVMemoryWatchdog] \(line)")
+        if !alerts.isEmpty {
+            print("[MPVMemoryWatchdog] diagnostic alert event=\(event) alerts=\(alerts.joined(separator: ","))")
+        }
+    }
+}
+#endif
+
 // MARK: - Memory Trackers
 
 /// Thread-safe tracker and delegate for `NSCache` instances to maintain accurate

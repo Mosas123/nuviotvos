@@ -2368,6 +2368,23 @@ private final class StartupProgressGenerationObserver: @unchecked Sendable {
     }
 }
 
+enum AetherStartupLoadPresentationPolicy {
+    static func isPresented(
+        expectedLoadGeneration: UInt64,
+        ownerLoadGeneration: UInt64?,
+        engineGenerationFloor: UInt64?,
+        progressGeneration: UInt64?,
+        checkpointIsPresenting: Bool
+    ) -> Bool {
+        guard ownerLoadGeneration == expectedLoadGeneration,
+              let engineGenerationFloor,
+              let progressGeneration,
+              progressGeneration >= engineGenerationFloor,
+              checkpointIsPresenting else { return false }
+        return true
+    }
+}
+
 @MainActor
 final class AetherPlaybackController: UIViewController, PlaybackEngineControlling, ScrubThumbnailProviding {
     private struct StartupBenchmarkLoadOwner {
@@ -2477,6 +2494,18 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     var onStartupProgressChanged: ((StartupProgress?) -> Void)?
     private let startupProgressGenerationObserver = StartupProgressGenerationObserver()
     private var startupBenchmarkLoadOwner: StartupBenchmarkLoadOwner?
+
+    func hasPresentedCurrentLoad(generation: UInt64) -> Bool {
+        let progress = engine.startupProgress
+        let owner = startupBenchmarkLoadOwner
+        return AetherStartupLoadPresentationPolicy.isPresented(
+            expectedLoadGeneration: generation,
+            ownerLoadGeneration: owner?.loadGeneration,
+            engineGenerationFloor: owner?.engineGenerationFloor,
+            progressGeneration: progress?.generation,
+            checkpointIsPresenting: progress?.checkpoint == .presenting
+        )
+    }
 
     var loadingStepMessage: String? {
         guard let stage = engine.startupProgress?.stage else {

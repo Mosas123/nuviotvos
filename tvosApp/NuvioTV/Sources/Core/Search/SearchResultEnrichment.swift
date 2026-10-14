@@ -78,10 +78,14 @@ enum SearchResultEnrichment {
 
             for (index, full) in refreshed {
                 guard let full, !Task.isCancelled else { continue }
-                enriched[index] = deduplicatedResults[index].mergingSearchMetadata(
+                var merged = deduplicatedResults[index].mergingSearchMetadata(
                     from: full,
                     preferAddonArtwork: CinemetaCatalogRepository.preferAddonArtworkInSearch
                 )
+                if TmdbDetailsService.useHomeEnrichment {
+                    merged = await TmdbDetailsService.localizedMetadata(for: merged)
+                }
+                enriched[index] = merged
             }
             cursor = end
         }

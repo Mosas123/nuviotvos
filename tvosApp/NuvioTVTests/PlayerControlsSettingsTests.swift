@@ -2,6 +2,62 @@ import XCTest
 import CoreGraphics
 @testable import NuvioTV
 
+@MainActor
+private final class PlayerControlsTestEngine: PlaybackEngineControlling {
+    var onPlaybackSuspended: ((Int64, Int64) -> Void)?
+    var onFirstFrameReady: (() -> Void)?
+    let audioTracks: [PlaybackTrackInfo] = []
+    let subtitleTracks: [PlaybackTrackInfo] = []
+    var isPlayerLoading = false
+    var isPlayerPlaying = false
+    var isTransportPlaying = false
+    var isPlayerEnded = false
+    var isAtEndOfFile = false
+    var hasCoherentTimeSample = false
+    var hasFirstFrameReadyForDisplay = false
+    var durationMs: Int64 = 0
+    var positionMs: Int64 = 0
+    var bufferedMs: Int64 = 0
+    var currentSpeed: Float = 1
+    var currentErrorMessage = ""
+    var videoFrameSize = CGSize.zero
+    var playbackDebugInfo = PlaybackDebugInfo(player: "Test")
+    var loadingStepMessage: String?
+
+    func loadFile(_ urlString: String) {}
+    func playPlayback() {}
+    func pausePlayback() {}
+    func seekToMs(_ ms: Int64) {}
+    func setSpeed(_ speed: Float) {}
+    func setAspectMode(_ mode: PlayerAspectMode) {}
+    func setSubtitleDelay(_ seconds: Double) {}
+    func setAudioDelay(_ seconds: Double) {}
+    func setAudioVolumeGain(dB: Double) {}
+    func selectAudio(_ trackId: Int) {}
+    func selectSubtitle(_ trackId: Int) {}
+    func addSubtitle(_ subtitle: NuvioSubtitle, select: Bool) {}
+    func addAudioUrl(_ url: String) {}
+    func applySubtitleStyle() {}
+    func destroyPlayer() {}
+    func refreshPlaybackState() {}
+}
+
+@MainActor
+private final class DeferredNextStreamResolver {
+    var onStart: (() -> Void)?
+    private var continuation: CheckedContinuation<PreparedNextStream?, Never>?
+
+    func resolve() async -> PreparedNextStream? {
+        onStart?()
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release(_ prepared: PreparedNextStream?) {
+        continuation?.resume(returning: prepared)
+        continuation = nil
+    }
+}
+
 final class PlayerControlsSettingsTests: XCTestCase {
     func testPlayerControlsSettingsKeysDefined() {
         XCTAssertEqual(SettingsKey.playerShowPiP, "nuvio.tv.settings.playback.showPiP")
@@ -1079,6 +1135,150 @@ extension PlayerControlsSettingsTests {
         // 4. Scrubbing must NOT engage; transport controls should remain visible
         XCTAssertFalse(model.isScrubbing, "Touch stroke initiated before pause must not engage scrub")
         XCTAssertTrue(model.showControls, "Controls must stay visible")
+    }
+
+    @MainActor
+    func testUndispatchedCachedLoadRejectsOldReadyPlaybackSample() {
+        let defaults = ProfileSettings.current
+        let previousCacheSetting = defaults.object(forKey: SettingsKey.hybridDiskCacheEnabled)
+        defaults.set(true, forKey: SettingsKey.hybridDiskCacheEnabled)
+
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer {
+            model.cancelStartupBenchmark()
+            model.shutdown()
+            if let previousCacheSetting {
+                defaults.set(previousCacheSetting, forKey: SettingsKey.hybridDiskCacheEnabled)
+            } else {
+                defaults.removeObject(forKey: SettingsKey.hybridDiskCacheEnabled)
+            }
+        }
+
+        coordinator.load(PlaybackLoadRequest(
+            videoURL: URL(string: "https://example.test/first.mkv")!
+        ))
+        let firstGeneration = coordinator.loadGeneration
+        XCTAssertFalse(coordinator.hasDispatchedCurrentLoad(generation: firstGeneration))
+
+        model.retryPlaybackStartup()
+        let pendingGeneration = coordinator.loadGeneration
+        XCTAssertGreaterThan(pendingGeneration, firstGeneration)
+        XCTAssertFalse(coordinator.hasDispatchedCurrentLoad(generation: pendingGeneration))
+
+        let oldReadyEngine = PlayerControlsTestEngine()
+        oldReadyEngine.isPlayerPlaying = true
+        oldReadyEngine.isTransportPlaying = true
+        oldReadyEngine.hasFirstFrameReadyForDisplay = true
+        oldReadyEngine.hasCoherentTimeSample = true
+        oldReadyEngine.durationMs = 3_600_000
+        oldReadyEngine.positionMs = 1_000
+        oldReadyEngine.videoFrameSize = CGSize(width: 1_920, height: 1_080)
+        model.pollForTesting(using: oldReadyEngine)
+
+        XCTAssertEqual(model.status, .buffering, "Old ready frames cannot start a load still preparing its cache")
+        XCTAssertFalse(model.canShowPauseOverlay)
+        XCTAssertFalse(model.showPauseOverlay)
+    }
+
+    @MainActor
+    func testNextEpisodeResolutionKeepsFreshClockAndCancelsPauseOverlayWork() async {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let model = PlayerViewModel(
+            sessionCoordinator: coordinator,
+            pauseOverlayDelaySeconds: 0.025
+        )
+        let resolver = DeferredNextStreamResolver()
+        let resolverStarted = expectation(description: "Next episode resolver starts")
+        resolver.onStart = { resolverStarted.fulfill() }
+        defer {
+            resolver.release(nil)
+            model.cancelStartupBenchmark()
+            model.shutdown()
+        }
+
+        let oldToken = PlaybackStartupTiming.start(title: "Current episode")
+        model.adoptStartupBenchmarkToken(oldToken)
+        let currentEpisode = NuvioVideo(id: "series:1:1", title: "Episode 1", season: 1, episode: 1)
+        let nextEpisode = NuvioVideo(
+            id: "series:1:2",
+            title: "Episode 2",
+            season: 1,
+            episode: 2,
+            released: "2024-01-01T00:00:00.000Z"
+        )
+        model.configureNextEpisode(
+            episodes: [currentEpisode, nextEpisode],
+            current: currentEpisode,
+            autoPlayEnabled: false,
+            autoPlayCountdownSeconds: 10,
+            resolver: { _, _ in await resolver.resolve() }
+        )
+        model.time = PlayerTime(current: 2_640, duration: 6_000)
+        model.status = .playing
+        model.pause()
+
+        let oldRequestDate = try! XCTUnwrap(PlaybackStartupTiming.requestDate(for: oldToken))
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        model.advance()
+
+        let nextToken = try! XCTUnwrap(model.startupBenchmarkToken)
+        let nextRequestDate = try! XCTUnwrap(PlaybackStartupTiming.requestDate(for: nextToken))
+        XCTAssertNotEqual(nextToken, oldToken)
+        XCTAssertGreaterThan(nextRequestDate, oldRequestDate)
+        XCTAssertLessThan(abs(Date().timeIntervalSince(nextRequestDate)), 1)
+        XCTAssertEqual(model.status, .buffering)
+        XCTAssertTrue(model.isAdvancingEpisode)
+        XCTAssertFalse(model.canShowPauseOverlay)
+
+        await fulfillment(of: [resolverStarted], timeout: 1)
+        let oldPausedReadyEngine = PlayerControlsTestEngine()
+        oldPausedReadyEngine.hasFirstFrameReadyForDisplay = true
+        oldPausedReadyEngine.videoFrameSize = CGSize(width: 1_920, height: 1_080)
+        oldPausedReadyEngine.hasCoherentTimeSample = true
+        oldPausedReadyEngine.durationMs = 6_000_000
+        oldPausedReadyEngine.positionMs = 2_640_000
+        model.pollForTesting(using: oldPausedReadyEngine)
+
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        model.pollForTesting(using: oldPausedReadyEngine)
+        XCTAssertEqual(model.status, .buffering, "Old ready/paused samples must not complete the next load")
+        XCTAssertTrue(model.isAdvancingEpisode)
+        XCTAssertFalse(model.canShowPauseOverlay)
+        XCTAssertFalse(model.showPauseOverlay, "A cancelled pause timer must not reopen the metadata sheet during resolution")
+
+        resolver.release(nil)
+        for _ in 0..<20 where model.status != .ended {
+            await Task.yield()
+        }
+        XCTAssertEqual(model.status, .ended, "A failed resolver should exit the guarded loading state")
+        XCTAssertFalse(model.showPauseOverlay)
+    }
+
+    @MainActor
+    func testSteadyPauseShowsMetadataAndPlaybackHidesIt() async {
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            pauseOverlayDelaySeconds: 0.025
+        )
+        defer {
+            model.cancelStartupBenchmark()
+            model.shutdown()
+        }
+
+        model.status = .playing
+        model.pause()
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertTrue(model.canShowPauseOverlay)
+        XCTAssertTrue(model.showPauseOverlay, "A steady user pause should still reveal metadata after the short delay")
+
+        model.play()
+        XCTAssertEqual(model.status, .playing)
+        XCTAssertFalse(model.canShowPauseOverlay)
+        XCTAssertFalse(model.showPauseOverlay, "Resuming playback must hide the pause metadata sheet")
     }
 
 

@@ -92,4 +92,45 @@ final class SceneNavigationTests: XCTestCase {
         viewModel.cancelScrub()
         XCTAssertFalse(viewModel.isScrubbing)
     }
+    
+    func testSceneInfoTabPlaybackTelemetryPopulated() {
+        let viewModel = PlayerViewModel()
+        viewModel.status = .playing
+        
+        viewModel.openScene()
+        XCTAssertTrue(viewModel.showScenePanel)
+        
+        // Assert playbackInfo is populated
+        let playbackInfo = viewModel.sceneViewModel.playbackInfo
+        XCTAssertNotNil(playbackInfo, "Playback info must be populated when opening Scene")
+        XCTAssertEqual(playbackInfo?.engine, "AetherEngine")
+        XCTAssertEqual(playbackInfo?.version, "7.35.1")
+        XCTAssertEqual(playbackInfo?.videoCodec, "HEVC")
+        XCTAssertEqual(playbackInfo?.resolution, "3840 × 2160")
+        XCTAssertEqual(playbackInfo?.frameRate, "23.976 fps")
+        XCTAssertEqual(playbackInfo?.dynamicRange, "SDR")
+        XCTAssertNil(playbackInfo?.dolbyVisionProfile)
+        XCTAssertEqual(playbackInfo?.videoBitrate, "51.28 Mbps")
+        XCTAssertEqual(playbackInfo?.container, "matroska,webm")
+        XCTAssertEqual(playbackInfo?.videoDecoder, "VideoToolbox HEVC (HW)")
+        XCTAssertEqual(playbackInfo?.audioCodec, "TRUEHD")
+        XCTAssertEqual(playbackInfo?.audioChannels, "Surround (7.1ch)")
+        XCTAssertEqual(playbackInfo?.audioLanguage, "ENG")
+        XCTAssertEqual(playbackInfo?.audioBitrate, "3.26 Mbps")
+        XCTAssertEqual(playbackInfo?.audioDecoder, "TRUEHD Atmos → APAC 9.1.6")
+        
+        // Test Dolby Vision fallback telemetry model
+        let dvInfo = ScenePlaybackInfo(
+            dynamicRange: "Dolby Vision → HDR10",
+            dolbyVisionProfile: "5"
+        )
+        viewModel.sceneViewModel.updatePlaybackInfo(dvInfo)
+        XCTAssertEqual(viewModel.sceneViewModel.playbackInfo?.dynamicRange, "Dolby Vision → HDR10")
+        XCTAssertEqual(viewModel.sceneViewModel.playbackInfo?.dolbyVisionProfile, "5")
+        
+        // Switching to info tab maintains playback telemetry
+        viewModel.sceneViewModel.selectTab(.info)
+        XCTAssertEqual(viewModel.sceneViewModel.selectedTab, .info)
+        XCTAssertNotNil(viewModel.sceneViewModel.playbackInfo)
+    }
 }

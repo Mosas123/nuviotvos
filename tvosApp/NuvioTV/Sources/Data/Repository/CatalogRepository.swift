@@ -1579,22 +1579,6 @@ final class CinemetaCatalogRepository: CatalogRepository {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        var manifestSources: [(name: String, manifestURL: URL, isAddon: Bool)] = []
-        if Self.isCinemetaEnabled {
-            manifestSources.append((
-                name: "Cinemeta",
-                manifestURL: baseURL.appendingPathComponent("manifest.json"),
-                isAddon: false
-            ))
-        }
-        for manifestURL in Self.configuredStreamAddonManifestURLs {
-            manifestSources.append((
-                name: Self.streamAddonName(for: manifestURL),
-                manifestURL: manifestURL,
-                isAddon: true
-            ))
-        }
-
         struct SearchTarget {
             let addonName: String
             let baseURL: URL
@@ -1602,26 +1586,69 @@ final class CinemetaCatalogRepository: CatalogRepository {
             let catalogId: String
             let isAddon: Bool
         }
+
         var targets: [SearchTarget] = []
-        for source in manifestSources {
-            guard let manifest = await manifest(for: source.manifestURL) else { continue }
-            let isCinemeta = source.name == "Cinemeta"
-                || manifest.id.caseInsensitiveCompare(Self.cinemetaAddonId) == .orderedSame
-                || source.manifestURL.host?.contains("cinemeta") == true
-            let isAddon = source.isAddon && !isCinemeta
-            let sourceBaseURL = source.manifestURL.lastPathComponent.lowercased() == "manifest.json"
-                ? source.manifestURL.deletingLastPathComponent()
-                : source.manifestURL
-            for catalog in manifest.catalogs ?? [] where catalog.supportsSearch {
-                targets.append(
-                    SearchTarget(
-                        addonName: manifest.displayName ?? source.name,
-                        baseURL: sourceBaseURL,
-                        type: catalog.type,
-                        catalogId: catalog.id,
-                        isAddon: isAddon
-                    )
+
+        // 1. Cinemeta default targets (always available immediately when enabled)
+        if Self.isCinemetaEnabled {
+            targets.append(
+                SearchTarget(
+                    addonName: "Cinemeta",
+                    baseURL: baseURL,
+                    type: "movie",
+                    catalogId: "top",
+                    isAddon: false
                 )
+            )
+            targets.append(
+                SearchTarget(
+                    addonName: "Cinemeta",
+                    baseURL: baseURL,
+                    type: "series",
+                    catalogId: "top",
+                    isAddon: false
+                )
+            )
+        }
+
+        // 2. Discover search-capable targets from configured add-ons in parallel
+        // with a short deadline (2.5s) so slow/offline add-on hosts never stall search.
+        let candidateURLs = Self.configuredStreamAddonManifestURLs
+        if !candidateURLs.isEmpty {
+            let manifests: [URL: AddonManifest] = await withTaskGroup(of: [URL: AddonManifest].self) { group in
+                group.addTask {
+                    await self.loadManifestsConcurrently(urls: candidateURLs)
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    return [:]
+                }
+                let first = await group.next() ?? [:]
+                group.cancelAll()
+                return first
+            }
+
+            for manifestURL in candidateURLs {
+                guard let manifest = manifests[manifestURL] else { continue }
+                let isCinemeta = manifest.id.caseInsensitiveCompare(Self.cinemetaAddonId) == .orderedSame
+                    || manifestURL.host?.contains("cinemeta") == true
+                guard !isCinemeta else { continue }
+
+                let sourceBaseURL = manifestURL.lastPathComponent.lowercased() == "manifest.json"
+                    ? manifestURL.deletingLastPathComponent()
+                    : manifestURL
+
+                for catalog in manifest.catalogs ?? [] where catalog.supportsSearch {
+                    targets.append(
+                        SearchTarget(
+                            addonName: manifest.displayName ?? Self.streamAddonName(for: manifestURL),
+                            baseURL: sourceBaseURL,
+                            type: catalog.type,
+                            catalogId: catalog.id,
+                            isAddon: true
+                        )
+                    )
+                }
             }
         }
 
@@ -1632,18 +1659,34 @@ final class CinemetaCatalogRepository: CatalogRepository {
             ]
         }
 
+        guard !Task.isCancelled else { return [] }
+
+        // 3. Query all targets concurrently with bounded timeout per target (5s)
         let rawResults = await withTaskGroup(of: (Int, [NuvioMeta]).self, returning: [NuvioMeta].self) { group in
             for (index, target) in targets.enumerated() {
                 group.addTask {
+                    guard !Task.isCancelled else { return (index, []) }
                     do {
-                        let items = try await self.fetchCatalog(
-                            sourceBaseURL: target.baseURL,
-                            type: target.type,
-                            catalogId: target.catalogId,
-                            skip: nil,
-                            search: trimmed,
-                            genre: nil
-                        )
+                        let items: [NuvioMeta] = try await withThrowingTaskGroup(of: [NuvioMeta].self) { fetchGroup in
+                            fetchGroup.addTask {
+                                try await self.fetchCatalog(
+                                    sourceBaseURL: target.baseURL,
+                                    type: target.type,
+                                    catalogId: target.catalogId,
+                                    skip: nil,
+                                    search: trimmed,
+                                    genre: nil
+                                )
+                            }
+                            fetchGroup.addTask {
+                                try await Task.sleep(nanoseconds: 5_000_000_000)
+                                try Task.checkCancellation()
+                                throw URLError(.timedOut)
+                            }
+                            guard let first = try await fetchGroup.next() else { return [] }
+                            fetchGroup.cancelAll()
+                            return first
+                        }
                         let tagged = target.isAddon ? items.map { $0.withIsFromAddon(true) } : items
                         return (index, tagged)
                     } catch {
@@ -1664,8 +1707,12 @@ final class CinemetaCatalogRepository: CatalogRepository {
             return merged
         }
 
-        let localized = await TmdbDetailsService.localizedMetadata(for: rawResults)
-        let deduplicated = Self.deduplicatedSearchResults(localized)
+        guard !Task.isCancelled else { return [] }
+
+        // Return fast, deduplicated search results immediately.
+        // Background enrichment (SearchResultEnrichment) handles artwork & TMDB localization
+        // asynchronously for visible cards without blocking the search spinner.
+        let deduplicated = Self.deduplicatedSearchResults(rawResults)
         cacheMetadata(deduplicated)
         return deduplicated
     }
@@ -2437,6 +2484,7 @@ private struct AddonManifest: Decodable {
     let idPrefixes: [String]?
     let resources: [AddonManifestResource]?
     let catalogs: [AddonManifestCatalog]?
+    let ratingSources: [AddonRatingSource]?
 
     var displayName: String? {
         name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty

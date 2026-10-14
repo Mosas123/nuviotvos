@@ -22,6 +22,7 @@ struct DiscoverSection: View {
     var onFocusExit: (() -> Void)? = nil
     @StateObject private var viewModel = DiscoverViewModel()
     @FocusState private var focusedCardID: String?
+    @FocusState private var focusedFilterID: String?
     @State private var focusedElementID: String?
     /// Cards can briefly blur while a rapid remote swipe realizes the next
     /// grid cell. Only treat it as leaving Discover if it remains unfocused.
@@ -40,6 +41,7 @@ struct DiscoverSection: View {
     @State private var overlayRestoreCardID: String?
     @State private var overlayRestoreGeneration = 0
     @State private var scrollToTopGeneration = 0
+    @State private var filterResultHandoffGeneration = 0
     @Environment(\.isEnabled) private var isEnabled
     @Binding private var parentTransitionActive: Bool
     @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
@@ -88,7 +90,9 @@ struct DiscoverSection: View {
                 onCardFocus?()
             } else if newValue?.hasPrefix("filter:") == true {
                 onFilterFocus?()
-            } else if oldValue?.hasPrefix("filter:") == true, newValue == nil {
+            } else if oldValue?.hasPrefix("filter:") == true,
+                      newValue == nil,
+                      !isBesideKeyboard {
                 // Lazy grid cells can briefly disappear from the focus tree
                 // during a rapid scroll. A card blur is therefore not proof
                 // that focus left Discover; only the fixed filter bar can
@@ -161,13 +165,47 @@ struct DiscoverSection: View {
         focusedElementID = "card:\(first.id)"
     }
 
+    private func transferFilterFocusToFirstResult() {
+        guard isEnabled,
+              isBesideKeyboard,
+              !parentTransitionActive,
+              overlayRestoreCardID == nil,
+              !viewModel.isLoading,
+              let firstItem = visibleItems.first else { return }
+
+        filterResultHandoffGeneration &+= 1
+        let generation = filterResultHandoffGeneration
+        restoreArmTask?.cancel()
+        shouldRestoreFocus = false
+        scrollToTopGeneration &+= 1
+
+        focusedFilterID = nil
+        focusedElementID = "card:\(firstItem.id)"
+        focusedCardID = firstItem.id
+
+        DispatchQueue.main.async {
+            guard filterResultHandoffGeneration == generation,
+                  isEnabled,
+                  isBesideKeyboard,
+                  !parentTransitionActive,
+                  overlayRestoreCardID == nil,
+                  !viewModel.isLoading,
+                  visibleItems.first?.id == firstItem.id else { return }
+            focusedFilterID = nil
+            focusedElementID = "card:\(firstItem.id)"
+            focusedCardID = firstItem.id
+        }
+    }
+
     // MARK: - Filters (dropdown menus)
 
     private var filterBar: some View {
         HStack(spacing: 16) {
             FilterMenu(
                 label: viewModel.currentTypeTitle,
-                onFocusChange: { updateDiscoverFocus("filter:type", isFocused: $0) }
+                onFocusChange: { updateDiscoverFocus("filter:type", isFocused: $0) },
+                externalFocus: $focusedFilterID,
+                focusValue: "filter:type"
             ) {
                 ForEach(viewModel.typeOptions, id: \.self) { type in
                     Button { viewModel.setType(type) } label: {
@@ -179,7 +217,9 @@ struct DiscoverSection: View {
             if !viewModel.catalogOptions.isEmpty {
                 FilterMenu(
                     label: viewModel.selectedCatalog?.catalogName ?? L10n.string("tvos_discover_popular", fallback: "Popular"),
-                    onFocusChange: { updateDiscoverFocus("filter:sort", isFocused: $0) }
+                    onFocusChange: { updateDiscoverFocus("filter:sort", isFocused: $0) },
+                    externalFocus: $focusedFilterID,
+                    focusValue: "filter:sort"
                 ) {
                     ForEach(viewModel.catalogOptions) { catalog in
                         Button { viewModel.setCatalog(catalog) } label: {
@@ -192,7 +232,9 @@ struct DiscoverSection: View {
             if !viewModel.genreOptions.isEmpty {
                 FilterMenu(
                     label: viewModel.selectedGenre ?? L10n.string("tvos_discover_all_genres", fallback: "All Genres"),
-                    onFocusChange: { updateDiscoverFocus("filter:genre", isFocused: $0) }
+                    onFocusChange: { updateDiscoverFocus("filter:genre", isFocused: $0) },
+                    externalFocus: $focusedFilterID,
+                    focusValue: "filter:genre"
                 ) {
                     if !viewModel.isGenreRequired {
                         Button { viewModel.setGenre(nil) } label: {
@@ -208,6 +250,15 @@ struct DiscoverSection: View {
                         }
                     }
                 }
+            }
+        }
+        .onMoveCommand { direction in
+            guard isBesideKeyboard else { return }
+            let isTypeFilter = focusedFilterID == "filter:type" || focusedElementID == "filter:type"
+            if direction == .left, isTypeFilter {
+                onFocusExit?()
+            } else if direction == .down, isTypeFilter {
+                transferFilterFocusToFirstResult()
             }
         }
     }
@@ -255,14 +306,23 @@ struct DiscoverSection: View {
                     .id("discover-grid-top")
 
                 LazyVGrid(columns: columns, alignment: .leading, spacing: posterGap) {
-                    ForEach(visibleItems) { item in
+                    ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
                         DiscoverCard(
                             posterWidth: posterWidth,
                             meta: item,
                             externalFocus: $focusedCardID,
                             onFocusChange: { updateDiscoverFocus("card:\(item.id)", isFocused: $0) },
                             retainFocusAppearance: overlayRestoreCardID == item.id,
-                            onLongPress: onLongPress.map { cb in { cb(item) } }
+                            onLongPress: onLongPress.map { cb in { cb(item) } },
+                            onMove: { direction in
+                                if isBesideKeyboard {
+                                    let colCount = columnCount ?? 5
+                                    if index % colCount == 0, direction == .left {
+                                        focusedCardID = nil
+                                        onFocusExit?()
+                                    }
+                                }
+                            }
                         ) {
                             parentTransitionActive = true
                             overlayRestoreCardID = item.id
@@ -295,14 +355,24 @@ struct DiscoverSection: View {
         // Movies / Popular / All Genres menus.
         .scrollClipDisabled(false)
         .focusSection()
-        .defaultFocusIfAvailable($focusedCardID, shouldRestoreFocus ? lastFocusedCardID : nil)
+        .defaultFocusIfAvailable($focusedCardID, defaultCardFocusID)
+    }
+
+    private var defaultCardFocusID: String? {
+        if shouldRestoreFocus,
+           let saved = lastFocusedCardID,
+           visibleItems.contains(where: { $0.id == saved }) {
+            return saved
+        }
+        return visibleItems.first?.id
     }
 
     private var posterWidth: CGFloat { DiscoverGridMetrics.posterWidth }
-    private var posterGap: CGFloat { isBesideKeyboard || columnCount != nil ? 24 : DiscoverGridMetrics.posterGap }
+    private var posterGap: CGFloat { isBesideKeyboard || columnCount != nil ? 28 : DiscoverGridMetrics.posterGap }
 
     private var columns: [GridItem] {
-        if let count = isBesideKeyboard ? 5 : columnCount {
+        let count = columnCount ?? (isBesideKeyboard ? 5 : nil)
+        if let count {
             return Array(repeating: GridItem(.fixed(posterWidth), spacing: posterGap, alignment: .top), count: count)
         }
         return [GridItem(
@@ -372,6 +442,8 @@ struct DiscoverSection: View {
 struct FilterMenu<MenuContent: View>: View {
     let label: String
     var onFocusChange: ((Bool) -> Void)? = nil
+    var externalFocus: FocusState<String?>.Binding? = nil
+    var focusValue: String = ""
     @ViewBuilder var menu: () -> MenuContent
     @State private var showOptions = false
     @FocusState private var focused: Bool
@@ -380,6 +452,7 @@ struct FilterMenu<MenuContent: View>: View {
         Button { showOptions = true } label: { chipLabel }
             .buttonStyle(PosterCardButtonStyle())
             .focused($focused)
+            .modifier(ExternalFocusBinding(binding: externalFocus, id: focusValue))
             .focusEffectDisabledIfAvailable()
             .scaleEffect(focused ? 1.05 : 1.0)
             .animation(.easeOut(duration: 0.14), value: focused)
@@ -416,6 +489,7 @@ private struct DiscoverCard: View {
     var onFocusChange: ((Bool) -> Void)? = nil
     var retainFocusAppearance = false
     var onLongPress: (() -> Void)? = nil
+    var onMove: ((MoveCommandDirection) -> Void)? = nil
     let action: () -> Void
     @FocusState private var focused: Bool
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
@@ -486,6 +560,7 @@ private struct DiscoverCard: View {
         .focused($focused)
         .modifier(ExternalFocusBinding(binding: externalFocus, id: meta.id))
         .focusEffectDisabledIfAvailable()
+        .modifier(OptionalMoveCommandHandler(handler: onMove))
         .titleActionsContextMenu(
             meta: meta,
             onOpenDetails: action
