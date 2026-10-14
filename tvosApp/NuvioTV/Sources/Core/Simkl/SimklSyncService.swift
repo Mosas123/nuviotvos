@@ -1975,6 +1975,14 @@ struct SimklProgressTransferService {
                         body: body
                     )
                 }
+                guard !Task.isCancelled else {
+                    return SimklProgressTransferResult(
+                        total: total,
+                        transferred: transferred,
+                        skipped: skipped,
+                        failed: total - transferred - skipped
+                    )
+                }
                 if (200..<300).contains(response.status) {
                     transferred += 1
                     SimklSyncCache.addPlayback(item, progress: percentage, store: store)
@@ -2011,6 +2019,7 @@ struct SimklProgressTransferService {
             await progress(100)
         }
         await MainActor.run {
+            guard !Task.isCancelled else { return }
             NotificationCenter.default.post(
                 name: TraktSettingsStore.continueWatchingChangedNotification,
                 object: nil
