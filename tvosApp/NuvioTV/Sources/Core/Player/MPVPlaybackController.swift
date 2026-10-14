@@ -477,6 +477,15 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var activeSeekWatchdog: ActiveSeekWatchdog?
     private var seekWatchdogSequence: Int = 0
     private var isLocalOrDiskCacheStream: Bool = false
+    private var pendingCacheProfile: PlaybackCacheProfile = .auto
+    private var mpvPacketCacheDirectory: URL?
+    private var mpvPacketDiskCacheAvailable = false
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+    private let memoryWatchdog = MPVMemoryWatchdog()
+    private var memoryDiagnosticSessionID = UUID().uuidString
+    private var memoryDiagnosticCacheMode = "setup"
+    private var lastMemoryEngineSampleTime: CFAbsoluteTime = 0
+#endif
 
     var currentSubtitleText: String? {
         if let subText = getString("sub-text"), !subText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -553,6 +562,14 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         view.layer.addSublayer(metalLayer)
         layoutMetalLayer()
 
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        memoryDiagnosticCacheMode = "setup"
+        memoryWatchdog.start(
+            sessionID: memoryDiagnosticSessionID,
+            cacheMode: memoryDiagnosticCacheMode,
+            event: "mpv_setup_begin"
+        )
+#endif
         setupMpv()
         setupNotifications()
     }
@@ -595,10 +612,14 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         mpv = mpv_create()
         guard mpv != nil else {
             print("[MPV] Failed to create mpv instance")
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+            memoryWatchdog.record(event: "mpv_create_failed")
+#endif
             return
         }
 
         MPVStreamProtocolBridge.register(on: mpv)
+        mpvPacketCacheDirectory = PlaybackCacheSettings.prepareMPVPacketCacheDirectory()
 
         checkError(mpv_request_log_messages(mpv, "warn"))
 
@@ -621,19 +642,30 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         // continue as video-only playback.
         checkError(mpv_set_option_string(mpv, "audio-fallback-to-null", "no"))
 
-        // Network buffering. Byte caps (Settings → Playback → Network Cache)
-        // are the hard limit; keep time windows modest so we do not encourage
-        // filling multi‑hundred‑MB demuxer caches on every debrid stream.
-        #if targetEnvironment(simulator)
-        // MoltenVK's tvOS simulator PBO path allocates every uploaded video
-        // frame through MTLSim XPC and can trap in `_xpc_api_misuse` for real
-        // streams. Keep the simulator light and allow VideoToolbox's Metal
-        // texture interop; physical Apple TV keeps the user's cache setting.
-        let cache = PlaybackCacheSettings(forwardBuffer: "64MiB", backBuffer: "16MiB")
-        #else
-        let cache = PlaybackCacheSettings.current
-        #endif
+        // Keep MPV's native RAM cache bounded; the network-cache profile sets
+        // the remote disk-cache readahead window at each load.
+        let cache = PlaybackCacheSettings(forwardBuffer: "32MiB", backBuffer: "16MiB")
         checkError(mpv_set_option_string(mpv, "cache", "yes"), context: "cache")
+        var packetCacheOptionStatuses = [CInt]()
+        if let packetCacheDirectory = mpvPacketCacheDirectory {
+            packetCacheOptionStatuses.append(mpv_set_option_string(mpv, "demuxer-cache-dir", packetCacheDirectory.path))
+            packetCacheOptionStatuses.append(mpv_set_option_string(mpv, "demuxer-cache-unlink-files", "immediate"))
+            packetCacheOptionStatuses.append(mpv_set_option_string(mpv, "cache-on-disk", "yes"))
+        } else {
+            packetCacheOptionStatuses.append(mpv_set_option_string(mpv, "cache-on-disk", "no"))
+        }
+        for (index, status) in packetCacheOptionStatuses.enumerated() {
+            let option = mpvPacketCacheDirectory == nil
+                ? "cache-on-disk"
+                : ["demuxer-cache-dir", "demuxer-cache-unlink-files", "cache-on-disk"][index]
+            checkError(status, context: option)
+        }
+        mpvPacketDiskCacheAvailable = mpvPacketCacheDirectory != nil && packetCacheOptionStatuses.allSatisfy { $0 >= 0 }
+        if !mpvPacketDiskCacheAvailable {
+            let disableStatus = mpv_set_option_string(mpv, "cache-on-disk", "no")
+            checkError(disableStatus, context: "cache-on-disk=no fallback")
+            print("[MPVCache] Native packet cache unavailable during setup; using bounded RAM fallback when needed")
+        }
         // ~2 minutes of readahead intent; demuxer-max-bytes still hard-caps RAM.
         checkError(mpv_set_option_string(mpv, "cache-secs", "120"), context: "cache-secs")
         checkError(mpv_set_option_string(mpv, "demuxer-readahead-secs", "120"), context: "demuxer-readahead-secs")
@@ -684,6 +716,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         checkError(mpv_set_option_string(mpv, "target-trc", "auto"))
 
         checkError(mpv_initialize(mpv))
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        memoryWatchdog.record(event: "mpv_initialized")
+#endif
         applySubtitleStyle()
 
         mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG)
@@ -718,6 +753,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                                                name: UIApplication.willEnterForegroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
                                                name: UIApplication.didBecomeActiveNotification, object: nil)
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleMemoryWarning),
+                                               name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+#endif
     }
 
     private func suspendPlaybackForBackgroundOrInactive() {
@@ -809,6 +848,12 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         restorePlaybackFromBackgroundOrInactive()
     }
 
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+    @objc private func handleMemoryWarning() {
+        memoryWatchdog.record(event: "memory_warning")
+    }
+#endif
+
     private func publishLifecycleSnapshot() {
         if let duration = lifecycleDurationMs, duration > 0 {
             durationMs = duration
@@ -830,6 +875,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         pendingLoadConfiguration = nil
         pendingHTTPHeaders = [:]
         pendingIsLiveStream = false
+        pendingCacheProfile = .fromSettings(ProfileSettings.current.string(forKey: SettingsKey.networkCache))
         pendingURL = urlString
         if Thread.isMainThread {
             attemptStartPendingLoad()
@@ -843,6 +889,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         pendingAudioURL = request.audioURL?.absoluteString
         pendingHTTPHeaders = request.httpHeaders
         pendingIsLiveStream = request.isLiveStream
+        pendingCacheProfile = request.cacheProfile
         pendingURL = request.videoURL.absoluteString
         currentMediaTitle = request.streamName
         currentMediaArtist = request.streamDescription
@@ -885,6 +932,12 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private func attemptStartPendingLoad() {
         guard let url = pendingURL, mpv != nil else { return }
         guard isViewLoaded, view.bounds.width > 1, view.bounds.height > 1 else { return }
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        memoryDiagnosticSessionID = UUID().uuidString
+        memoryDiagnosticCacheMode = "pending"
+        memoryWatchdog.updateContext(sessionID: memoryDiagnosticSessionID, cacheMode: memoryDiagnosticCacheMode)
+        memoryWatchdog.record(event: "load_begin")
+#endif
         pendingURL = nil
         applyHTTPHeaders(pendingHTTPHeaders, isLiveStream: pendingIsLiveStream)
         pendingHTTPHeaders = [:]
@@ -912,26 +965,58 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         clearDisplayCriteria()
         isPlayerLoading = true
         isPlayerEnded = false
-        // Adjust demuxer RAM buffers: when reading from local disk cache (127.0.0.1) or local file,
-        // 32 MiB is ample runway with zero latency, preventing 256+ MiB duplicate RAM allocation on tvOS.
-        let isLocalOrDiskCache = url.hasPrefix("http://127.0.0.1:") || url.hasPrefix("http://localhost:") || url.hasPrefix("file://")
-        self.isLocalOrDiskCacheStream = isLocalOrDiskCache
-        if isLocalOrDiskCache {
-            setStringProperty("demuxer-max-bytes", "32MiB")
-            setStringProperty("demuxer-max-back-bytes", "16MiB")
-            setStringProperty("cache-secs", "30")
-            setStringProperty("demuxer-readahead-secs", "30")
+        let sourceURL = URL(string: url) ?? URL(fileURLWithPath: url)
+        let cachePolicy = MPVPlaybackCachePolicy.resolve(
+            url: sourceURL,
+            isLiveStream: pendingIsLiveStream,
+            profile: pendingCacheProfile,
+            nativeDiskAvailable: mpvPacketDiskCacheAvailable
+        )
+        // Keep MPV's RAM packet cache bounded for all sources; remote streams
+        // can use libmpv's separate sandboxed disk packet cache.
+        var nativeDiskFlag: CInt = cachePolicy.nativeDiskEnabled ? 1 : 0
+        let nativeDiskStatus = mpv_set_property(mpv, "cache-on-disk", MPV_FORMAT_FLAG, &nativeDiskFlag)
+        checkError(nativeDiskStatus, context: "cache-on-disk")
+        var effectiveNativeDiskEnabled: Bool?
+        if nativeDiskStatus >= 0 {
+            effectiveNativeDiskEnabled = cachePolicy.nativeDiskEnabled
         } else {
-            #if targetEnvironment(simulator)
-            let cache = PlaybackCacheSettings(forwardBuffer: "64MiB", backBuffer: "16MiB")
-            #else
-            let cache = PlaybackCacheSettings.current
-            #endif
-            setStringProperty("demuxer-max-bytes", cache.forwardBuffer)
-            setStringProperty("demuxer-max-back-bytes", cache.backBuffer)
-            setStringProperty("cache-secs", "120")
-            setStringProperty("demuxer-readahead-secs", "120")
+            mpvPacketDiskCacheAvailable = false
+            var disabledFlag: CInt = 0
+            let disableStatus = mpv_set_property(mpv, "cache-on-disk", MPV_FORMAT_FLAG, &disabledFlag)
+            checkError(disableStatus, context: "cache-on-disk=no fallback")
+            if disableStatus >= 0 {
+                effectiveNativeDiskEnabled = false
+            } else {
+                var currentFlag: CInt = 0
+                let readStatus = mpv_get_property(mpv, "cache-on-disk", MPV_FORMAT_FLAG, &currentFlag)
+                effectiveNativeDiskEnabled = readStatus >= 0 ? currentFlag != 0 : nil
+            }
         }
+        setStringProperty("demuxer-max-bytes", cachePolicy.forwardBuffer)
+        setStringProperty("demuxer-max-back-bytes", cachePolicy.backBuffer)
+        setStringProperty("cache-secs", String(cachePolicy.cacheSeconds))
+        setStringProperty("demuxer-readahead-secs", String(cachePolicy.cacheSeconds))
+        let nativeDiskLabel = effectiveNativeDiskEnabled.map { String($0) } ?? "unknown"
+        print("[MPVCache] source=\(cachePolicy.source) nativeDisk=\(nativeDiskLabel) RAM=\(cachePolicy.forwardBuffer)/\(cachePolicy.backBuffer) cache-secs=\(cachePolicy.cacheSeconds)")
+        let isLocalOrDiskCache = cachePolicy.source == .localOrLoopback
+        self.isLocalOrDiskCacheStream = isLocalOrDiskCache
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        switch cachePolicy.source {
+        case .localOrLoopback:
+            memoryDiagnosticCacheMode = cachePolicy.diagnosticMode
+        case .remote:
+            memoryDiagnosticCacheMode = effectiveNativeDiskEnabled == true
+                ? "network_disk"
+                : (effectiveNativeDiskEnabled == false ? "network_ram_fallback" : "network_cache_state_unknown")
+        case .liveRemote:
+            memoryDiagnosticCacheMode = effectiveNativeDiskEnabled == true
+                ? "live_network_disk"
+                : (effectiveNativeDiskEnabled == false ? "live_network_ram_fallback" : "live_network_cache_state_unknown")
+        }
+        memoryWatchdog.updateContext(sessionID: memoryDiagnosticSessionID, cacheMode: memoryDiagnosticCacheMode)
+        memoryWatchdog.record(event: "load_start")
+#endif
 
         // Commit seek, tracks, controls and autoplay together at FILE_LOADED.
         setFlag("pause", true)
@@ -955,6 +1040,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     func seekToMs(_ ms: Int64) {
         guard mpv != nil else { return }
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        memoryWatchdog.record(event: "seek")
+#endif
         seekWatchdogSequence &+= 1
         let seekId = seekWatchdogSequence
         let now = CFAbsoluteTimeGetCurrent()
@@ -1421,6 +1509,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func destroyPlayer() {
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        memoryWatchdog.stop(event: "destroy")
+#endif
         NotificationCenter.default.removeObserver(self)
         pendingURL = nil
         subtitleTranslationState.reset()
@@ -1453,6 +1544,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     deinit {
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        memoryWatchdog.stop(event: "deinit")
+#endif
         NotificationCenter.default.removeObserver(self)
         if let ctx = mpv {
             mpv = nil
@@ -1472,6 +1566,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             publishLifecycleSnapshot()
             return
         }
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+        refreshMemoryWatchdogEngineSnapshotIfDue()
+#endif
 
         let duration = readDoubleProperty("duration")
         let position = readDoubleProperty("time-pos")
@@ -2106,8 +2203,14 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                     DispatchQueue.main.async { self.updateState() }
                 case MPV_EVENT_START_FILE:
                     self.clearPlaybackError()
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+                    self.memoryWatchdog.record(event: "start_file")
+#endif
                 case MPV_EVENT_FILE_LOADED:
                     DispatchQueue.main.async {
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+                        self.memoryWatchdog.record(event: "file_loaded")
+#endif
                         self.clearPlaybackError()
                         guard !self.rejectUnsupportedSimulatorCodecIfNeeded() else { return }
                         self.isPlayerLoading = false
@@ -2124,7 +2227,12 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                     // change — the earliest point video-params/* is reliable.
                     // A short retry covers the race where it fires before the
                     // view is attached to a UIWindow on physical Apple TV.
-                    DispatchQueue.main.async { self.scheduleDisplayCriteriaProbe() }
+                    DispatchQueue.main.async {
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+                        self.memoryWatchdog.record(event: "video_reconfig")
+#endif
+                        self.scheduleDisplayCriteriaProbe()
+                    }
                 case MPV_EVENT_END_FILE:
                     DispatchQueue.main.async {
                         self.subtitleTranslationState.cancelPendingTranslations()
@@ -2133,12 +2241,21 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                         let endFile = UnsafePointer<mpv_event_end_file>(OpaquePointer(data)).pointee
                         if endFile.reason == MPV_END_FILE_REASON_EOF {
                             self.setCleanEndState(true)
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+                            self.memoryWatchdog.record(event: "end_file_eof")
+#endif
                         } else if endFile.reason == MPV_END_FILE_REASON_ERROR {
                             let errorText = String(cString: mpv_error_string(endFile.error))
                             self.setPlaybackError("[mpv] \(errorText)")
                             print("[MPV] End file error: \(errorText)")
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+                            self.memoryWatchdog.record(event: "end_file_error")
+#endif
                         } else {
                             self.setCleanEndState(false)
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+                            self.memoryWatchdog.record(event: "end_file_other")
+#endif
                         }
                     }
                 case MPV_EVENT_SHUTDOWN:
@@ -2202,6 +2319,60 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard result >= 0, data.isFinite else { return nil }
         return data
     }
+
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+    private func refreshMemoryWatchdogEngineSnapshotIfDue() {
+        guard Thread.isMainThread, mpv != nil else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastMemoryEngineSampleTime >= 1 else { return }
+        lastMemoryEngineSampleTime = now
+
+        memoryWatchdog.updateEngineSnapshot(MPVMemoryEngineSnapshot(
+            sampledAt: Date(),
+            cacheTotalBytes: readOptionalInt64Property("demuxer-cache-state/total-bytes"),
+            cacheForwardBytes: readOptionalInt64Property("demuxer-cache-state/fw-bytes"),
+            cacheDurationSeconds: readDoubleProperty("demuxer-cache-duration"),
+            inputBytesPerSecond: readDoubleProperty("cache-speed"),
+            timePositionSeconds: readDoubleProperty("time-pos"),
+            coreIdle: readOptionalFlagProperty("core-idle"),
+            eofReached: readOptionalFlagProperty("eof-reached"),
+            cacheReaderIdle: readOptionalFlagProperty("demuxer-cache-state/idle"),
+            cacheReaderEOF: readOptionalFlagProperty("demuxer-cache-state/eof"),
+            cacheUnderrun: readOptionalFlagProperty("demuxer-cache-state/underrun"),
+            paused: readOptionalFlagProperty("pause"),
+            seeking: readOptionalFlagProperty("seeking"),
+            pausedForCache: readOptionalFlagProperty("paused-for-cache"),
+            width: readOptionalInt64Property("video-params/w").flatMap { Int(exactly: $0) },
+            height: readOptionalInt64Property("video-params/h").flatMap { Int(exactly: $0) },
+            codec: readOptionalStringProperty("video-codec"),
+            hardwareDecoder: readOptionalStringProperty("hwdec-current"),
+            demuxerMaxBytes: readOptionalStringProperty("demuxer-max-bytes"),
+            demuxerMaxBackBytes: readOptionalStringProperty("demuxer-max-back-bytes"),
+            localOrDiskCache: isLocalOrDiskCacheStream
+        ))
+    }
+
+    private func readOptionalInt64Property(_ name: String) -> Int64? {
+        guard mpv != nil else { return nil }
+        var value = Int64()
+        guard mpv_get_property(mpv, name, MPV_FORMAT_INT64, &value) >= 0 else { return nil }
+        return value
+    }
+
+    private func readOptionalFlagProperty(_ name: String) -> Bool? {
+        guard mpv != nil else { return nil }
+        var value = Int64()
+        guard mpv_get_property(mpv, name, MPV_FORMAT_FLAG, &value) >= 0 else { return nil }
+        return value > 0
+    }
+
+    private func readOptionalStringProperty(_ name: String) -> String? {
+        guard mpv != nil, let value = mpv_get_property_string(mpv, name) else { return nil }
+        defer { mpv_free(value) }
+        let result = String(cString: value)
+        return result.isEmpty ? nil : result
+    }
+#endif
 
     private func getDouble(_ name: String) -> Double {
         readDoubleProperty(name) ?? 0

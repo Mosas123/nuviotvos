@@ -17,6 +17,7 @@ final class SceneViewModel: ObservableObject {
     @Published var infoOverview: String = ""
     @Published var infoRuntime: String? = nil
     @Published var nextEpisode: NuvioVideo? = nil
+    @Published var playbackInfo: ScenePlaybackInfo? = nil
     
     @Published var castCandidates: [SceneCastCandidate] = []
     
@@ -54,7 +55,8 @@ final class SceneViewModel: ObservableObject {
         year: Int?,
         overview: String?,
         runtime: String?,
-        nextEpisode: NuvioVideo?
+        nextEpisode: NuvioVideo?,
+        playbackInfo: ScenePlaybackInfo? = nil
     ) {
         self.infoTitle = title
         self.infoYear = year.map(String.init)
@@ -65,12 +67,19 @@ final class SceneViewModel: ObservableObject {
             self.infoRuntime = nil
         }
         self.nextEpisode = nextEpisode
+        if let playbackInfo {
+            self.playbackInfo = playbackInfo
+        }
         
         var tabs: [SceneTab] = [.scene, .info]
         if nextEpisode != nil {
             tabs.append(.upNext)
         }
         self.availableTabs = tabs
+    }
+    
+    func updatePlaybackInfo(_ playbackInfo: ScenePlaybackInfo) {
+        self.playbackInfo = playbackInfo
     }
     
     func open() {

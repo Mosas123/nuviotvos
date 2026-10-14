@@ -65,3 +65,69 @@ struct PlaybackCacheSettings: Equatable {
     }
 }
 
+/// Fixed RAM limits for MPV; remote sources may use libmpv's separate packet
+/// cache on disk when its sandbox directory is available.
+struct MPVPlaybackCachePolicy: Equatable {
+    let nativeDiskEnabled: Bool
+    let forwardBuffer: String
+    let backBuffer: String
+    let cacheSeconds: Int
+    let source: Source
+
+    enum Source: Equatable {
+        case localOrLoopback
+        case remote
+        case liveRemote
+    }
+
+    var diagnosticMode: String {
+        switch (source, nativeDiskEnabled) {
+        case (.localOrLoopback, _): return "local_or_disk"
+        case (.remote, true): return "network_disk"
+        case (.liveRemote, true): return "live_network_disk"
+        case (.remote, false): return "network_ram_fallback"
+        case (.liveRemote, false): return "live_network_ram_fallback"
+        }
+    }
+
+    static func resolve(
+        url: URL,
+        isLiveStream: Bool,
+        profile: PlaybackCacheProfile,
+        nativeDiskAvailable: Bool
+    ) -> MPVPlaybackCachePolicy {
+        let host = url.host?.lowercased()
+        let isLocal = url.isFileURL || host == "localhost" || host == "127.0.0.1" || host == "::1"
+        let source: Source = isLocal ? .localOrLoopback : (isLiveStream ? .liveRemote : .remote)
+        let useDisk = !isLocal && nativeDiskAvailable
+        let duration = isLocal ? 30 : max(1, Int(ceil(profile.hybridCacheTargetLeadSeconds)))
+        return MPVPlaybackCachePolicy(
+            nativeDiskEnabled: useDisk,
+            forwardBuffer: "32MiB",
+            backBuffer: "16MiB",
+            cacheSeconds: duration,
+            source: source
+        )
+    }
+}
+
+extension PlaybackCacheSettings {
+    /// Creates the app-owned directory used by libmpv's temporary packet cache.
+    /// Returns nil when the sandbox location is unavailable or unwritable.
+    static func prepareMPVPacketCacheDirectory(
+        fileManager: FileManager = .default,
+        cachesDirectory: URL? = nil
+    ) -> URL? {
+        guard let root = cachesDirectory ?? fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let directory = root.appendingPathComponent("MPVPacketCache", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            return fileManager.isWritableFile(atPath: directory.path) ? directory : nil
+        } catch {
+            return nil
+        }
+    }
+}
+

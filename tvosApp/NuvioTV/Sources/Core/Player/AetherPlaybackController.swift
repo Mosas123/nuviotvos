@@ -2368,6 +2368,23 @@ private final class StartupProgressGenerationObserver: @unchecked Sendable {
     }
 }
 
+enum AetherStartupLoadPresentationPolicy {
+    static func isPresented(
+        expectedLoadGeneration: UInt64,
+        ownerLoadGeneration: UInt64?,
+        engineGenerationFloor: UInt64?,
+        progressGeneration: UInt64?,
+        checkpointIsPresenting: Bool
+    ) -> Bool {
+        guard ownerLoadGeneration == expectedLoadGeneration,
+              let engineGenerationFloor,
+              let progressGeneration,
+              progressGeneration >= engineGenerationFloor,
+              checkpointIsPresenting else { return false }
+        return true
+    }
+}
+
 @MainActor
 final class AetherPlaybackController: UIViewController, PlaybackEngineControlling, ScrubThumbnailProviding {
     private struct StartupBenchmarkLoadOwner {
@@ -2477,6 +2494,18 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     var onStartupProgressChanged: ((StartupProgress?) -> Void)?
     private let startupProgressGenerationObserver = StartupProgressGenerationObserver()
     private var startupBenchmarkLoadOwner: StartupBenchmarkLoadOwner?
+
+    func hasPresentedCurrentLoad(generation: UInt64) -> Bool {
+        let progress = engine.startupProgress
+        let owner = startupBenchmarkLoadOwner
+        return AetherStartupLoadPresentationPolicy.isPresented(
+            expectedLoadGeneration: generation,
+            ownerLoadGeneration: owner?.loadGeneration,
+            engineGenerationFloor: owner?.engineGenerationFloor,
+            progressGeneration: progress?.generation,
+            checkpointIsPresenting: progress?.checkpoint == .presenting
+        )
+    }
 
     var loadingStepMessage: String? {
         guard let stage = engine.startupProgress?.stage else {
@@ -2754,7 +2783,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let width = Int(engine.sourceVideoWidth > 0 ? engine.sourceVideoWidth : sourceProbe?.videoWidth ?? 0)
         let height = Int(engine.sourceVideoHeight > 0 ? engine.sourceVideoHeight : sourceProbe?.videoHeight ?? 0)
         let fpsVal = engine.sourceVideoFrameRate ?? sourceProbe?.videoFrameRate
-        let fpsStr = fpsVal.map { String(format: "%.3f fps", $0) } ?? "23.976 fps"
+        let fpsStr = fpsVal.map { String(format: "%.3f fps", $0) } ?? ""
         let sourceRange = Self.dynamicRangeLabel(
             engine.sourceVideoFormat,
             dolbyVisionProfile: engine.sourceDVProfile ?? sourceProbe?.dvProfile
@@ -2855,7 +2884,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         if let aRate = telemetry?.audioBridgeBitrateMbps, aRate > 0 {
             aBitrateStr = String(format: "meas %.2f Mbit/s", aRate)
         } else {
-            aBitrateStr = "meas 5.14 Mbit/s"
+            aBitrateStr = ""
         }
 
         // Audio route

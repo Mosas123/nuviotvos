@@ -1520,6 +1520,8 @@ enum MdbListDetailsService {
     static let providerTrakt = "trakt"
     static let providerLetterboxd = "letterboxd"
     static let providerAudience = "audience"
+    static let providerMyAnimeList = "myanimelist"
+    static let providerTVDB = "tvdb"
 
     static let providerPriorityOrder = [
         providerIMDb,
@@ -1528,8 +1530,19 @@ enum MdbListDetailsService {
         providerMetacritic,
         providerTrakt,
         providerLetterboxd,
-        providerAudience
+        providerAudience,
+        providerMyAnimeList,
+        providerTVDB
     ]
+
+    static func apiProvider(for provider: String) -> String {
+        switch provider {
+        case providerMyAnimeList:
+            return "mal"
+        default:
+            return provider
+        }
+    }
 
     private static let providerSettings: [String: String] = [
         providerIMDb: SettingsKey.mdbListUseImdb,
@@ -1538,7 +1551,9 @@ enum MdbListDetailsService {
         providerMetacritic: SettingsKey.mdbListUseMetacritic,
         providerTrakt: SettingsKey.mdbListUseTrakt,
         providerLetterboxd: SettingsKey.mdbListUseLetterboxd,
-        providerAudience: SettingsKey.mdbListUseAudience
+        providerAudience: SettingsKey.mdbListUseAudience,
+        providerMyAnimeList: SettingsKey.mdbListUseMyAnimeList,
+        providerTVDB: SettingsKey.mdbListUseTvdb
     ]
 
     private struct RatingRequest: Encodable {
@@ -1600,7 +1615,8 @@ enum MdbListDetailsService {
         provider: String,
         apiKey: String
     ) async -> NuvioExternalRating? {
-        guard let url = URL(string: "https://api.mdblist.com/rating/\(mediaType)/\(provider)?apikey=\(apiKey)") else {
+        let apiProvider = apiProvider(for: provider)
+        guard let url = URL(string: "https://api.mdblist.com/rating/\(mediaType)/\(apiProvider)?apikey=\(apiKey)") else {
             return nil
         }
 

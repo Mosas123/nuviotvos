@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 @testable import NuvioTV
 
 final class SearchHistoryTests: XCTestCase {
@@ -200,6 +201,8 @@ private protocol SearchLifecycleModel: AnyObject {
     var searchText: String { get set }
     var results: [NuvioMeta] { get }
     var isLoading: Bool { get }
+    var error: String? { get }
+    func performSearch(query: String)
 }
 
 extension SearchViewModel: SearchLifecycleModel {}
@@ -284,7 +287,10 @@ final class SearchAndDiscoverLifecycleTests: XCTestCase {
 
         // Fast search completes and is cached
         viewModel.performSearch(query: "Fast")
-        try await Task.sleep(nanoseconds: 50_000_000)
+        let fastDeadline = Date().addingTimeInterval(1.0)
+        while viewModel.isLoading && Date() < fastDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
         XCTAssertEqual(viewModel.results.first?.name, "Result for Fast")
 
         // Slow search starts
@@ -339,6 +345,190 @@ final class SearchAndDiscoverLifecycleTests: XCTestCase {
         // Stale slow search must NOT overwrite the cached fast search
         XCTAssertEqual(viewModel.results.first?.name, "Result for Fast")
         XCTAssertFalse(viewModel.isLoading)
+    }
+
+    @MainActor
+    func testSearchTimeoutGracefullyRecoversFromHangingRepository() async throws {
+        let repo = ControllableLifecycleRepository()
+        let viewModel = SearchViewModel(repository: repo, searchTimeout: 0.1)
+
+        let searchStarted = expectation(description: "search started")
+        repo.searchHandler = { query in
+            searchStarted.fulfill()
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            return [NuvioMeta(id: "too_late", name: "Too Late", type: "movie")]
+        }
+
+        viewModel.performSearch(query: "HangingQuery")
+        await fulfillment(of: [searchStarted], timeout: 2.0)
+        XCTAssertTrue(viewModel.isLoading)
+
+        let deadline = Date().addingTimeInterval(1.0)
+        while viewModel.isLoading && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertFalse(viewModel.isLoading)
+        XCTAssertNotNil(viewModel.error)
+        XCTAssertTrue(viewModel.results.isEmpty)
+    }
+
+    @MainActor
+    func testNetflixSearchTimeoutGracefullyRecoversFromHangingRepository() async throws {
+        let repo = ControllableLifecycleRepository()
+        let viewModel = NetflixSearchViewModel(repository: repo, searchTimeout: 0.1)
+
+        let searchStarted = expectation(description: "netflix search started")
+        repo.searchHandler = { query in
+            searchStarted.fulfill()
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            return [NuvioMeta(id: "too_late", name: "Too Late", type: "movie")]
+        }
+
+        viewModel.performSearch(query: "HangingQuery")
+        await fulfillment(of: [searchStarted], timeout: 2.0)
+        XCTAssertTrue(viewModel.isLoading)
+
+        let deadline = Date().addingTimeInterval(1.0)
+        while viewModel.isLoading && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        XCTAssertFalse(viewModel.isLoading)
+        XCTAssertNotNil(viewModel.error)
+        XCTAssertTrue(viewModel.results.isEmpty)
+    }
+
+    func testSearchKeepsFastAddonWhenAnotherManifestExceedsDiscoveryDeadline() async throws {
+        let defaults = ProfileSettings.current
+        let previousPreferences = CinemetaCatalogRepository.configuredStreamAddonPreferences(in: defaults)
+        let previousCinemetaDisabled = defaults.object(forKey: SettingsKey.cinemetaDisabled)
+        let fastManifestURL = URL(string: "https://fast-addon.invalid/manifest.json")!
+        let slowManifestURL = URL(string: "https://slow-addon.invalid/manifest.json")!
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [SearchManifestFixtureURLProtocol.self]
+        let fixtureSession = URLSession(configuration: sessionConfiguration)
+        await StremioManifestDataCache.shared.clear()
+        await StremioManifestDataCache.shared.setSessionForTesting(fixtureSession)
+        CinemetaCatalogRepository.setNetworkSessionForTesting(fixtureSession)
+        CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(
+            [
+                StreamAddonPreference(url: fastManifestURL.absoluteString, enabled: true),
+                StreamAddonPreference(url: slowManifestURL.absoluteString, enabled: true)
+            ],
+            in: defaults
+        )
+        CinemetaCatalogRepository.setCinemetaDisabled(true, in: defaults)
+        XCTAssertFalse(CinemetaCatalogRepository.isCinemetaEnabled)
+        XCTAssertEqual(
+            CinemetaCatalogRepository.configuredStreamAddonManifestURLs,
+            [fastManifestURL, slowManifestURL]
+        )
+        func resetFixtureSession() async {
+            await StremioManifestDataCache.shared.setSessionForTesting(nil)
+            await StremioManifestDataCache.shared.clear()
+            CinemetaCatalogRepository.setNetworkSessionForTesting(nil)
+            fixtureSession.invalidateAndCancel()
+        }
+        defer {
+            SearchManifestFixtureURLProtocol.reset()
+            CinemetaCatalogRepository.setNetworkSessionForTesting(nil)
+            fixtureSession.invalidateAndCancel()
+            CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(previousPreferences, in: defaults)
+            if let previousCinemetaDisabled {
+                defaults.set(previousCinemetaDisabled, forKey: SettingsKey.cinemetaDisabled)
+            } else {
+                defaults.removeObject(forKey: SettingsKey.cinemetaDisabled)
+            }
+        }
+
+        let fastManifest = Data(#"{"id":"fast.addon","name":"Fast Addon","types":["movie"],"catalogs":[{"type":"movie","id":"search","extra":[{"name":"search","isRequired":true}]}]}"#.utf8)
+        let fastCatalog = Data(#"{"metas":[{"id":"tt1234567","name":"Fast Addon Result","type":"movie"}]}"#.utf8)
+        SearchManifestFixtureURLProtocol.install { request in
+            guard let url = request.url else { return nil }
+            if url.host == "fast-addon.invalid", url.path == "/manifest.json" {
+                return .init(statusCode: 200, data: fastManifest)
+            }
+            if url.host == "slow-addon.invalid", url.path == "/manifest.json" {
+                return .init(statusCode: 200, data: fastManifest, delay: 5)
+            }
+            if url.host == "fast-addon.invalid", url.path.hasPrefix("/catalog/") {
+                return .init(statusCode: 200, data: fastCatalog)
+            }
+            return .init(statusCode: 404, data: Data())
+        }
+
+        let startedAt = Date()
+        let results: [NuvioMeta]
+        do {
+            results = try await CinemetaCatalogRepository().search(query: "Matrix")
+        } catch {
+            await resetFixtureSession()
+            throw error
+        }
+        await resetFixtureSession()
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 4, "one slow manifest should not extend discovery past its deadline")
+        XCTAssertEqual(results.map(\.id), ["tt1234567"])
+        XCTAssertEqual(results.first?.name, "Fast Addon Result")
+    }
+
+    @MainActor
+    func testSearchStaleCompletionCannotCancelReplacementTimeout() async throws {
+        let repo = ControllableLifecycleRepository()
+        try await assertStaleSearchCompletionDoesNotCancelTimeout(
+            SearchViewModel(repository: repo, searchTimeout: 0.3), repository: repo
+        )
+    }
+
+    @MainActor
+    func testNetflixSearchStaleCompletionCannotCancelReplacementTimeout() async throws {
+        let repo = ControllableLifecycleRepository()
+        try await assertStaleSearchCompletionDoesNotCancelTimeout(
+            NetflixSearchViewModel(repository: repo, searchTimeout: 0.3), repository: repo
+        )
+    }
+
+    @MainActor
+    private func assertStaleSearchCompletionDoesNotCancelTimeout(
+        _ viewModel: any SearchLifecycleModel,
+        repository: ControllableLifecycleRepository
+    ) async throws {
+        let oldStarted = expectation(description: "stale request started")
+        let replacementStarted = expectation(description: "replacement request started")
+        let releaseOld = expectation(description: "release stale request")
+        let oldReturned = expectation(description: "stale request returned")
+        repository.searchHandler = { query in
+            switch query {
+            case "Old query":
+                oldStarted.fulfill()
+                await self.fulfillment(of: [releaseOld], timeout: 3)
+                oldReturned.fulfill()
+                return [NuvioMeta(id: "stale", name: "Stale", type: "movie")]
+            case "Replacement query":
+                replacementStarted.fulfill()
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                return [NuvioMeta(id: "late", name: "Late", type: "movie")]
+            default:
+                XCTFail("Unexpected query: \(query)")
+                return []
+            }
+        }
+
+        viewModel.performSearch(query: "Old query")
+        await fulfillment(of: [oldStarted], timeout: 2)
+        viewModel.performSearch(query: "Replacement query")
+        await fulfillment(of: [replacementStarted], timeout: 2)
+
+        releaseOld.fulfill()
+        await fulfillment(of: [oldReturned], timeout: 1)
+
+        let deadline = Date().addingTimeInterval(1)
+        while viewModel.isLoading && Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertFalse(viewModel.isLoading, "replacement watchdog should still time out after stale completion")
+        XCTAssertTrue(viewModel.error?.localizedCaseInsensitiveContains("timed out") == true)
+        XCTAssertTrue(viewModel.results.isEmpty)
     }
 
     @MainActor
@@ -407,6 +597,78 @@ final class SearchAndDiscoverLifecycleTests: XCTestCase {
         XCTAssertFalse(viewModel.items.contains(where: { $0.id == "stale_page2_movie" }))
         XCTAssertFalse(viewModel.isLoadingMore)
         XCTAssertTrue(viewModel.hasMore)
+    }
+}
+
+private final class SearchManifestFixtureURLProtocol: URLProtocol, @unchecked Sendable {
+    struct Reply {
+        let statusCode: Int
+        let data: Data
+        var delay: TimeInterval = 0
+    }
+
+    private static let lock = NSLock()
+    private static var handler: ((URLRequest) -> Reply?)?
+    private let stateLock = NSLock()
+    private var stopped = false
+
+    static func install(_ newHandler: @escaping (URLRequest) -> Reply?) {
+        lock.lock()
+        handler = newHandler
+        lock.unlock()
+    }
+
+    static func reset() {
+        lock.lock()
+        handler = nil
+        lock.unlock()
+    }
+
+    private static func reply(for request: URLRequest) -> Reply? {
+        lock.lock()
+        let currentHandler = handler
+        lock.unlock()
+        return currentHandler?(request)
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let reply = Self.reply(for: request) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        if reply.delay > 0 {
+            DispatchQueue.global().asyncAfter(deadline: .now() + reply.delay) { [weak self] in
+                self?.finish(reply)
+            }
+        } else {
+            finish(reply)
+        }
+    }
+
+    override func stopLoading() {
+        stateLock.lock()
+        stopped = true
+        stateLock.unlock()
+    }
+
+    private func finish(_ reply: Reply) {
+        stateLock.lock()
+        let isStopped = stopped
+        stateLock.unlock()
+        guard !isStopped,
+              let url = request.url,
+              let response = HTTPURLResponse(
+                url: url,
+                statusCode: reply.statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+              ) else { return }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: reply.data)
+        client?.urlProtocolDidFinishLoading(self)
     }
 }
 
@@ -685,5 +947,11 @@ final class CloudLibraryLifecycleTests: XCTestCase {
         XCTAssertTrue(playerScreen.isPlayer)
         XCTAssertFalse(TVScreen.cloudLibrary.isPlayer)
         XCTAssertFalse(TVScreen.main.isPlayer)
+    }
+
+    func testTVOSKeyboardLayoutModeCases() {
+        XCTAssertEqual(TVOSKeyboardLayoutMode.linear.rawValue, "Linear")
+        XCTAssertEqual(TVOSKeyboardLayoutMode.grid.rawValue, "Grid")
+        XCTAssertEqual(TVOSKeyboardLayoutMode.allCases.count, 2)
     }
 }

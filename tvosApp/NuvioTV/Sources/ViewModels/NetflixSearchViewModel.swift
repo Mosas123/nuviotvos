@@ -15,9 +15,11 @@ class NetflixSearchViewModel: ObservableObject {
     @Published var recentSearches: [String] = []
 
     private let repository: CatalogRepository
+    private let searchTimeout: TimeInterval
     private var allResults: [NuvioMeta] = []
     private var cancellables = Set<AnyCancellable>()
     private var searchTask: Task<Void, Never>?
+    private var searchTimeoutTask: Task<Void, Never>?
     private var searchGeneration: UInt64 = 0
     /// Runs after the raw search grid is visible: refreshes the top results'
     /// full `/meta` records so artwork and watched state match Discovery.
@@ -30,8 +32,12 @@ class NetflixSearchViewModel: ObservableObject {
     private var cacheOrder: [String] = []
     private var sessionCommittedQuery: String?
 
-    init(repository: CatalogRepository = CinemetaCatalogRepository()) {
+    init(
+        repository: CatalogRepository = CinemetaCatalogRepository(),
+        searchTimeout: TimeInterval = 10
+    ) {
         self.repository = repository
+        self.searchTimeout = searchTimeout
         recentSearches = SearchHistoryStore.load()
 
         $searchText
@@ -44,7 +50,7 @@ class NetflixSearchViewModel: ObservableObject {
 
         $searchText
             .removeDuplicates()
-            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
+            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
             .sink { [weak self] text in
                 self?.performSearch(query: text)
             }
@@ -60,6 +66,7 @@ class NetflixSearchViewModel: ObservableObject {
         guard !trimmed.isEmpty else {
             searchGeneration &+= 1
             sessionCommittedQuery = nil
+            searchTimeoutTask?.cancel()
             searchTask?.cancel()
             enrichmentTask?.cancel()
             allResults = []
@@ -72,6 +79,7 @@ class NetflixSearchViewModel: ObservableObject {
         let cacheKey = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         if let cached = cachedResults[cacheKey] {
             searchGeneration &+= 1
+            searchTimeoutTask?.cancel()
             searchTask?.cancel()
             enrichmentTask?.cancel()
             allResults = cached
@@ -84,6 +92,7 @@ class NetflixSearchViewModel: ObservableObject {
         // Cancel pending tasks and immediately enter loading state while debouncing
         // so the UI does not flash "No Results" before the search runs.
         searchGeneration &+= 1
+        searchTimeoutTask?.cancel()
         searchTask?.cancel()
         enrichmentTask?.cancel()
         isLoading = true
@@ -95,6 +104,7 @@ class NetflixSearchViewModel: ObservableObject {
         let cacheKey = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
         searchGeneration &+= 1
         let generation = searchGeneration
+        searchTimeoutTask?.cancel()
         searchTask?.cancel()
         enrichmentTask?.cancel()
 
@@ -121,11 +131,19 @@ class NetflixSearchViewModel: ObservableObject {
         isLoading = true
         error = nil
 
+        let timeoutSeconds = self.searchTimeout
+        searchTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.handleSearchTimeout(generation: generation)
+        }
+
         searchTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let found = try await self.repository.search(query: trimmed)
                 guard !Task.isCancelled, self.searchGeneration == generation else { return }
+                self.searchTimeoutTask?.cancel()
                 self.allResults = found
                 self.cache(found, for: cacheKey)
                 self.applyFilter()
@@ -134,12 +152,28 @@ class NetflixSearchViewModel: ObservableObject {
                 if SearchResultEnrichment.hasIncompleteLeadingResults(found) {
                     self.enrich(found, cacheKey: cacheKey, generation: generation)
                 }
+            } catch is CancellationError {
+                return
             } catch {
                 guard !Task.isCancelled, self.searchGeneration == generation else { return }
-                self.error = "Couldn’t complete search. Check your connection and try again."
+                self.searchTimeoutTask?.cancel()
+                self.error = L10n.string(
+                    "search_error_network",
+                    fallback: "Couldn’t complete search. Check your connection and try again."
+                )
                 self.isLoading = false
             }
         }
+    }
+
+    private func handleSearchTimeout(generation: UInt64) {
+        guard self.searchGeneration == generation, self.isLoading else { return }
+        self.searchTask?.cancel()
+        self.error = L10n.string(
+            "search_error_timeout",
+            fallback: "Search timed out. Check your connection and try again."
+        )
+        self.isLoading = false
     }
 
     /// Refreshes the top raw results with their full `/meta` records without

@@ -409,7 +409,7 @@ extension PlayerView {
     @ViewBuilder
     var pauseOverlayLayer: some View {
         // Pause metadata sheet ("You're watching…").
-        if viewModel.showPauseOverlay {
+        if viewModel.showPauseOverlay && viewModel.canShowPauseOverlay {
             PauseOverlayView(
                 title: viewModel.title,
                 episodeLine: viewModel.pauseOverlayEpisodeLine,

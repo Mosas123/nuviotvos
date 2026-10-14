@@ -37,9 +37,48 @@ final class TVOSKeyboardDetectorUIView: UIView {
     var onDetected: ((TVOSKeyboardLayoutMode) -> Void)?
     private var lastMode: TVOSKeyboardLayoutMode?
 
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupNotifications()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupNotifications()
+    }
+
+    private func setupNotifications() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(focusDidChange),
+            name: UIFocusSystem.didUpdateNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func focusDidChange() {
+        scheduleInspection()
+    }
+
+    private func updateMode(_ mode: TVOSKeyboardLayoutMode) {
+        if mode != lastMode {
+            lastMode = mode
+            onDetected?(mode)
+        }
+    }
+
     override func didMoveToWindow() {
         super.didMoveToWindow()
         scheduleInspection()
+        for delay in [0.1, 0.3, 0.6, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.inspectHierarchy()
+            }
+        }
     }
 
     override func layoutSubviews() {
@@ -73,14 +112,19 @@ final class TVOSKeyboardDetectorUIView: UIView {
             }
         }
 
-        inspect(view: window)
+        let windows: [UIWindow]
+        if let sceneWindows = window.windowScene?.windows, !sceneWindows.isEmpty {
+            windows = sceneWindows
+        } else {
+            windows = [window]
+        }
+        for w in windows {
+            inspect(view: w)
+        }
 
         // An absent keyboard during mounting or dismissal is not a layout change.
         guard let detected else { return }
-        if detected != lastMode {
-            lastMode = detected
-            onDetected?(detected)
-        }
+        updateMode(detected)
     }
 }
 
@@ -94,11 +138,11 @@ private enum NativeSearchGridMetrics {
     static let linearColumnCount: CGFloat = 7
     static let linearCardRowWidth = linearPosterWidth * linearColumnCount + linearPosterGap * (linearColumnCount - 1)
 
-    // Grid layout metrics (4 columns beside the keyboard)
+    // Grid layout metrics (5 columns beside the keyboard)
     static let gridPosterWidth: CGFloat = 210
     static let gridPosterHeight: CGFloat = 315
     static let gridPosterGap: CGFloat = 28
-    static let gridColumnCount: CGFloat = 4
+    static let gridColumnCount: CGFloat = 5
     static let gridCardRowWidth = gridPosterWidth * gridColumnCount + gridPosterGap * (gridColumnCount - 1)
 
     static let keyboardWidth: CGFloat = 520
@@ -128,6 +172,7 @@ struct NativeSearchView: View {
     @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
 
     @FocusState private var focusedResultID: String?
+    @FocusState private var focusedFilterID: String?
     @FocusState private var clearRecentFocused: Bool
     @State private var lastFocusedResultID: String?
     @State private var shouldRestoreResultFocus = false
@@ -196,9 +241,8 @@ struct NativeSearchView: View {
                 restoreArmTask?.cancel()
                 lastFocusedResultID = newValue
                 shouldRestoreResultFocus = false
-                // Collapse the native keyboard in linear mode when a result card gains focus.
                 if effectiveLayoutMode == .linear {
-                    withAnimation(.easeInOut(duration: 0.22)) {
+                    withAnimation(.easeInOut(duration: 0.25)) {
                         searchPresented = false
                     }
                 }
@@ -236,7 +280,10 @@ struct NativeSearchView: View {
                 prompt: L10n.string("search_placeholder", fallback: "Search movies & series"),
                 isPresented: $searchPresented,
                 isDisabled: overlayRestoreResultID != nil || discoverOverlayTransitionActive,
-                topPadding: 56
+                topPadding: 56,
+                onSubmit: {
+                    viewModel.performSearch(query: viewModel.searchText)
+                }
             )
 
             VStack(alignment: .leading, spacing: 24) {
@@ -307,6 +354,9 @@ struct NativeSearchView: View {
                     text: $viewModel.searchText,
                     prompt: L10n.string("search_placeholder", fallback: "Search movies & series")
                 )
+                .onSubmit(of: .search) {
+                    viewModel.performSearch(query: viewModel.searchText)
+                }
                 .autocorrectionDisabled()
                 #if os(tvOS)
                 .toolbar(.hidden, for: .navigationBar)
@@ -326,8 +376,12 @@ struct NativeSearchView: View {
                         isDisabled: overlayRestoreResultID != nil,
                         onSubmit: {
                             viewModel.performSearch(query: viewModel.searchText)
+                        },
+                        onMoveLeft: {
+                            transferFocusToGridKeyboard()
                         }
                     )
+                    .padding(.horizontal, NativeSearchGridMetrics.gridContentInset)
                     typeFilter(width: NativeSearchGridMetrics.gridCardRowWidth, isGridMode: true)
                         .padding(.horizontal, NativeSearchGridMetrics.gridContentInset)
                         .disabled(overlayRestoreResultID != nil)
@@ -343,7 +397,11 @@ struct NativeSearchView: View {
                         DiscoverSection(
                             onContentClick: onContentClick,
                             isBesideKeyboard: true,
+                            columnCount: 5,
                             onLongPress: onLongPress,
+                            onFocusExit: {
+                                transferFocusToGridKeyboard()
+                            },
                             parentTransitionActive: $discoverOverlayTransitionActive
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -360,9 +418,7 @@ struct NativeSearchView: View {
                     }
                 }
             }
-            .frame(maxWidth: viewModel.hasQuery
-                ? NativeSearchGridMetrics.gridCardRowWidth + (NativeSearchGridMetrics.gridContentInset * 2)
-                : 210 * 5 + 24 * 4 + 24, alignment: .leading)
+            .frame(width: NativeSearchGridMetrics.gridCardRowWidth + (NativeSearchGridMetrics.gridContentInset * 2), alignment: .leading)
             .padding(.top, 24)
             .ignoresSafeArea(.container, edges: .bottom)
         }
@@ -415,15 +471,53 @@ struct NativeSearchView: View {
         }
     }
 
+    private func transferFilterFocusToGridResults() {
+        guard effectiveLayoutMode == .grid,
+              isEnabled,
+              !isFullScreenOverlayPresented,
+              overlayRestoreResultID == nil,
+              !overlayFocusRestorationActive,
+              !discoverOverlayTransitionActive,
+              !viewModel.isLoading,
+              viewModel.error == nil,
+              let firstResultID = visibleResults.first?.id else { return }
+
+        resultFocusGeneration &+= 1
+        let generation = resultFocusGeneration
+        restoreArmTask?.cancel()
+        shouldRestoreResultFocus = false
+        resultsScrollTopGeneration &+= 1
+
+        focusedFilterID = nil
+        focusedResultID = firstResultID
+
+        DispatchQueue.main.async {
+            guard resultFocusGeneration == generation,
+                  effectiveLayoutMode == .grid,
+                  isEnabled,
+                  !isFullScreenOverlayPresented,
+                  overlayRestoreResultID == nil,
+                  !overlayFocusRestorationActive,
+                  !discoverOverlayTransitionActive,
+                  !viewModel.isLoading,
+                  viewModel.error == nil,
+                  visibleResults.first?.id == firstResultID else { return }
+            focusedFilterID = nil
+            focusedResultID = firstResultID
+        }
+    }
+
     private func transferFocusToGridKeyboard() {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            searchPresented = true
+        }
         focusedResultID = nil
+        focusedFilterID = nil
         clearRecentFocused = false
     }
 
     private func returnToResultsTop() {
-        if effectiveLayoutMode == .linear {
-            searchPresented = false
-        }
+        searchPresented = false
         resultsScrollTopGeneration &+= 1
         focusedResultID = visibleResults.first?.id
     }
@@ -433,7 +527,7 @@ struct NativeSearchView: View {
               overlayRestoreResultID == nil,
               !discoverOverlayTransitionActive,
               viewModel.hasQuery else { return false }
-        return focusedResultID != nil || clearRecentFocused || (effectiveLayoutMode == .linear && !searchPresented)
+        return focusedResultID != nil || clearRecentFocused || !searchPresented
     }
 
     private func handleExitCommand() {
@@ -478,7 +572,12 @@ struct NativeSearchView: View {
     private func typeFilter(width: CGFloat, isGridMode: Bool) -> some View {
         HStack(spacing: 16) {
             ForEach(SearchContentType.allCases) { type in
-                GlassChip(title: type.title, isSelected: viewModel.selectedType == type) {
+                GlassChip(
+                    title: type.title,
+                    isSelected: viewModel.selectedType == type,
+                    externalFocus: $focusedFilterID,
+                    focusValue: "type:\(type.rawValue)"
+                ) {
                     viewModel.setType(type)
                 }
             }
@@ -494,8 +593,13 @@ struct NativeSearchView: View {
         .frame(width: width, alignment: .leading)
         .onMoveCommand { direction in
             if isGridMode {
-                if direction == .left {
-                    transferFocusToGridKeyboard()
+                if direction == .down, focusedFilterID != nil {
+                    transferFilterFocusToGridResults()
+                } else if direction == .left {
+                    let firstFilterID = SearchContentType.allCases.first.map { "type:\($0.rawValue)" }
+                    if focusedFilterID == nil || focusedFilterID == firstFilterID {
+                        transferFocusToGridKeyboard()
+                    }
                 }
             } else {
                 if direction == .up {
@@ -587,7 +691,7 @@ struct NativeSearchView: View {
                             forceShowLabels: true,
                             onMove: { direction in
                                 if isGridMode {
-                                    if index % 4 == 0, direction == .left {
+                                    if index % colCount == 0, direction == .left {
                                         transferFocusToGridKeyboard()
                                     }
                                 } else {
@@ -651,11 +755,10 @@ struct NativeSearchView: View {
     }
 
     private var gridModeColumns: [GridItem] {
-        [GridItem(
-            .adaptive(minimum: NativeSearchGridMetrics.gridPosterWidth, maximum: NativeSearchGridMetrics.gridPosterWidth),
-            spacing: NativeSearchGridMetrics.gridPosterGap,
-            alignment: .top
-        )]
+        Array(
+            repeating: GridItem(.fixed(NativeSearchGridMetrics.gridPosterWidth), spacing: NativeSearchGridMetrics.gridPosterGap, alignment: .top),
+            count: Int(NativeSearchGridMetrics.gridColumnCount)
+        )
     }
 
     private func updateNativeGridColumnCount(for width: CGFloat) {
@@ -758,6 +861,8 @@ struct GridSearchSuggestionChips: View {
     let suggestions: [String]
     let isDisabled: Bool
     let onSubmit: () -> Void
+    var onMoveLeft: (() -> Void)? = nil
+    @FocusState private var focusedSuggestionID: String?
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -765,14 +870,21 @@ struct GridSearchSuggestionChips: View {
                 GlassChip(
                     title: "\u{201C}\(query.trimmingCharacters(in: .whitespacesAndNewlines))\u{201D}",
                     isSelected: false,
-                    leadingSystemImage: "magnifyingglass"
+                    leadingSystemImage: "magnifyingglass",
+                    externalFocus: $focusedSuggestionID,
+                    focusValue: "query"
                 ) {
                     onSubmit()
                 }
                 .fixedSize(horizontal: true, vertical: false)
 
                 ForEach(suggestions, id: \.self) { title in
-                    GlassChip(title: title, isSelected: false) {
+                    GlassChip(
+                        title: title,
+                        isSelected: false,
+                        externalFocus: $focusedSuggestionID,
+                        focusValue: title
+                    ) {
                         query = title
                     }
                     .fixedSize(horizontal: true, vertical: false)
@@ -785,6 +897,13 @@ struct GridSearchSuggestionChips: View {
         .frame(height: 76)
         .clipped()
         .disabled(isDisabled)
+        .onMoveCommand { direction in
+            if direction == .left {
+                if focusedSuggestionID == nil || focusedSuggestionID == "query" {
+                    onMoveLeft?()
+                }
+            }
+        }
     }
 }
 
@@ -800,12 +919,16 @@ struct NativeSearchKeyboardHost: View {
     var topPadding: CGFloat = 56
     var expandedHeight: CGFloat = 220
     var collapsedHeight: CGFloat = 110
+    var onSubmit: (() -> Void)? = nil
 
     var body: some View {
         NavigationStack {
             Color.clear
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .searchable(text: $text, prompt: prompt)
+                .onSubmit(of: .search) {
+                    onSubmit?()
+                }
                 #if os(tvOS)
                 .toolbar(.hidden, for: .navigationBar)
                 #endif
@@ -834,6 +957,7 @@ struct NativeSearchGridKeyboardHost: View {
     /// frame still reports `width` to the sibling content column.
     var renderWidth: CGFloat?
     var height: CGFloat = 780
+    var onSubmit: (() -> Void)? = nil
 
     init(
         text: Binding<String>,
@@ -842,7 +966,8 @@ struct NativeSearchGridKeyboardHost: View {
         topPadding: CGFloat = 68,
         width: CGFloat = 780,
         renderWidth: CGFloat? = nil,
-        height: CGFloat = 780
+        height: CGFloat = 780,
+        onSubmit: (() -> Void)? = nil
     ) {
         _text = text
         self.prompt = prompt
@@ -851,6 +976,7 @@ struct NativeSearchGridKeyboardHost: View {
         self.width = width
         self.renderWidth = renderWidth
         self.height = height
+        self.onSubmit = onSubmit
     }
 
     var body: some View {
@@ -858,6 +984,9 @@ struct NativeSearchGridKeyboardHost: View {
             Color.clear
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .searchable(text: $text, prompt: prompt)
+                .onSubmit(of: .search) {
+                    onSubmit?()
+                }
                 #if os(tvOS)
                 .toolbar(.hidden, for: .navigationBar)
                 .toolbar(.hidden, for: .tabBar)

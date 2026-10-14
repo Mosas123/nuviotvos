@@ -2573,7 +2573,10 @@ enum MdbListSyncMapper {
         ("mdblist_use_metacritic", SettingsKey.mdbListUseMetacritic),
         ("mdblist_use_trakt", SettingsKey.mdbListUseTrakt),
         ("mdblist_use_letterboxd", SettingsKey.mdbListUseLetterboxd),
-        ("mdblist_use_audience", SettingsKey.mdbListUseAudience)
+        ("mdblist_use_audience", SettingsKey.mdbListUseAudience),
+        ("mdblist_use_myanimelist", SettingsKey.mdbListUseMyAnimeList),
+        ("mdblist_use_mal", SettingsKey.mdbListUseMyAnimeList),
+        ("mdblist_use_tvdb", SettingsKey.mdbListUseTvdb)
     ]
 
     static let localToRemoteKeyMappings: [(local: String, remote: String)] = [
@@ -2585,7 +2588,9 @@ enum MdbListSyncMapper {
         (SettingsKey.mdbListUseMetacritic, "mdblist_use_metacritic"),
         (SettingsKey.mdbListUseTrakt, "mdblist_use_trakt"),
         (SettingsKey.mdbListUseLetterboxd, "mdblist_use_letterboxd"),
-        (SettingsKey.mdbListUseAudience, "mdblist_use_audience")
+        (SettingsKey.mdbListUseAudience, "mdblist_use_audience"),
+        (SettingsKey.mdbListUseMyAnimeList, "mdblist_use_myanimelist"),
+        (SettingsKey.mdbListUseTvdb, "mdblist_use_tvdb")
     ]
 }
 

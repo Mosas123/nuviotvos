@@ -631,7 +631,7 @@ struct DetailsScreen: View {
                 cachedOnly: cachedOnly,
                 preserveAddonStreams: preserveAddonOrder
             )
-            let available = displayed.filter { $0.unavailabilityReason == nil }
+            let available = displayed.filter { $0.unavailabilityReason == nil && !$0.isNotPlayable }
             let pool: [NuvioStream]
             if preserveAddonOrder {
                 pool = available
@@ -675,6 +675,7 @@ struct DetailsScreen: View {
 
         if let stream = candidateStream {
             let isIdealMatch: Bool = {
+                if stream.isNotPlayable { return false }
                 if !viewModel.uiState.isLoadingStreams { return true }
                 if preserveAddonOrder {
                     if debrid.isEnabled, cachedOnly {
@@ -751,8 +752,10 @@ struct DetailsScreen: View {
         }
 
         let activeProfileId = ProfileSettings.activeProfileID
-        LastStreamQualityStore.save(metaId: meta.id, stream: stream, profileId: activeProfileId)
-        BingeGroupStore.save(seriesId: meta.id, stream: stream, profileId: activeProfileId)
+        if !stream.isNotPlayable {
+            LastStreamQualityStore.save(metaId: meta.id, stream: stream, profileId: activeProfileId)
+            BingeGroupStore.save(seriesId: meta.id, stream: stream, profileId: activeProfileId)
+        }
         PlaybackStartupTiming.markSourcePicked(stream: stream, token: startupToken)
         if let url = stream.directURL, !url.isEmpty {
             isStreamPickerPresented = false
@@ -2131,6 +2134,7 @@ enum SmartPlaybackSelector {
     ) -> [NuvioStream] {
         let playable = streams.enumerated().compactMap { index, stream -> (index: Int, stream: NuvioStream)? in
             guard stream.unavailabilityReason == nil else { return nil }
+            guard !stream.isNotPlayable else { return nil }
             if let url = stream.directURL?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty {
                 return (index, stream)
             }
@@ -2203,14 +2207,15 @@ enum SmartPlaybackSelector {
     ) -> [NuvioStream] {
         let playable = streams.filter { stream in
             if stream.unavailabilityReason != nil { return includeUnavailable }
+            if stream.isNotPlayable { return true }
             if let url = stream.directURL?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty {
                 return true
             }
             return includeDebrid && stream.isDebridResolvable
         }
-        let compatible = playable.filter { $0.unavailabilityReason != nil || isPlatformPlaybackCompatible($0) }
+        let compatible = playable.filter { $0.unavailabilityReason != nil || $0.isNotPlayable || isPlatformPlaybackCompatible($0) }
         let available = compatible.filter { $0.unavailabilityReason == nil }
-        let nonPromotional = available.filter { !isPromotionalStream($0) }
+        let nonPromotional = available.filter { $0.isNotPlayable || !isPromotionalStream($0) }
         let selectedAvailable = nonPromotional.isEmpty ? available : nonPromotional
         let selectedAvailableIDs = Set(selectedAvailable.map(\.id))
         // Keep notice cards in place without letting them count as promotional
@@ -2219,13 +2224,14 @@ enum SmartPlaybackSelector {
             $0.unavailabilityReason != nil || selectedAvailableIDs.contains($0.id)
         }
         if cachedOnly {
-            result = result.filter { $0.unavailabilityReason != nil || $0.isLikelyCached }
+            result = result.filter { $0.unavailabilityReason != nil || $0.isNotPlayable || $0.isLikelyCached }
         }
         if preserveAddonStreams {
             return result
         }
         let valid = result.filter { stream in
             guard stream.unavailabilityReason == nil else { return false }
+            if stream.isNotPlayable { return true }
             let tags = StreamQualityTags.parse(stream: stream)
             let res = tags.resolution > 0 ? tags.resolution : inferredResolution(for: stream)
             return !isLowQualityOrTicketStream(stream) && res >= 720
@@ -2259,6 +2265,9 @@ enum SmartPlaybackSelector {
     }
 
     static func isLowQualityOrTicketStream(_ stream: NuvioStream) -> Bool {
+        if stream.isNotPlayable {
+            return false
+        }
         let res = StreamPickerListBuilder.resolution(for: stream)
         // Verified HD/UHD streams (>= 720p) are NEVER low quality or ticket streams,
         // even if add-ons like AIOStreams annotate them with the 🎫 (ticket/debrid) emoji.
@@ -2543,6 +2552,27 @@ enum StreamPickerListBuilder {
         if preserveAddonStreams && option == .default {
             return streams
         }
+        // Action / informational items remain anchored at their returned positions,
+        // while playable video streams are sorted around them.
+        let actionItemIndices = streams.enumerated().filter { $0.element.isNotPlayable }
+        if !actionItemIndices.isEmpty {
+            let playableOnly = streams.filter { !$0.isNotPlayable }
+            let sortedPlayable = sortPlayableStreams(playableOnly, by: option, preserveAddonStreams: preserveAddonStreams)
+            var result = sortedPlayable
+            for item in actionItemIndices {
+                let insertIndex = min(item.offset, result.count)
+                result.insert(item.element, at: insertIndex)
+            }
+            return result
+        }
+        return sortPlayableStreams(streams, by: option, preserveAddonStreams: preserveAddonStreams)
+    }
+
+    private static func sortPlayableStreams(
+        _ streams: [NuvioStream],
+        by option: StreamSortOption,
+        preserveAddonStreams: Bool = false
+    ) -> [NuvioStream] {
         switch option {
         case .default:
             return streams.enumerated().sorted {
@@ -4202,11 +4232,37 @@ private struct TvDetailsSummary: View {
     }
 
     private var externalRatingBadges: [TvRatingBadge] {
-        let ratings = Dictionary(uniqueKeysWithValues: (meta.externalRatings ?? []).map { ($0.source, $0) })
-        return TvRatingVisual.all.compactMap { visual in
+        let ratings = Dictionary(
+            (meta.externalRatings ?? []).map { rating in
+                let key = rating.source.lowercased() == "mal" ? MdbListDetailsService.providerMyAnimeList : rating.source
+                return (key, rating)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        // 1. Built-in MDBList provider badges in priority order:
+        var badges = TvRatingVisual.all.compactMap { visual -> TvRatingBadge? in
             guard let rating = ratings[visual.source] else { return nil }
             return TvRatingBadge(visual: visual, rating: rating)
         }
+        // 2. Extra rating badges provided by add-ons:
+        let builtInSources = Set(TvRatingVisual.all.map { $0.source.lowercased() })
+        let extraRatings = (meta.externalRatings ?? []).filter {
+            let lower = $0.source.lowercased()
+            return !builtInSources.contains(lower) && lower != "mal"
+        }
+        for extra in extraRatings {
+            let visual = TvRatingVisual(
+                source: extra.source,
+                displayName: extra.name ?? extra.source.capitalized,
+                assetName: nil,
+                iconUrl: extra.iconUrl.flatMap { URL(string: $0) },
+                iconWidth: 38,
+                color: Color(red: 0.96, green: 0.77, blue: 0.09),
+                format: { AddonRatingsService.formatRating(value: $0, max: extra.max) }
+            )
+            badges.append(TvRatingBadge(visual: visual, rating: extra))
+        }
+        return badges
     }
 }
 
@@ -4220,10 +4276,29 @@ private struct TvRatingBadge: Identifiable {
 private struct TvRatingVisual {
     let source: String
     let displayName: String
-    let assetName: String
+    let assetName: String?
+    let iconUrl: URL?
     let iconWidth: CGFloat
     let color: Color
     let format: (Double) -> String
+
+    init(
+        source: String,
+        displayName: String,
+        assetName: String? = nil,
+        iconUrl: URL? = nil,
+        iconWidth: CGFloat,
+        color: Color,
+        format: @escaping (Double) -> String
+    ) {
+        self.source = source
+        self.displayName = displayName
+        self.assetName = assetName
+        self.iconUrl = iconUrl
+        self.iconWidth = iconWidth
+        self.color = color
+        self.format = format
+    }
 
     static let all: [TvRatingVisual] = [
         TvRatingVisual(
@@ -4282,6 +4357,22 @@ private struct TvRatingVisual {
             color: Color(red: 0.00, green: 0.88, blue: 0.33),
             format: { String(format: "%.1f", $0) }
         ),
+        TvRatingVisual(
+            source: MdbListDetailsService.providerMyAnimeList,
+            displayName: "MyAnimeList",
+            assetName: "rating_myanimelist",
+            iconWidth: 42,
+            color: Color(red: 0.18, green: 0.32, blue: 0.64),
+            format: { String(format: "%.1f", $0) }
+        ),
+        TvRatingVisual(
+            source: MdbListDetailsService.providerTVDB,
+            displayName: "TVDB",
+            assetName: "rating_tvdb",
+            iconWidth: 42,
+            color: Color(red: 0.11, green: 0.66, blue: 0.31),
+            format: { $0 > 10 ? "\(Int($0.rounded()))%" : String(format: "%.1f", $0) }
+        ),
     ]
 }
 
@@ -4293,11 +4384,35 @@ private struct TvDetailsRatingsRow: View {
             HStack(spacing: 26) {
                 ForEach(badges) { badge in
                     HStack(spacing: 9) {
-                        Image(badge.visual.assetName)
-                            .resizable()
-                            .scaledToFit()
+                        if let assetName = badge.visual.assetName {
+                            Image(assetName)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: badge.visual.iconWidth, height: 38)
+                                .accessibilityLabel(badge.visual.displayName)
+                        } else if let iconUrl = badge.visual.iconUrl {
+                            AsyncImage(url: iconUrl) { phase in
+                                if let image = phase.image {
+                                    image
+                                        .resizable()
+                                        .scaledToFit()
+                                } else {
+                                    Image(systemName: "star.fill")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .foregroundColor(badge.visual.color)
+                                }
+                            }
                             .frame(width: badge.visual.iconWidth, height: 38)
                             .accessibilityLabel(badge.visual.displayName)
+                        } else {
+                            Image(systemName: "star.fill")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 24, height: 24)
+                                .foregroundColor(badge.visual.color)
+                                .accessibilityLabel(badge.visual.displayName)
+                        }
 
                         Text(badge.visual.format(badge.rating.value))
                             .font(.system(size: 28, weight: .regular))
