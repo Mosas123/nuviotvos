@@ -2607,12 +2607,15 @@ struct SimklProgressService {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
-        guard TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+        guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+        let ownerScope = profileScope ?? ProfileSettings.activeProfileScope
+        guard ownerScope == ProfileSettings.activeProfileScope else { return false }
         guard let service = SimklAuthorizedClient(
             store: store,
             client: client,
             tokenStorage: tokenStorage,
-            profileScope: profileScope
+            profileScope: ownerScope
         ) else { return false }
 
         // The cache is what the removed card was rendered from, so it names the
@@ -2629,13 +2632,23 @@ struct SimklProgressService {
             return false
         }
 
+        guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+              ownerScope == ProfileSettings.activeProfileScope,
+              TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
+
         let targets = playbacks.filter { playbackMatches($0, card: item) }
         guard !targets.isEmpty else { return false }
 
         var removedAny = false
         for id in targets.compactMap(\.id) {
+            guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+                  ownerScope == ProfileSettings.activeProfileScope,
+                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
             guard let status = try? await service.delete(path: "sync/playback/\(id)"),
                   (200..<300).contains(status) else { continue }
+            guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+                  ownerScope == ProfileSettings.activeProfileScope,
+                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
             removedAny = true
         }
         guard removedAny else { return false }

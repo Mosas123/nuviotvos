@@ -1113,12 +1113,24 @@ final class SimklAuthServiceTests: XCTestCase {
     /// the paused row stayed on the account and every other Simkl client — and
     /// this one, after the dismissal expires — kept showing it.
     func testRemovingACardDeletesTheSimklPausedRow() async throws {
-        authorize()
-        selectSimklAsProgressSource()
+        let profileId = "simkl-remove-playback-\(UUID().uuidString)"
+        ProfileSettings.setActiveProfile(profileId)
+        let profileStore = ProfileSettings.current
+        profileStore.set("client-id", forKey: SettingsKey.simklClientID)
+        profileStore.set(TraktWatchProgressSource.simkl.rawValue, forKey: SettingsKey.traktWatchProgressSource)
+        SimklAuthStore.saveToken(
+            "simkl-token", clientID: "client-id", profileScope: profileId,
+            store: profileStore, tokenStorage: tokenStorage
+        )
+        defer {
+            ProfileSettings.clearActiveProfile()
+            UserDefaults(suiteName: "nuvio.tv.profile.settings.\(profileId)")?
+                .removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileId)")
+        }
         SimklSyncCache.savePlaybacks(
             [try makePlayback(id: 77, season: 1, episode: 3, pausedAt: Date())],
             watermark: "watermark",
-            store: defaults
+            store: profileStore
         )
 
         SimklURLProtocolStub.handler = { request in
@@ -1130,10 +1142,9 @@ final class SimklAuthServiceTests: XCTestCase {
 
         let removed = await SimklProgressService.removePlayback(
             for: makeCard(season: 1, episode: 3),
-            store: defaults,
+            store: profileStore,
             client: makeClient(),
-            tokenStorage: tokenStorage,
-            profileScope: "profile-1"
+            tokenStorage: tokenStorage
         )
 
         XCTAssertTrue(removed)
