@@ -790,22 +790,24 @@ final class MdbListAuthService {
         if let current = tokenStorage.tokens(for: profileScope) {
             _ = await refreshTokenIfNeeded()
             let token = tokenStorage.tokens(for: profileScope)?.accessToken ?? current.accessToken
+            var requestAccessToken = token
             var response = try await client.request(
                 path: path,
                 method: method,
                 queryItems: queryItems,
                 body: body,
-                accessToken: token
+                accessToken: requestAccessToken
             )
             if response.statusCode == 401,
                await refreshTokenIfNeeded(force: true),
                let refreshed = tokenStorage.tokens(for: profileScope) {
+                requestAccessToken = refreshed.accessToken
                 response = try await client.request(
                     path: path,
                     method: method,
                     queryItems: queryItems,
                     body: body,
-                    accessToken: refreshed.accessToken
+                    accessToken: requestAccessToken
                 )
             }
             if response.statusCode == 401 {
@@ -813,7 +815,7 @@ final class MdbListAuthService {
                     profileScope: profileScope,
                     store: store,
                     tokenStorage: tokenStorage,
-                    expectedAccessToken: token
+                    expectedAccessToken: requestAccessToken
                 )
             }
             return response
