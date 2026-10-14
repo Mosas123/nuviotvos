@@ -605,6 +605,7 @@ private struct SimklUserStatsResponse: Decodable {
 enum SimklPollResult {
     case pending
     case approved(String?)
+    case superseded
     case expired
     case originalCodeGone
     case rateLimited(Int)
@@ -682,7 +683,7 @@ final class SimklAuthService {
             ]
         )
 
-        guard clientID == requestedClientID else { throw CancellationError() }
+        guard !Task.isCancelled, clientID == requestedClientID else { throw CancellationError() }
 
         if (200..<300).contains(v2Result.statusCode), let pin = v2Result.value {
             guard !pin.userCode.isEmpty else {
@@ -710,7 +711,7 @@ final class SimklAuthService {
                 clientID: requestedClientID
             )
 
-            guard clientID == requestedClientID else { throw CancellationError() }
+            guard !Task.isCancelled, clientID == requestedClientID else { throw CancellationError() }
 
             switch v1Response.statusCode {
             case 200..<300:
@@ -800,7 +801,12 @@ final class SimklAuthService {
                 ]
             )
 
-            guard clientID == requestedClientID else { return .pending }
+            let latestState = currentState()
+            guard !Task.isCancelled,
+                  latestState.hasActivePINFlow(in: store),
+                  latestState.userCode == state.userCode,
+                  latestState.deviceCode == state.deviceCode,
+                  latestState.credentialClientID == requestedClientID else { return .superseded }
 
             switch response.statusCode {
             case 200..<300:
@@ -822,7 +828,7 @@ final class SimklAuthService {
                 SimklAuthStore.clearPINFlow(store: store)
                 TraktSettingsStore.selectWatchProgressSourceOnConnect(.simkl, in: store)
                 let username = await fetchUserSettings()
-                guard clientID == requestedClientID else { return .pending }
+                guard !Task.isCancelled, clientID == requestedClientID else { return .superseded }
                 return .approved(username)
 
             case 400:
@@ -860,6 +866,7 @@ final class SimklAuthService {
                 return .failed(response.errorMessage ?? "Simkl polling failed (\(response.statusCode)).")
             }
         } catch {
+            if Task.isCancelled { return .superseded }
             return .failed("Network error. Retrying is safe.")
         }
     }
@@ -878,7 +885,12 @@ final class SimklAuthService {
                 clientID: requestedClientID
             )
 
-            guard clientID == requestedClientID else { return .pending }
+            let latestState = currentState()
+            guard !Task.isCancelled,
+                  latestState.hasActivePINFlow(in: store),
+                  latestState.userCode == state.userCode,
+                  latestState.deviceCode == state.deviceCode,
+                  latestState.credentialClientID == requestedClientID else { return .superseded }
 
             switch response.statusCode {
             case 200..<300:
@@ -903,7 +915,7 @@ final class SimklAuthService {
                     SimklAuthStore.clearPINFlow(store: store)
                     TraktSettingsStore.selectWatchProgressSourceOnConnect(.simkl, in: store)
                     let username = await fetchUserSettings()
-                    guard clientID == requestedClientID else { return .pending }
+                    guard !Task.isCancelled, clientID == requestedClientID else { return .superseded }
                     return .approved(username)
                 }
                 if body.result?.uppercased() == "KO" {
@@ -931,6 +943,7 @@ final class SimklAuthService {
                 )
             }
         } catch {
+            if Task.isCancelled { return .superseded }
             return .failed("Network error. Retrying is safe.")
         }
     }
@@ -1217,6 +1230,7 @@ final class SimklSettingsViewModel: ObservableObject {
     private var historyTransferTask: Task<Void, Never>?
     private var libraryTransferTask: Task<Void, Never>?
     private var progressTransferTask: Task<Void, Never>?
+    private var authGeneration: UInt = 0
 
     init(
         store: UserDefaults = ProfileSettings.current,
@@ -1300,12 +1314,17 @@ final class SimklSettingsViewModel: ObservableObject {
         statusMessage = nil
         errorMessage = nil
         beginLoadingTimeout(stage: "requesting authorization from Simkl")
+        authGeneration &+= 1
+        let generation = authGeneration
         connectionTask?.cancel()
         connectionTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let response = try await service.startPINAuth()
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == authGeneration else {
+                    if service.currentState().userCode == response.userCode { service.clearPINFlow() }
+                    return
+                }
                 deviceUserCode = response.userCode
                 verificationURI = response.verificationURI
                 verificationURIComplete = response.verificationURIComplete
@@ -1317,7 +1336,7 @@ final class SimklSettingsViewModel: ObservableObject {
                 finishLoading(clearDebug: true)
                 startPolling()
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == authGeneration else { return }
                 errorMessage = error.localizedDescription
                 isLoading = false
                 finishLoading(clearDebug: false)
@@ -1326,6 +1345,7 @@ final class SimklSettingsViewModel: ObservableObject {
     }
 
     func cancelPINFlow() {
+        authGeneration &+= 1
         connectionTask?.cancel()
         connectionTask = nil
         loadingTimeoutTask?.cancel()
@@ -1347,6 +1367,7 @@ final class SimklSettingsViewModel: ObservableObject {
     }
 
     func disconnect() {
+        authGeneration &+= 1
         connectionTask?.cancel()
         connectionTask = nil
         loadingTimeoutTask?.cancel()
@@ -1636,9 +1657,11 @@ final class SimklSettingsViewModel: ObservableObject {
     private func startPolling() {
         pollTask?.cancel()
         isPolling = true
+        let generation = authGeneration
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                guard generation == self.authGeneration else { return }
                 let state = self.service.currentState()
                 if let expiresAt = state.expiresAt,
                    Date().timeIntervalSince1970 * 1000.0 >= expiresAt {
@@ -1651,9 +1674,11 @@ final class SimklSettingsViewModel: ObservableObject {
 
                 let wait = UInt64(max(state.pollInterval ?? self.pollInterval, 5))
                 try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
-                if Task.isCancelled { return }
+                if Task.isCancelled || generation != self.authGeneration { return }
 
-                switch await self.service.pollPINToken() {
+                let result = await self.service.pollPINToken()
+                guard !Task.isCancelled, generation == self.authGeneration else { return }
+                switch result {
                 case .pending:
                     self.statusMessage = "Waiting for Simkl approval…"
                 case .approved(let username):
@@ -1664,6 +1689,9 @@ final class SimklSettingsViewModel: ObservableObject {
                     // Connecting is the explicit action that earns the one
                     // expensive stats read.
                     self.loadConnectedData(includeStats: true)
+                    return
+                case .superseded:
+                    self.isPolling = false
                     return
                 case .expired:
                     self.errorMessage = "Simkl PIN expired. Start again."
