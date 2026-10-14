@@ -1,7 +1,7 @@
 import Foundation
 import AetherEngine
 
-/// Opt-in conversion, read at load time so profile switches and disabling it take effect
+/// Opt-in TrueHD Atmos/DTS:X conversion, read at load time so profile switches and disabling it take effect
 /// on the next playback. Codec, sample-rate and route eligibility remain engine decisions.
 enum SpatialAudioSettings {
     static var isSupported: Bool {

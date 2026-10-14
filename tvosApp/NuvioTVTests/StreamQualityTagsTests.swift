@@ -1415,5 +1415,203 @@ final class StreamQualityTagsTests: XCTestCase {
         )
         XCTAssertNotEqual(keyA, keyB)
     }
+
+    func testActionStreamBehaviorHintsDecoding() throws {
+        let jsonNotPlayable = """
+        {
+            "notPlayable": true
+        }
+        """.data(using: .utf8)!
+        let hintsNotPlayable = try JSONDecoder().decode(StreamAddonBehaviorHints.self, from: jsonNotPlayable)
+        XCTAssertTrue(hintsNotPlayable.isNotPlayable)
+        XCTAssertEqual(hintsNotPlayable.notPlayable, true)
+
+        let jsonAction = """
+        {
+            "action": true
+        }
+        """.data(using: .utf8)!
+        let hintsAction = try JSONDecoder().decode(StreamAddonBehaviorHints.self, from: jsonAction)
+        XCTAssertTrue(hintsAction.isNotPlayable)
+        XCTAssertEqual(hintsAction.action, true)
+
+        let jsonStringBool = """
+        {
+            "notPlayable": "true"
+        }
+        """.data(using: .utf8)!
+        let hintsStringBool = try JSONDecoder().decode(StreamAddonBehaviorHints.self, from: jsonStringBool)
+        XCTAssertTrue(hintsStringBool.isNotPlayable)
+
+        let jsonIntBool = """
+        {
+            "action": 1
+        }
+        """.data(using: .utf8)!
+        let hintsIntBool = try JSONDecoder().decode(StreamAddonBehaviorHints.self, from: jsonIntBool)
+        XCTAssertTrue(hintsIntBool.isNotPlayable)
+
+        let streamDTO = StreamAddonStreamDTO(
+            url: "https://addon.example/action/request-subtitles",
+            name: "Request Subtitles",
+            description: "Click to download subtitles for this episode",
+            behaviorHints: hintsNotPlayable
+        )
+        let nuvioStream = try XCTUnwrap(streamDTO.toNuvioStream(addonName: "SubtitlesAddon"))
+        XCTAssertTrue(nuvioStream.isNotPlayable)
+        XCTAssertEqual(nuvioStream.notPlayable, true)
+    }
+
+    func testPlayableStreamsRetainsActionStreamsRegardlessOfFilters() {
+        let actionStream = NuvioStream(
+            url: "https://addon.example/action/subtitles",
+            name: "Request Subtitles",
+            description: "Helper card",
+            addonName: "Addon",
+            notPlayable: true
+        )
+        let normal0ResStream = NuvioStream(
+            url: "https://addon.example/movie_unknown",
+            name: "Unknown Res CAM",
+            description: "CAM release",
+            addonName: "Addon"
+        )
+        let stream1080p = NuvioStream(
+            url: "https://addon.example/movie1080p",
+            name: "Movie 1080p",
+            description: "1080p WEB-DL",
+            addonName: "Addon"
+        )
+
+        let streams = [actionStream, normal0ResStream, stream1080p]
+
+        // When preserveAddonStreams is false, 0-res normal stream is dropped,
+        // but actionStream MUST be preserved in the playable list.
+        let defaultPlayable = SmartPlaybackSelector.playableStreams(
+            from: streams,
+            includeDebrid: false,
+            cachedOnly: false,
+            preserveAddonStreams: false
+        )
+        XCTAssertTrue(defaultPlayable.contains(where: { $0.id == actionStream.id }))
+        XCTAssertFalse(defaultPlayable.contains(where: { $0.id == normal0ResStream.id }))
+        XCTAssertTrue(defaultPlayable.contains(where: { $0.id == stream1080p.id }))
+
+        // When cachedOnly is true, action stream must also not be dropped.
+        let cachedOnlyPlayable = SmartPlaybackSelector.playableStreams(
+            from: streams,
+            includeDebrid: false,
+            cachedOnly: true,
+            preserveAddonStreams: false
+        )
+        XCTAssertTrue(cachedOnlyPlayable.contains(where: { $0.id == actionStream.id }))
+    }
+
+    func testStreamPickerListBuilderPreservesActionStreamPositions() {
+        let actionStream = NuvioStream(
+            url: "https://addon.example/action/subtitles",
+            name: "Request Subtitles",
+            description: "Helper action",
+            addonName: "Addon",
+            notPlayable: true
+        )
+        let stream720p = NuvioStream(
+            url: "https://addon.example/movie720p",
+            name: "Movie 720p",
+            description: "720p",
+            addonName: "Addon"
+        )
+        let stream1080p = NuvioStream(
+            url: "https://addon.example/movie1080p",
+            name: "Movie 1080p",
+            description: "1080p",
+            addonName: "Addon"
+        )
+        let stream4k = NuvioStream(
+            url: "https://addon.example/movie4k",
+            name: "Movie 4K 2160p",
+            description: "4K",
+            addonName: "Addon"
+        )
+
+        // Case 1: Action stream at index 0 (top)
+        let topActionList = [actionStream, stream720p, stream4k, stream1080p]
+        let sortedQuality = StreamPickerListBuilder.sorted(topActionList, by: .quality, preserveAddonStreams: false)
+        XCTAssertEqual(sortedQuality.count, 4)
+        XCTAssertEqual(sortedQuality[0].id, actionStream.id) // Action item stays at index 0!
+        XCTAssertEqual(sortedQuality[1].id, stream4k.id)     // 4K first among video streams
+        XCTAssertEqual(sortedQuality[2].id, stream1080p.id)  // 1080p second
+        XCTAssertEqual(sortedQuality[3].id, stream720p.id)   // 720p third
+
+        // Default sort keeps action item at index 0
+        let sortedDefault = StreamPickerListBuilder.sorted(topActionList, by: .default, preserveAddonStreams: false)
+        XCTAssertEqual(sortedDefault[0].id, actionStream.id)
+
+        // Case 2: Action stream in middle (index 2)
+        let middleActionList = [stream720p, stream4k, actionStream, stream1080p]
+        let sortedMiddleQuality = StreamPickerListBuilder.sorted(middleActionList, by: .quality, preserveAddonStreams: false)
+        XCTAssertEqual(sortedMiddleQuality.count, 4)
+        XCTAssertEqual(sortedMiddleQuality[0].id, stream4k.id)
+        XCTAssertEqual(sortedMiddleQuality[1].id, stream1080p.id)
+        XCTAssertEqual(sortedMiddleQuality[2].id, actionStream.id) // Stays at index 2!
+        XCTAssertEqual(sortedMiddleQuality[3].id, stream720p.id)
+    }
+
+    func testSmartPlaybackSelectorExcludesActionStreamsFromAutoPlay() {
+        let actionStream = NuvioStream(
+            url: "https://addon.example/action/subtitles",
+            name: "Request Subtitles",
+            description: "Helper card",
+            addonName: "Addon",
+            notPlayable: true
+        )
+        let stream1080p = NuvioStream(
+            url: "https://addon.example/movie1080p",
+            name: "Movie 1080p",
+            description: "1080p WEB-DL",
+            addonName: "Addon"
+        )
+        let stream4k = NuvioStream(
+            url: "https://addon.example/movie4k",
+            name: "Movie 2160p",
+            description: "4K UHD",
+            addonName: "Addon"
+        )
+
+        // Action stream is at the very top of the list
+        let pool = [actionStream, stream1080p, stream4k]
+
+        let best = SmartPlaybackSelector.bestStream(
+            from: pool,
+            qualityPreference: "Highest",
+            subtitleLanguages: [],
+            shouldMatchSubtitles: false
+        )
+        XCTAssertNotNil(best)
+        XCTAssertNotEqual(best?.id, actionStream.id)
+        XCTAssertEqual(best?.id, stream4k.id)
+
+        let ranked = SmartPlaybackSelector.rankedStreams(
+            from: pool,
+            qualityPreference: "Highest",
+            subtitleLanguages: [],
+            shouldMatchSubtitles: false
+        )
+        XCTAssertFalse(ranked.contains(where: { $0.id == actionStream.id }))
+    }
+
+    func testBingeGroupNeverAttachesToActionStream() {
+        let actionStream = NuvioStream(
+            url: "https://addon.example/action/subtitles",
+            name: "Request Subtitles",
+            description: "Action",
+            addonName: "Addon",
+            bingeGroup: "release-group-x",
+            notPlayable: true
+        )
+        let tags = StreamQualityTags.parse(stream: actionStream)
+        XCTAssertNil(tags.bingeGroup)
+        XCTAssertNil(tags.releaseFingerprint)
+    }
 }
 

@@ -552,7 +552,7 @@ enum WatchProgressLedger {
             return copy
         }
         if changed {
-            _ = persist(updated)
+            guard persist(updated) else { return }
         }
         UserDefaults.standard.set(true, forKey: flagKey)
     }

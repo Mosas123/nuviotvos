@@ -120,7 +120,10 @@ struct CloudLibraryService {
 
     func resolve(item: CloudItem, file: CloudFile) async -> CloudPlaybackResult {
         let providers = connectedProviders
-        guard let p = providers.first(where: { $0.id == item.providerId }) ?? providers.first else {
+        // A cloud item belongs to one backend. Falling back to another linked
+        // provider can send a TorBox identifier to Premiumize (or vice versa)
+        // and, worse, use credentials the item never belonged to.
+        guard let p = providers.first(where: { $0.id == item.providerId }) else {
             return .missingCredentials
         }
         guard let prov = providerInstance(for: p.id) else { return .failed(nil) }

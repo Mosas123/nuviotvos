@@ -16,10 +16,15 @@ struct TorboxCloudLibrary: CloudLibraryProvider {
 
     func listItems(apiKey: String) async throws -> [CloudItem] {
         // Each list is independent; a failure in one shouldn't sink the others.
-        async let torrents = fetch("v1/api/torrents/mylist", type: .torrent, apiKey: apiKey)
-        async let usenet = fetch("v1/api/usenet/mylist", type: .usenet, apiKey: apiKey)
-        async let web = fetch("v1/api/webdl/mylist", type: .webDownload, apiKey: apiKey)
-        return try await torrents + usenet + web
+        async let torrents: [CloudItem]? = try? fetch("v1/api/torrents/mylist", type: .torrent, apiKey: apiKey)
+        async let usenet: [CloudItem]? = try? fetch("v1/api/usenet/mylist", type: .usenet, apiKey: apiKey)
+        async let web: [CloudItem]? = try? fetch("v1/api/webdl/mylist", type: .webDownload, apiKey: apiKey)
+        let (torrentItems, usenetItems, webItems) = await (torrents, usenet, web)
+        try Task.checkCancellation()
+        guard torrentItems != nil || usenetItems != nil || webItems != nil else {
+            throw CloudLibraryError.request
+        }
+        return (torrentItems ?? []) + (usenetItems ?? []) + (webItems ?? [])
     }
 
     func resolvePlayback(apiKey: String, item: CloudItem, file: CloudFile) async -> CloudPlaybackResult {

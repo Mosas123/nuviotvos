@@ -257,7 +257,8 @@ struct StreamQualityTags: Equatable, Codable {
         let streamDesc = stream.description ?? ""
         let streamFile = stream.filename ?? ""
         let cachedFlag = stream.isCached == true ? "1" : "0"
-        let cacheKey = "\(streamId)::\(streamUrl)::\(streamName)::\(streamDesc)::\(streamFile)::\(cachedFlag)" as NSString
+        let notPlayableFlag = stream.isNotPlayable ? "notPlayable" : "playable"
+        let cacheKey = "\(streamId)::\(streamUrl)::\(streamName)::\(streamDesc)::\(streamFile)::\(cachedFlag)::\(notPlayableFlag)" as NSString
         if let cached = streamTagsCache.object(forKey: cacheKey) {
             return cached.tags
         }
@@ -267,12 +268,17 @@ struct StreamQualityTags: Equatable, Codable {
             description: stream.description,
             filename: stream.filename,
             url: stream.url,
-            bingeGroup: stream.bingeGroup,
+            bingeGroup: stream.isNotPlayable ? nil : stream.bingeGroup,
             addonName: stream.addonName,
             isCachedHint: stream.isCached,
             releaseFingerprint: nil
         )
-        tags.releaseFingerprint = syntheticBingeGroup(for: stream, existingTags: tags)
+        if stream.isNotPlayable {
+            tags.bingeGroup = nil
+            tags.releaseFingerprint = nil
+        } else {
+            tags.releaseFingerprint = syntheticBingeGroup(for: stream, existingTags: tags)
+        }
         streamTagsCache.setObject(BoxedStreamQualityTags(tags), forKey: cacheKey)
         return tags
     }

@@ -221,6 +221,8 @@ enum SettingsKey {
     static let mdbListUseTrakt = "nuvio.tv.settings.integrations.mdbListUseTrakt"
     static let mdbListUseLetterboxd = "nuvio.tv.settings.integrations.mdbListUseLetterboxd"
     static let mdbListUseAudience = "nuvio.tv.settings.integrations.mdbListUseAudience"
+    static let mdbListUseMyAnimeList = "nuvio.tv.settings.integrations.mdbListUseMyAnimeList"
+    static let mdbListUseTvdb = "nuvio.tv.settings.integrations.mdbListUseTvdb"
     static let debridProvider = "nuvio.tv.settings.integrations.debridProvider"
     static let debridApiKey = "nuvio.tv.settings.integrations.debridApiKey"
     static let debridEnabled = "nuvio.tv.settings.integrations.debridEnabled"
@@ -350,6 +352,7 @@ enum SettingsKey {
         mdbListEnabled, mdbListApiKey, mdbListUseImdb, mdbListUseTmdb,
         mdbListUseTomatoes, mdbListUseMetacritic, mdbListUseTrakt,
         mdbListUseLetterboxd, mdbListUseAudience,
+        mdbListUseMyAnimeList, mdbListUseTvdb,
         debridProvider, debridApiKey, debridEnabled, p2pEnabled, p2pConsentAccepted,
         p2pHideTorrentStats, p2pCacheLimitGB, cloudLibraryEnabled,
         torboxAccessToken, premiumizeAccessToken, realDebridAccessToken,
@@ -4561,6 +4564,9 @@ private struct MdbListOptionsSheet: View {
     @AppStorage(SettingsKey.mdbListUseTrakt) private var mdbListUseTrakt = true
     @AppStorage(SettingsKey.mdbListUseLetterboxd) private var mdbListUseLetterboxd = true
     @AppStorage(SettingsKey.mdbListUseAudience) private var mdbListUseAudience = true
+    @AppStorage(SettingsKey.mdbListUseMyAnimeList) private var mdbListUseMyAnimeList = true
+    @AppStorage(SettingsKey.mdbListUseTvdb) private var mdbListUseTvdb = true
+    @State private var addonRatingSources: [AddonRatingSourceSummary] = []
 
     var body: some View {
         ZStack {
@@ -4657,6 +4663,65 @@ private struct MdbListOptionsSheet: View {
                             accentColor: accentColor,
                             enabled: mdbListControlsEnabled
                         )
+                        SettingsToggleRow(
+                            title: L10n.string("settings_rating_provider_myanimelist", fallback: "MyAnimeList"),
+                            subtitle: L10n.string("settings_rating_provider_myanimelist_subtitle", fallback: "MyAnimeList score"),
+                            isOn: $mdbListUseMyAnimeList,
+                            accentColor: accentColor,
+                            enabled: mdbListControlsEnabled
+                        )
+                        SettingsToggleRow(
+                            title: L10n.string("settings_rating_provider_tvdb", fallback: "TVDB"),
+                            subtitle: L10n.string("settings_rating_provider_tvdb_subtitle", fallback: "TheTVDB community rating"),
+                            isOn: $mdbListUseTvdb,
+                            accentColor: accentColor,
+                            enabled: mdbListControlsEnabled
+                        )
+                    }
+
+                    if !addonRatingSources.isEmpty {
+                        SettingsGroup(
+                            title: L10n.string("settings_addon_rating_providers_title", fallback: "Add-on Rating Providers"),
+                            subtitle: L10n.string("settings_addon_rating_providers_subtitle", fallback: "Choose rating badges provided by installed Stremio add-ons")
+                        ) {
+                            ForEach($addonRatingSources) { $source in
+                                SettingsToggleRow(
+                                    title: source.name,
+                                    subtitle: L10n.format("settings_addon_rating_provider_from", fallback: "%@ (from %@)", source.name, source.addonName),
+                                    isOn: Binding(
+                                        get: { source.isEnabled },
+                                        set: { newValue in
+                                            source.isEnabled = newValue
+                                            AddonRatingsService.setSourceEnabled(source.source, enabled: newValue)
+                                        }
+                                    ),
+                                    accentColor: accentColor,
+                                    enabled: true
+                                )
+
+                                SettingsNativeTextFieldRow(
+                                    title: L10n.string("settings_addon_rating_custom_icon", fallback: "Custom Icon URL"),
+                                    subtitle: L10n.string("settings_addon_rating_custom_icon_subtitle", fallback: "Optional image URL override (e.g. GitHub raw link)"),
+                                    placeholder: source.manifestIcon ?? L10n.string("debrid_not_set", fallback: "Not set"),
+                                    text: Binding(
+                                        get: { source.userIconOverride ?? "" },
+                                        set: { newValue in
+                                            AddonRatingsService.setIconOverride(for: source.source, urlString: newValue)
+                                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                                            source = AddonRatingSourceSummary(
+                                                source: source.source,
+                                                name: source.name,
+                                                addonName: source.addonName,
+                                                manifestIcon: source.manifestIcon,
+                                                userIconOverride: trimmed.isEmpty ? nil : trimmed,
+                                                max: source.max,
+                                                isEnabled: source.isEnabled
+                                            )
+                                        }
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 52)
@@ -4665,6 +4730,9 @@ private struct MdbListOptionsSheet: View {
             .focusSection()
         }
         .onAppear(perform: normalizeMdbListApiKey)
+        .task {
+            addonRatingSources = await AddonRatingsService.availableRatingSources()
+        }
         .onChange(of: mdbListApiKey) { _, _ in
             if !mdbListHasApiKey {
                 mdbListEnabled = false
@@ -7544,10 +7612,10 @@ private struct PlaybackSettingsView: View {
                 .settingsEntryAnchor()
 
                 SettingsToggleRow(
-                    title: L10n.string("tvos_settings_truehd_spatial_audio", fallback: "TrueHD Atmos Spatial Audio (Beta)"),
+                    title: L10n.string("tvos_settings_truehd_spatial_audio", fallback: "Atmos & DTS:X Spatial Audio (Beta)"),
                     subtitle: L10n.string(
                         "tvos_settings_truehd_spatial_audio_subtitle",
-                        fallback: "Render height effects to 9.1.6 using lossy APAC audio. Requires tvOS 26+ and AetherEngine; MPVKit and external players are unaffected. Applies to the next playback."
+                        fallback: "Render TrueHD Atmos and DTS:X to 9.1.6 using lossy APAC. Requires tvOS 26+ and AetherEngine; applies to the next playback."
                     ),
                     isOn: $trueHDSpatialAudio,
                     accentColor: accentColor
@@ -7640,7 +7708,7 @@ private struct PlaybackSettingsView: View {
                     title: L10n.string("tvos_settings_buffer_profile", fallback: "Buffer Profile"),
                     subtitle: L10n.string(
                         "tvos_settings_buffer_profile_aether",
-                        fallback: "Disk-backed forward buffer (Aether segments) / MPV demuxer cache. Auto dynamically scales to memory."
+                        fallback: "Aether stores stream segments on disk; MPV caches packet payloads on disk. Hybrid Disk Cache adds a persistent origin cache."
                     ),
                     selection: $networkCache,
                     options: cacheModes,

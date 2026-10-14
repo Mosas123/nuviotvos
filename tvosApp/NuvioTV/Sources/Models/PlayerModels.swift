@@ -619,6 +619,8 @@ struct PreparedNextStream {
     var provider: String? = nil
     var bingeGroup: String? = nil
     var artworkURL: URL? = nil
+    /// Storyboard URL belonging to this replacement source, if provided.
+    var trickplayURL: URL? = nil
 }
 
 struct PlayerTime: Equatable {

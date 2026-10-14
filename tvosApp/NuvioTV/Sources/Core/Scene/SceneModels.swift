@@ -24,6 +24,65 @@ enum SceneTab: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+// MARK: - Scene Playback Info
+
+struct ScenePlaybackInfo: Equatable, Sendable {
+    // PLAYBACK ENGINE
+    var engine: String
+    var version: String
+    
+    // VIDEO STREAM
+    var videoCodec: String
+    var resolution: String
+    var frameRate: String
+    var dynamicRange: String
+    var dolbyVisionProfile: String?
+    var videoBitrate: String
+    var container: String
+    var videoDecoder: String
+    
+    // AUDIO STREAM
+    var audioCodec: String
+    var audioChannels: String
+    var audioLanguage: String
+    var audioBitrate: String
+    var audioDecoder: String
+    
+    init(
+        engine: String = "—",
+        version: String = "—",
+        videoCodec: String = "—",
+        resolution: String = "—",
+        frameRate: String = "—",
+        dynamicRange: String = "—",
+        dolbyVisionProfile: String? = nil,
+        videoBitrate: String = "—",
+        container: String = "—",
+        videoDecoder: String = "—",
+        audioCodec: String = "—",
+        audioChannels: String = "—",
+        audioLanguage: String = "—",
+        audioBitrate: String = "—",
+        audioDecoder: String = "—"
+    ) {
+        self.engine = engine
+        self.version = version
+        self.videoCodec = videoCodec
+        self.resolution = resolution
+        self.frameRate = frameRate
+        self.dynamicRange = dynamicRange
+        self.dolbyVisionProfile = dolbyVisionProfile
+        self.videoBitrate = videoBitrate
+        self.container = container
+        self.videoDecoder = videoDecoder
+        self.audioCodec = audioCodec
+        self.audioChannels = audioChannels
+        self.audioLanguage = audioLanguage
+        self.audioBitrate = audioBitrate
+        self.audioDecoder = audioDecoder
+    }
+}
+
 // MARK: - Scene Context
 
 struct SceneContext: Equatable, Sendable {

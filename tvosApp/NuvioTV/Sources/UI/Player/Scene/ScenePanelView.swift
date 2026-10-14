@@ -23,7 +23,7 @@ struct ScenePanelView: View {
             Spacer()
             
             // Bottom third panel
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 22) {
                 // Tab Header Bar
                 tabHeaderBar
                     .padding(.top, 10)
@@ -39,8 +39,8 @@ struct ScenePanelView: View {
                         upNextTabContent
                     }
                 }
-                .frame(height: 248)
-                .padding(.bottom, 40)
+                .frame(height: 272, alignment: .top)
+                .padding(.bottom, 24)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -65,7 +65,7 @@ struct ScenePanelView: View {
     // MARK: - Tab Header Bar
     
     private var tabHeaderBar: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 20) {
             ForEach(viewModel.availableTabs) { tab in
                 let isSelected = viewModel.selectedTab == tab
                 let isTabFocused = focusedTab == tab
@@ -77,10 +77,10 @@ struct ScenePanelView: View {
                     }
                 }) {
                     Text(tab.localizedTitle)
-                        .font(.system(size: 20, weight: isFilled ? .bold : .semibold))
+                        .font(.system(size: 26, weight: isFilled ? .bold : .semibold))
                         .foregroundColor(isFilled ? .black : .white.opacity(0.85))
-                        .padding(.horizontal, 24)
-                        .frame(height: 48)
+                        .padding(.horizontal, 36)
+                        .frame(height: 64)
                         .modifier(TvDetailsGlassBackground(filled: isFilled, shape: Capsule()))
                 }
                 .buttonStyle(PosterCardButtonStyle())
@@ -109,13 +109,13 @@ struct ScenePanelView: View {
     
     private var sceneTabContent: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .center, spacing: 20) {
+            HStack(alignment: .top, spacing: 20) {
                 let recognizedActors = viewModel.snapshot.actors
                 let playingSong = viewModel.snapshot.song
                 
                 if recognizedActors.isEmpty, let song = playingSong {
-                    // When music is playing but no cast is detected, music is in first place!
-                    SceneSongCard(song: song) {
+                    let isSongFocused = focusedCardID == "song-\(song.id)"
+                    SceneSongCard(song: song, isFocused: isSongFocused) {
                         viewModel.openDetail(.song(song))
                     }
                     .focused($focusedCardID, equals: "song-\(song.id)")
@@ -127,11 +127,12 @@ struct ScenePanelView: View {
                         }
                     }
                 } else if !recognizedActors.isEmpty {
-                    // Live detected actors in current scene
                     ForEach(recognizedActors) { actor in
+                        let isActorFocused = focusedCardID == "actor-\(actor.id)"
                         SceneActorCard(
                             actor: actor,
-                            isLiveRecognized: true
+                            isLiveRecognized: true,
+                            isFocused: isActorFocused
                         ) {
                             viewModel.openDetail(.actor(actor, detail: nil))
                         }
@@ -145,9 +146,9 @@ struct ScenePanelView: View {
                         }
                     }
                     
-                    // Accompanied by playing music if present
                     if let song = playingSong {
-                        SceneSongCard(song: song) {
+                        let isSongFocused = focusedCardID == "song-\(song.id)"
+                        SceneSongCard(song: song, isFocused: isSongFocused) {
                             viewModel.openDetail(.song(song))
                         }
                         .focused($focusedCardID, equals: "song-\(song.id)")
@@ -160,175 +161,247 @@ struct ScenePanelView: View {
                         }
                     }
                 } else {
-                    // No detected actors and no music: show clean scanning / status card
                     statusCard
                 }
             }
             .padding(.horizontal, 60)
-            .padding(.vertical, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 24)
         }
+        .scrollClipDisabled()
     }
     
     @ViewBuilder
     private var statusCard: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
+            Spacer(minLength: 0)
             switch viewModel.snapshot.actorStatus {
             case .analyzing, .preparingReferences:
                 ProgressView()
-                    .scaleEffect(1.1)
-                    .padding(.bottom, 4)
+                    .scaleEffect(1.2)
+                    .padding(.bottom, 6)
                 Text(viewModel.isAnime ? "Loading cast…" : "Scanning scene…")
                     .font(.system(size: 16, weight: .medium))
                     .foregroundColor(.white.opacity(0.7))
             case .unavailable(let reason):
                 Image(systemName: "person.crop.circle.badge.questionmark")
-                    .font(.system(size: 32))
+                    .font(.system(size: 38))
                     .foregroundColor(.white.opacity(0.35))
-                    .padding(.bottom, 2)
+                    .padding(.bottom, 4)
                 Text(reason.isEmpty ? (viewModel.isAnime ? "No cast available" : "No actors in this shot") : reason)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundColor(.white.opacity(0.6))
                     .multilineTextAlignment(.center)
             default:
                 Image(systemName: "person.crop.circle.badge.questionmark")
-                    .font(.system(size: 32))
+                    .font(.system(size: 38))
                     .foregroundColor(.white.opacity(0.35))
-                    .padding(.bottom, 2)
+                    .padding(.bottom, 4)
                 Text(viewModel.isAnime ? "No cast for this episode" : "No actors in this shot")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundColor(.white.opacity(0.6))
                     .multilineTextAlignment(.center)
             }
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 14)
-        .padding(.horizontal, 10)
-        .frame(width: 174, height: 188)
-        .modifier(TvCardGlassBackground(isFocused: false, shape: RoundedRectangle(cornerRadius: 24, style: .continuous)))
+        .padding(.vertical, 16)
+        .padding(.horizontal, 12)
+        .frame(width: 184, height: 236)
+        .modifier(TvCardGlassBackground(isFocused: false, shape: RoundedRectangle(cornerRadius: 32, style: .continuous)))
     }
     
-    // MARK: - Info Tab Content
+    // MARK: - Info Tab Content (Horizontal Playback Telemetry)
     
     private var infoTabContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 16) {
-                Text(viewModel.infoTitle)
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundColor(.white)
-                
-                if let year = viewModel.infoYear {
-                    Text(year)
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundColor(.white.opacity(0.6))
+        let info = viewModel.playbackInfo ?? ScenePlaybackInfo()
+        
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 20) {
+                // Section 1: PLAYBACK ENGINE
+                telemetryCard(title: "PLAYBACK ENGINE", width: 340) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        infoRow(label: "Engine", value: info.engine)
+                        infoRow(label: "Version", value: info.version)
+                    }
                 }
                 
-                if let runtime = viewModel.infoRuntime {
-                    Text(runtime)
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundColor(.white.opacity(0.6))
+                // Section 2: VIDEO STREAM
+                telemetryCard(title: "VIDEO STREAM", width: 560) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        infoRow(label: "Codec", value: info.videoCodec)
+                        infoRow(label: "Resolution", value: info.resolution)
+                        infoRow(label: "Frame Rate", value: info.frameRate)
+                        infoRow(label: "Dynamic Range", value: info.dynamicRange)
+                        if let profile = info.dolbyVisionProfile, !profile.isEmpty {
+                            infoRow(label: "Dolby Vision Profile", value: profile)
+                        }
+                        infoRow(label: "Bitrate", value: info.videoBitrate)
+                        infoRow(label: "Container", value: info.container)
+                        infoRow(label: "Decoder", value: info.videoDecoder)
+                    }
+                }
+                
+                // Section 3: AUDIO STREAM
+                telemetryCard(title: "AUDIO STREAM", width: 540) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        infoRow(label: "Codec", value: info.audioCodec)
+                        infoRow(label: "Channels", value: info.audioChannels)
+                        infoRow(label: "Language", value: info.audioLanguage)
+                        infoRow(label: "Bitrate", value: info.audioBitrate)
+                        infoRow(label: "Decoder", value: info.audioDecoder)
+                    }
                 }
             }
-            
-            if !viewModel.infoOverview.isEmpty {
-                Text(viewModel.infoOverview)
-                    .font(.system(size: 19, weight: .regular))
-                    .foregroundColor(.white.opacity(0.85))
-                    .lineLimit(4)
-                    .frame(maxWidth: 900, alignment: .leading)
-            }
+            .padding(.horizontal, 60)
+            .padding(.top, 16)
+            .padding(.bottom, 24)
         }
-        .padding(.horizontal, 60)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .scrollClipDisabled()
+    }
+    
+    private func telemetryCard<Content: View>(
+        title: String,
+        width: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 15, weight: .heavy))
+                .foregroundColor(.white)
+                .tracking(1.2)
+            
+            Rectangle()
+                .fill(Color.white.opacity(0.14))
+                .frame(height: 1)
+                .padding(.bottom, 2)
+            
+            content()
+            
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .frame(width: width, height: 236, alignment: .topLeading)
+        .modifier(TvCardGlassBackground(isFocused: false, shape: RoundedRectangle(cornerRadius: 32, style: .continuous)))
+    }
+    
+    private func infoRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 14) {
+            Text(label)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundColor(Color.white.opacity(0.65))
+                .lineLimit(1)
+                .frame(minWidth: 90, alignment: .leading)
+            
+            Spacer(minLength: 12)
+            
+            Text(value)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
     }
     
     // MARK: - Up Next Tab Content
     
     @ViewBuilder
     private var upNextTabContent: some View {
-        if let next = viewModel.nextEpisode {
-            Button(action: {
-                onPlayNextEpisode?()
-            }) {
-                HStack(spacing: 24) {
-                    // Thumbnail
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(Color.white.opacity(0.12))
-                            .frame(width: 240, height: 140)
-                        
-                        if let thumb = next.thumbnail, let url = URL(string: thumb) {
-                            AsyncImage(url: url) { phase in
-                                if let img = phase.image {
-                                    img.resizable().scaledToFill()
-                                        .frame(width: 240, height: 140)
-                                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        let isNextFocused = focusedCardID == "upNext"
+        
+        VStack(alignment: .leading, spacing: 0) {
+            if let next = viewModel.nextEpisode {
+                Button(action: {
+                    onPlayNextEpisode?()
+                }) {
+                    HStack(spacing: 24) {
+                        // Thumbnail
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                .fill(isNextFocused ? Color.black.opacity(0.08) : Color.white.opacity(0.12))
+                                .frame(width: 300, height: 170)
+                            
+                            if let thumb = next.thumbnail, let url = URL(string: thumb) {
+                                AsyncImage(url: url) { phase in
+                                    if let img = phase.image {
+                                        img.resizable().scaledToFill()
+                                            .frame(width: 300, height: 170)
+                                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                                    }
                                 }
                             }
-                        }
-                        
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 26))
-                            .foregroundColor(.white)
-                            .padding(14)
-                            .background(Circle().fill(Color.black.opacity(0.6)))
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Up Next")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundColor(Color(red: 0.10, green: 0.68, blue: 1.0))
-                            .textCase(.uppercase)
-                        
-                        Text("S\(next.season) · E\(next.episode): \(next.title)")
-                            .font(.system(size: 22, weight: .bold))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                        
-                        if let overview = next.overview, !overview.isEmpty {
-                            Text(overview)
-                                .font(.system(size: 16, weight: .regular))
-                                .foregroundColor(.white.opacity(0.7))
-                                .lineLimit(2)
-                        }
-                        
-                        HStack(spacing: 8) {
+                            
                             Image(systemName: "play.fill")
-                                .font(.system(size: 14))
-                            Text("Play Next Episode")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(.system(size: 30))
+                                .foregroundColor(.white)
+                                .padding(16)
+                                .background(Circle().fill(Color.black.opacity(0.6)))
                         }
-                        .foregroundColor(focusedCardID == "upNext" ? Color.black : Color.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(
-                            Capsule()
-                                .fill(focusedCardID == "upNext" ? Color.white : Color.white.opacity(0.2))
-                        )
-                        .padding(.top, 4)
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Up Next")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(isNextFocused ? Color(red: 0.0, green: 0.45, blue: 0.85) : Color(red: 0.10, green: 0.68, blue: 1.0))
+                                .textCase(.uppercase)
+                            
+                            Text("S\(next.season) · E\(next.episode): \(next.title)")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(isNextFocused ? .black : .white)
+                                .lineLimit(1)
+                            
+                            if let overview = next.overview, !overview.isEmpty {
+                                Text(overview)
+                                    .font(.system(size: 16, weight: .regular))
+                                    .foregroundColor(isNextFocused ? Color.black.opacity(0.7) : Color.white.opacity(0.7))
+                                    .lineLimit(2)
+                            }
+                            
+                            HStack(spacing: 8) {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 14))
+                                Text("Play Next Episode")
+                                    .font(.system(size: 16, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(
+                                Capsule()
+                                    .fill(isNextFocused ? Color.black : Color.white.opacity(0.2))
+                            )
+                            .padding(.top, 4)
+                        }
+                        .frame(maxWidth: 520, alignment: .leading)
                     }
-                    .frame(maxWidth: 500, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 16)
+                    .frame(height: 236)
+                    .modifier(TvDetailsGlassBackground(filled: isNextFocused, shape: RoundedRectangle(cornerRadius: 32, style: .continuous)))
+                    .shadow(color: Color.black.opacity(isNextFocused ? 0.22 : 0.25), radius: isNextFocused ? 10 : 6, y: isNextFocused ? 5 : 3)
                 }
-                .padding(14)
-                .modifier(TvCardGlassBackground(isFocused: focusedCardID == "upNext", shape: RoundedRectangle(cornerRadius: 24, style: .continuous)))
-                .shadow(color: focusedCardID == "upNext" ? Color.white.opacity(0.25) : Color.black.opacity(0.3), radius: focusedCardID == "upNext" ? 14 : 6, y: 3)
-            }
-            .buttonStyle(PosterCardButtonStyle())
-            .focused($focusedCardID, equals: "upNext")
-            .focusEffectDisabledIfAvailable()
-            .scaleEffect(focusedCardID == "upNext" ? 1.03 : 1.0)
-            .animation(.easeOut(duration: 0.14), value: focusedCardID == "upNext")
-            .onExitCommand(perform: onDismiss)
-            .onMoveCommand { direction in
-                if direction == .up {
-                    focusedCardID = nil
-                    focusedTab = viewModel.selectedTab
+                .buttonStyle(PosterCardButtonStyle())
+                .focused($focusedCardID, equals: "upNext")
+                .focusEffectDisabledIfAvailable()
+                .scaleEffect(isNextFocused ? 1.03 : 1.0)
+                .animation(.easeOut(duration: 0.14), value: isNextFocused)
+                .onExitCommand(perform: onDismiss)
+                .onMoveCommand { direction in
+                    if direction == .up {
+                        focusedCardID = nil
+                        focusedTab = viewModel.selectedTab
+                    }
                 }
-            }
-            .padding(.horizontal, 60)
-        } else {
-            Text("No upcoming episode")
-                .font(.system(size: 20, weight: .medium))
-                .foregroundColor(.white.opacity(0.6))
                 .padding(.horizontal, 60)
+                .padding(.top, 16)
+            } else {
+                Text("No upcoming episode")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(.white.opacity(0.6))
+                    .padding(.horizontal, 60)
+                    .padding(.top, 24)
+            }
+            
+            Spacer(minLength: 0)
         }
     }
     
@@ -338,16 +411,20 @@ struct ScenePanelView: View {
         switch viewModel.selectedTab {
         case .scene:
             if viewModel.snapshot.actors.isEmpty, let song = viewModel.snapshot.song {
+                focusedTab = nil
                 focusedCardID = "song-\(song.id)"
             } else if let firstActor = viewModel.snapshot.actors.first {
+                focusedTab = nil
                 focusedCardID = "actor-\(firstActor.id)"
             } else if let song = viewModel.snapshot.song {
+                focusedTab = nil
                 focusedCardID = "song-\(song.id)"
             } else {
                 focusedTab = viewModel.selectedTab
             }
         case .upNext:
             if viewModel.nextEpisode != nil {
+                focusedTab = nil
                 focusedCardID = "upNext"
             } else {
                 focusedTab = viewModel.selectedTab

@@ -55,6 +55,7 @@ final class SMBSessionManager: ObservableObject {
 
     private var browsers: [String: SMBBrowser] = [:]
     private var scanTasks: [String: Task<Void, Never>] = [:]
+    private var connectionGenerations: [String: Int] = [:]
 
     private init() {}
 
@@ -94,27 +95,44 @@ final class SMBSessionManager: ObservableObject {
     }
 
     func connect(_ server: SMBServerConfig) async {
+        let generation = (connectionGenerations[server.id] ?? 0) &+ 1
+        connectionGenerations[server.id] = generation
         connectionStates[server.id] = .connecting
         let browser = SMBBrowser(host: server.host, port: server.port, auth: authMode(for: server))
         do {
             try await browser.connect()
+            guard connectionGenerations[server.id] == generation,
+                  !Task.isCancelled else {
+                await browser.disconnect()
+                return
+            }
             let shares = try await browser.shares()
+            guard connectionGenerations[server.id] == generation,
+                  !Task.isCancelled else {
+                await browser.disconnect()
+                return
+            }
             browsers[server.id] = browser
             connectionStates[server.id] = .connected(shares: shares)
         } catch {
-            connectionStates[server.id] = .failed(error.localizedDescription)
+            await browser.disconnect()
+            if connectionGenerations[server.id] == generation, !Task.isCancelled {
+                connectionStates[server.id] = .failed(error.localizedDescription)
+            }
         }
     }
 
     func disconnect(_ server: SMBServerConfig) async {
+        connectionGenerations[server.id] = (connectionGenerations[server.id] ?? 0) &+ 1
         scanTasks[server.id]?.cancel()
         scanTasks[server.id] = nil
-        if let browser = browsers.removeValue(forKey: server.id) {
-            await browser.disconnect()
-        }
+        let browser = browsers.removeValue(forKey: server.id)
         connectionStates[server.id] = .disconnected
         testStates[server.id] = .idle
         scanStates[server.id] = .idle
+        if let browser {
+            await browser.disconnect()
+        }
     }
 
     /// "Test connection": only meaningful once connected — round-trips an

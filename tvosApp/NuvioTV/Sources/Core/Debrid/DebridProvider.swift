@@ -130,17 +130,16 @@ enum DebridVideo {
         return extensions.contains(ext)
     }
 
-    /// Case-insensitive S/E patterns used to pick the right file from a pack
-    /// (e.g. "s01e05", "1x05"). Empty for movies.
-    static func episodePatterns(season: Int?, episode: Int?) -> [String] {
-        guard let season, let episode else { return [] }
-        let s2 = String(format: "%02d", season)
-        let e2 = String(format: "%02d", episode)
-        return [
-            "s\(s2)e\(e2)",
-            "\(season)x\(e2)",
-            "s\(season)e\(episode)"
-        ]
+    /// Matches complete episode tokens such as S01E05, S1E5 or 1x05. The
+    /// trailing digit boundary is essential: S1E2 must not select S1E20.
+    static func matchesEpisode(_ path: String, season: Int?, episode: Int?) -> Bool {
+        guard let season, let episode, season >= 0, episode > 0 else { return false }
+        let pattern = "(?:^|[^a-z0-9])(?:s0*\(season)e0*\(episode)|0*\(season)x0*\(episode))(?![0-9])"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return false
+        }
+        let range = NSRange(path.startIndex..., in: path)
+        return regex.firstMatch(in: path, range: range) != nil
     }
 }
 
@@ -160,11 +159,14 @@ enum DebridFileSelection {
         guard !playable.isEmpty else { return nil }
 
         // Series: a filename that matches the season/episode wins.
-        let patterns = DebridVideo.episodePatterns(season: request.season, episode: request.episode)
-        if !patterns.isEmpty,
+        if request.season != nil,
+           request.episode != nil,
            let match = playable.first(where: { file in
-               let lower = name(file).lowercased()
-               return patterns.contains { lower.contains($0) }
+               DebridVideo.matchesEpisode(
+                   name(file),
+                   season: request.season,
+                   episode: request.episode
+               )
            }) {
             return match
         }

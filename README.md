@@ -69,7 +69,7 @@ The IPA requires a compatible tvOS development or sideloading signing workflow b
 
 Nuvio ships with **AetherEngine** — a free, built-in player with native tvOS controls, subtitle support, resume, audio delay adjustment, and frame-rate matching. **MPVKit** stays as a fallback for edge cases AetherEngine doesn't cover yet (including audio amplification, separate video/audio streams, and full ASS typesetting).
 
-For TrueHD Atmos movies, **Settings → Playback → Player → TrueHD Atmos Spatial Audio (Beta)**
+For TrueHD Atmos and DTS:X movies, **Settings → Playback → Player → Atmos & DTS:X Spatial Audio (Beta)**
 opts into a fixed 9.1.6 render through APAC on tvOS 26+. It is off by default and uses lossy
 encoding. See [the spatial audio notes](docs/truehd-spatial-audio.md) for supported sources,
 fallback behavior, and the distinction from TrueHD passthrough.

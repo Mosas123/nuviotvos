@@ -73,12 +73,46 @@ struct NuvioCatalog: Identifiable, Codable {
     }
 }
 
-/// A rating returned by an external metadata provider such as IMDb or TMDB.
+/// A rating returned by an external metadata provider such as IMDb, TMDB, or Stremio add-on.
 struct NuvioExternalRating: Codable, Hashable, Identifiable {
     let source: String
     let value: Double
+    let url: String?
+    let name: String?
+    let iconUrl: String?
+    let max: Double?
 
     var id: String { source }
+
+    init(
+        source: String,
+        value: Double,
+        url: String? = nil,
+        name: String? = nil,
+        iconUrl: String? = nil,
+        max: Double? = nil
+    ) {
+        self.source = source
+        self.value = value
+        self.url = url
+        self.name = name
+        self.iconUrl = iconUrl
+        self.max = max
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case source, value, url, name, iconUrl, max
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.source = try container.decode(String.self, forKey: .source)
+        self.value = try container.decode(Double.self, forKey: .value)
+        self.url = try container.decodeIfPresent(String.self, forKey: .url)
+        self.name = try container.decodeIfPresent(String.self, forKey: .name)
+        self.iconUrl = try container.decodeIfPresent(String.self, forKey: .iconUrl)
+        self.max = try container.decodeIfPresent(Double.self, forKey: .max)
+    }
 }
 
 /// Content metadata
@@ -1149,6 +1183,12 @@ struct NuvioStream: Identifiable, Codable {
     let httpHeaders: [String: String]?
     /// Direct storyboard/trickplay manifest URL (WebVTT) when supplied by the stream add-on.
     let trickplayURL: URL?
+    /// Stremio `behaviorHints.notPlayable` or `behaviorHints.action` for non-media helper/action items.
+    let notPlayable: Bool?
+
+    var isNotPlayable: Bool {
+        notPlayable == true
+    }
 
     init(
         url: String?,
@@ -1166,7 +1206,8 @@ struct NuvioStream: Identifiable, Codable {
         bingeGroup: String? = nil,
         isCached: Bool? = nil,
         httpHeaders: [String: String]? = nil,
-        trickplayURL: URL? = nil
+        trickplayURL: URL? = nil,
+        notPlayable: Bool? = nil
     ) {
         let parsed = TorrentSourceParser.parse(
             url: url,
@@ -1189,6 +1230,7 @@ struct NuvioStream: Identifiable, Codable {
         self.isCached = isCached
         self.httpHeaders = httpHeaders
         self.trickplayURL = trickplayURL
+        self.notPlayable = notPlayable
     }
 
     /// Explicit availability notice from a source add-on. Ordinary titles, filenames, and add-on names
@@ -1360,7 +1402,7 @@ struct NuvioStream: Identifiable, Codable {
             subtitles: subtitles, addonLogoURL: logo, infoHash: infoHash,
             fileIdx: fileIdx, sources: sources, filename: filename, videoSize: videoSize,
             videoHash: videoHash, bingeGroup: bingeGroup, isCached: isCached,
-            httpHeaders: httpHeaders, trickplayURL: trickplayURL
+            httpHeaders: httpHeaders, trickplayURL: trickplayURL, notPlayable: notPlayable
         )
     }
 
@@ -1389,7 +1431,8 @@ struct NuvioStream: Identifiable, Codable {
             bingeGroup: bingeGroup,
             isCached: isCached,
             httpHeaders: httpHeaders,
-            trickplayURL: trickplayURL
+            trickplayURL: trickplayURL,
+            notPlayable: notPlayable
         )
     }
 }
@@ -7303,11 +7346,14 @@ enum WatchedStore {
                 currentItems: current
             )
             updated = [marker] + current.filter { !matchesSeries($0) }
-            clearTombstone(meta: meta, season: nil, episode: nil)
         } else {
             updated = current.filter { !matchesSeries($0) }
         }
-        _ = persist(updated)
+        // Retain deletion protection until the replacement watched state is durable.
+        guard persist(updated) else { return }
+        if allAiredEpisodesWatched {
+            clearTombstone(meta: meta, season: nil, episode: nil)
+        }
     }
 
     private static func manualMark(

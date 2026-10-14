@@ -744,6 +744,8 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertTrue(localKeys.contains(SettingsKey.mdbListUseTrakt))
         XCTAssertTrue(localKeys.contains(SettingsKey.mdbListUseLetterboxd))
         XCTAssertTrue(localKeys.contains(SettingsKey.mdbListUseAudience))
+        XCTAssertTrue(localKeys.contains(SettingsKey.mdbListUseMyAnimeList))
+        XCTAssertTrue(localKeys.contains(SettingsKey.mdbListUseTvdb))
 
         let remoteKeys = MdbListSyncMapper.remoteToLocalKeyMappings.map(\.remote)
         XCTAssertTrue(remoteKeys.contains("mdblist_enabled"))
@@ -755,6 +757,9 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertTrue(remoteKeys.contains("mdblist_use_trakt"))
         XCTAssertTrue(remoteKeys.contains("mdblist_use_letterboxd"))
         XCTAssertTrue(remoteKeys.contains("mdblist_use_audience"))
+        XCTAssertTrue(remoteKeys.contains("mdblist_use_myanimelist"))
+        XCTAssertTrue(remoteKeys.contains("mdblist_use_mal"))
+        XCTAssertTrue(remoteKeys.contains("mdblist_use_tvdb"))
     }
 
     // MARK: - Theme / Focus Color Settings Sync Tests

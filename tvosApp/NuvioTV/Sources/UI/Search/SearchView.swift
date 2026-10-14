@@ -171,6 +171,9 @@ struct SearchView: View {
             HiddenSearchTextField(
                 text: $viewModel.searchText,
                 isEditing: $searchTextInputActive,
+                onSubmit: {
+                    viewModel.performSearch(query: viewModel.searchText)
+                }
             )
             .frame(width: 1, height: 1)
             .offset(x: -4_000)
@@ -419,6 +422,7 @@ struct SearchView: View {
 struct HiddenSearchTextField: UIViewRepresentable {
     @Binding var text: String
     @Binding var isEditing: Bool
+    var onSubmit: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> HiddenSearchUITextField {
         let textField = HiddenSearchUITextField(frame: .zero)
@@ -452,16 +456,18 @@ struct HiddenSearchTextField: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, isEditing: $isEditing)
+        Coordinator(text: $text, isEditing: $isEditing, onSubmit: onSubmit)
     }
 
     final class Coordinator: NSObject, UITextFieldDelegate {
         private let text: Binding<String>
         private let isEditing: Binding<Bool>
+        private let onSubmit: (() -> Void)?
 
-        init(text: Binding<String>, isEditing: Binding<Bool>) {
+        init(text: Binding<String>, isEditing: Binding<Bool>, onSubmit: (() -> Void)? = nil) {
             self.text = text
             self.isEditing = isEditing
+            self.onSubmit = onSubmit
         }
 
         @objc func textDidChange(_ sender: UITextField) {
@@ -471,6 +477,7 @@ struct HiddenSearchTextField: UIViewRepresentable {
         func textFieldShouldReturn(_ textField: UITextField) -> Bool {
             isEditing.wrappedValue = false
             textField.resignFirstResponder()
+            onSubmit?()
             return true
         }
 

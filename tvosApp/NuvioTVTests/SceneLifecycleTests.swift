@@ -81,6 +81,73 @@ private actor StartupCallbackGate {
 @MainActor
 final class SceneLifecycleTests: XCTestCase {
 
+    @MainActor
+    func testCoordinatorDispatchWitnessBelongsOnlyToCurrentGeneration() {
+        var engineSetting = "AetherEngine"
+        var dispatchedGenerations: [UInt64] = []
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { engineSetting },
+            loadDispatcher: { _, _, generation in dispatchedGenerations.append(generation) }
+        )
+
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/first.mkv")!))
+        let undispatchedGeneration = coordinator.loadGeneration
+        XCTAssertFalse(coordinator.hasDispatchedCurrentLoad(generation: undispatchedGeneration))
+
+        engineSetting = "MPVKit"
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/second.mkv")!))
+        let dispatchedGeneration = coordinator.loadGeneration
+        XCTAssertTrue(coordinator.hasDispatchedCurrentLoad(generation: dispatchedGeneration))
+        XCTAssertFalse(coordinator.hasDispatchedCurrentLoad(generation: undispatchedGeneration))
+        XCTAssertEqual(dispatchedGenerations, [dispatchedGeneration])
+
+        coordinator.stopAll()
+        XCTAssertFalse(coordinator.hasDispatchedCurrentLoad(generation: dispatchedGeneration))
+    }
+
+    func testAetherPresentationRequiresCurrentLoadEngineEpochAndPresentingCheckpoint() {
+        XCTAssertFalse(AetherStartupLoadPresentationPolicy.isPresented(
+            expectedLoadGeneration: 8,
+            ownerLoadGeneration: 7,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpointIsPresenting: true
+        ), "A ready frame owned by the outgoing load cannot present the replacement")
+
+        XCTAssertFalse(AetherStartupLoadPresentationPolicy.isPresented(
+            expectedLoadGeneration: 8,
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 14,
+            progressGeneration: 13,
+            checkpointIsPresenting: true
+        ), "An engine progress event below the dispatch epoch is stale")
+
+        XCTAssertFalse(AetherStartupLoadPresentationPolicy.isPresented(
+            expectedLoadGeneration: 8,
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpointIsPresenting: false
+        ), "A new engine generation must reach the presenting checkpoint")
+
+        XCTAssertTrue(AetherStartupLoadPresentationPolicy.isPresented(
+            expectedLoadGeneration: 8,
+            ownerLoadGeneration: 8,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpointIsPresenting: true
+        ), "A fast current load is accepted without requiring an observed loading phase")
+
+        XCTAssertFalse(AetherStartupLoadPresentationPolicy.isPresented(
+            expectedLoadGeneration: 8,
+            ownerLoadGeneration: nil,
+            engineGenerationFloor: 14,
+            progressGeneration: 14,
+            checkpointIsPresenting: true
+        ), "A context without a current load owner cannot claim presentation")
+    }
+
     func testDispatchCheckpointEstablishesEngineBoundaryAndResetsForNextPlayback() {
         var now = Date(timeIntervalSince1970: 100)
         let benchmark = PlaybackStartupBenchmark(dateProvider: { now })

@@ -570,6 +570,12 @@ actor PlaybackStreamCacheManager {
             identity.append(key.lowercased())
             identity.append(headers[key])
         }
+        // Without an upstream validator, the same request can return different
+        // bytes of the same length. Isolate this load from persisted URL caches.
+        // Trusted immutable file identities still reuse their content namespace.
+        if probe.etag == nil, probe.lastModified == nil {
+            identity.append(UUID().uuidString)
+        }
         let identityData = (try? JSONEncoder().encode(identity)) ?? Data(remoteURL.absoluteString.utf8)
         let hash = SHA256.hash(data: identityData)
         return "url_v2_" + hash.prefix(16).map { String(format: "%02x", $0) }.joined()

@@ -44,6 +44,7 @@ final class JellyfinSessionManager: ObservableObject {
 
     private var clients: [String: JellyfinClient] = [:]
     private var syncTasks: [String: Task<Void, Never>] = [:]
+    private var connectionGenerations: [String: Int] = [:]
 
     private init() {}
 
@@ -77,6 +78,8 @@ final class JellyfinSessionManager: ObservableObject {
     }
 
     func connect(_ server: JellyfinServerConfig) async {
+        let generation = (connectionGenerations[server.id] ?? 0) &+ 1
+        connectionGenerations[server.id] = generation
         guard let baseURL = server.baseURL else {
             connectionStates[server.id] = .failed(L10n.string("jellyfin_invalid_url", fallback: "Invalid server URL"))
             return
@@ -87,21 +90,30 @@ final class JellyfinSessionManager: ObservableObject {
             var resolvedUserId = server.userId
             if resolvedUserId.isEmpty {
                 resolvedUserId = try await JellyfinClient.currentUserId(baseURL: baseURL, apiKey: token, username: server.username)
+                guard connectionGenerations[server.id] == generation,
+                      !Task.isCancelled else { return }
                 var updated = server
                 updated.userId = resolvedUserId
                 JellyfinServerStore.shared.upsert(updated)
             }
             let client = JellyfinClient(baseURL: baseURL, accessToken: token)
             try await client.ping()
+            guard connectionGenerations[server.id] == generation,
+                  !Task.isCancelled else { return }
             let libraries = try await client.libraries(userId: resolvedUserId)
+            guard connectionGenerations[server.id] == generation,
+                  !Task.isCancelled else { return }
             clients[server.id] = client
             connectionStates[server.id] = .connected(libraries: libraries)
         } catch {
-            connectionStates[server.id] = .failed(error.localizedDescription)
+            if connectionGenerations[server.id] == generation, !Task.isCancelled {
+                connectionStates[server.id] = .failed(error.localizedDescription)
+            }
         }
     }
 
     func disconnect(_ server: JellyfinServerConfig) async {
+        connectionGenerations[server.id] = (connectionGenerations[server.id] ?? 0) &+ 1
         syncTasks[server.id]?.cancel()
         syncTasks[server.id] = nil
         clients[server.id] = nil

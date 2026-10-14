@@ -92,20 +92,11 @@ let debugSettings: SettingsDictionary = [
     "MTL_ENABLE_DEBUG_INFO": "YES",
     "ONLY_ACTIVE_ARCH": "YES",
     "SWIFT_OPTIMIZATION_LEVEL": "-Onone",
-    // Deliberately empty, to match the hand-maintained project.
-    //
-    // That project set GCC_PREPROCESSOR_DEFINITIONS = DEBUG=1 for C/ObjC but
-    // never set SWIFT_ACTIVE_COMPILATION_CONDITIONS, so Swift's `DEBUG` was
-    // never defined. Every `#if DEBUG` block in the app — 21 of them across 7
-    // files — has therefore never been compiled.
-    //
-    // Tuist's `defaultSettings: .recommended` would set this to DEBUG and turn
-    // all of that code on at once. That is almost certainly the correct end
-    // state, but it is a behavior change, not a migration: it also fails to
-    // build today (TVCatalogRow.swift:259 calls a Void-returning
-    // traceRowLayout inside a ViewBuilder). Flipping this on is tracked as
-    // follow-up work; see docs/tuist-migration.md.
-    "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "$(inherited)",
+    // Keep Swift's global `DEBUG` undefined, as in the hand-maintained
+    // project: enabling it turns on 21 existing blocks across 7 files and
+    // currently fails to build at TVCatalogRow.swift:259. The dedicated
+    // watchdog condition enables only this diagnostic code in Debug.
+    "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "$(inherited) NUVIO_MPV_MEMORY_WATCHDOG",
 ]
 
 let releaseSettings: SettingsDictionary = [
