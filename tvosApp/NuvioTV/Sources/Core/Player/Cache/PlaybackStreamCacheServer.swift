@@ -491,6 +491,7 @@ actor PlaybackStreamCacheServer {
     private var durationSeconds: Double?
     private var lastMeasuredBps: Double?
     private let targetLeadSeconds: Double
+    private let thermalStateProvider: @Sendable () -> ProcessInfo.ThermalState
     private let minForwardLeadBytes: Int64 = 80 * 1024 * 1024 // 80 MB minimum
     private let burstSeconds: Double = 60.0
     private let burstFallbackBytes: Int64 = 256 * 1024 * 1024 // 256 MB fallback
@@ -634,12 +635,16 @@ actor PlaybackStreamCacheServer {
         rateLimitCooldown: TimeInterval = 1,
         maxConcurrentUpstream: Int? = nil,
         freeSpaceProvider: PlaybackStreamDiskCache.FreeSpaceProvider? = nil,
-        demandBatchJoinGrace: TimeInterval = 2.5
+        demandBatchJoinGrace: TimeInterval = 2.5,
+        thermalStateProvider: @escaping @Sendable () -> ProcessInfo.ThermalState = {
+            ProcessInfo.processInfo.thermalState
+        }
     ) {
         self.remoteURL = remoteURL
         self.customHeaders = customHeaders
         self.token = sessionID
         self.targetLeadSeconds = targetLeadSeconds.isFinite && targetLeadSeconds > 0 ? targetLeadSeconds : 600.0
+        self.thermalStateProvider = thermalStateProvider
         self.rateLimitCooldown = rateLimitCooldown.isFinite ? min(max(0.1, rateLimitCooldown), 60) : 1
         let grace = demandBatchJoinGrace.isFinite ? max(0, demandBatchJoinGrace) : 2.5
         self.demandBatchJoinGraceNanoseconds = UInt64(min(grace, 120) * 1_000_000_000)
@@ -910,7 +915,7 @@ actor PlaybackStreamCacheServer {
     /// Dispatches background archive chunks from 0 to EOF once forward fill is healthy.
     @discardableResult
     private func performArchiveStep() async -> Bool {
-        let thermalState = ProcessInfo.processInfo.thermalState
+        let thermalState = thermalStateProvider()
         guard thermalState != .serious && thermalState != .critical else { return false }
         guard !diskWriteCoolingDown else { return false }
         guard pendingWrites.count < Self.maxBatchChunks * 2 else { return false }
