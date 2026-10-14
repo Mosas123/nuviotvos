@@ -560,6 +560,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
                     filename: request.filename,
                     targetLeadSeconds: request.cacheProfile.hybridCacheTargetLeadSeconds
                 ) {
+                    effectiveRequest.httpHeaderSourceURL = request.httpHeaderSourceURL ?? request.videoURL
                     effectiveRequest.videoURL = localURL
                 }
                 guard !self.userStopped, self.loadGeneration == generation else {
