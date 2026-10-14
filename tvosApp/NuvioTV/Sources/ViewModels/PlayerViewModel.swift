@@ -2783,6 +2783,12 @@ class PlayerViewModel: ObservableObject {
         }
 
         updatePlaybackDebugHUD(from: c)
+        if showScenePanel {
+            let scenePlaybackInfo = buildScenePlaybackInfo()
+            if sceneViewModel.playbackInfo != scenePlaybackInfo {
+                sceneViewModel.updatePlaybackInfo(scenePlaybackInfo)
+            }
+        }
 
         // The controls are shown on launch (showControls defaults to true) but the
         // auto-hide timer is only armed by user transport actions. Arm it whenever
@@ -5328,40 +5334,12 @@ class PlayerViewModel: ObservableObject {
 
         // Audio stream info
         let selectedAudio = audioTracks.first(where: { $0.isSelected }) ?? audioTracks.first
-        let audioDetail = reportedValue([selectedAudio?.detail, debug?.audio]) ?? ""
-        let detailUpper = audioDetail.uppercased()
-
-        // Audio Codec
-        let audioCodec: String
-        if detailUpper.contains("TRUEHD") {
-            audioCodec = "TRUEHD"
-        } else if detailUpper.contains("EAC3") || detailUpper.contains("E-AC-3") || detailUpper.contains("DDP") || detailUpper.contains("DOLBY DIGITAL PLUS") {
-            audioCodec = "E-AC-3"
-        } else if detailUpper.contains("AC3") || detailUpper.contains("AC-3") || detailUpper.contains("DOLBY DIGITAL") {
-            audioCodec = "AC-3"
-        } else if detailUpper.contains("DTS-HD") || detailUpper.contains("DTS:X") {
-            audioCodec = "DTS-HD MA"
-        } else if detailUpper.contains("DTS") {
-            audioCodec = "DTS"
-        } else if detailUpper.contains("AAC") {
-            audioCodec = "AAC"
-        } else if detailUpper.contains("FLAC") {
-            audioCodec = "FLAC"
-        } else {
-            audioCodec = "—"
-        }
-
-        // Channels
-        let audioChannels: String
-        if detailUpper.contains("8 CH") || detailUpper.contains("7.1") || detailUpper.contains("8CH") {
-            audioChannels = "Surround (7.1ch)"
-        } else if detailUpper.contains("6 CH") || detailUpper.contains("5.1") || detailUpper.contains("6CH") {
-            audioChannels = "Surround (5.1ch)"
-        } else if detailUpper.contains("2 CH") || detailUpper.contains("STEREO") || detailUpper.contains("2.0") {
-            audioChannels = "Stereo (2.0ch)"
-        } else {
-            audioChannels = "—"
-        }
+        let audioPresentation = Self.sceneAudioPresentation(
+            debug: debug,
+            legacyDetails: selectedAudio?.detail
+        )
+        let audioCodec = audioPresentation.codec
+        let audioChannels = audioPresentation.channels
 
         // Language
         let lang = reportedValue([selectedAudio?.language])?.uppercased() ?? ""
@@ -5379,8 +5357,8 @@ class PlayerViewModel: ObservableObject {
             audioBitrate = "—"
         }
 
-        // Decoder selection is not exposed as playback telemetry yet.
-        let audioDecoder = "—"
+        let audioSpatialFormat = audioPresentation.spatialFormat
+        let audioDecoder = audioPresentation.pipeline
 
         return ScenePlaybackInfo(
             engine: engineName,
@@ -5397,7 +5375,72 @@ class PlayerViewModel: ObservableObject {
             audioChannels: audioChannels,
             audioLanguage: audioLanguage,
             audioBitrate: audioBitrate,
+            audioSpatialFormat: audioSpatialFormat,
             audioDecoder: audioDecoder
+        )
+    }
+
+    static func sceneAudioPresentation(
+        debug: PlaybackDebugInfo?,
+        legacyDetails: String?
+    ) -> (codec: String, channels: String, spatialFormat: String, pipeline: String) {
+        func usable(_ candidate: String?) -> String? {
+            guard let value = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty,
+                  value.caseInsensitiveCompare("Unknown") != .orderedSame else { return nil }
+            return value
+        }
+
+        let details = usable(legacyDetails) ?? usable(debug?.audio) ?? ""
+        let structuredCodec = usable(debug?.audioSourceCodec)
+        let codecUpper = (structuredCodec ?? details).uppercased()
+        let codec: String
+        if codecUpper.contains("TRUEHD") {
+            codec = "TRUEHD"
+        } else if codecUpper.contains("EAC3") || codecUpper.contains("E-AC-3") || codecUpper.contains("EC-3")
+                    || codecUpper.contains("DDP") || codecUpper.contains("DOLBY DIGITAL PLUS") {
+            codec = "E-AC-3"
+        } else if codecUpper.contains("AC3") || codecUpper.contains("AC-3") || codecUpper.contains("DOLBY DIGITAL") {
+            codec = "AC-3"
+        } else if codecUpper.contains("DTS:X") {
+            codec = "DTS:X"
+        } else if codecUpper.contains("DTS-HD") {
+            codec = "DTS-HD MA"
+        } else if codecUpper.contains("DTS") {
+            codec = "DTS"
+        } else if codecUpper.contains("AAC") {
+            codec = "AAC"
+        } else if codecUpper.contains("FLAC") {
+            codec = "FLAC"
+        } else {
+            codec = structuredCodec == nil || codecUpper.isEmpty ? "—" : codecUpper
+        }
+
+        let detailUpper = details.uppercased()
+        let channels: String
+        if let count = debug?.audioSourceChannels, count > 0 {
+            switch count {
+            case 1: channels = "Mono (1ch)"
+            case 2: channels = "Stereo (2.0ch)"
+            case 6: channels = "Surround (5.1ch)"
+            case 8: channels = "Surround (7.1ch)"
+            default: channels = "Surround (\(count)ch)"
+            }
+        } else if detailUpper.contains("8 CH") || detailUpper.contains("7.1") || detailUpper.contains("8CH") {
+            channels = "Surround (7.1ch)"
+        } else if detailUpper.contains("6 CH") || detailUpper.contains("5.1") || detailUpper.contains("6CH") {
+            channels = "Surround (5.1ch)"
+        } else if detailUpper.contains("2 CH") || detailUpper.contains("STEREO") || detailUpper.contains("2.0") {
+            channels = "Stereo (2.0ch)"
+        } else {
+            channels = "—"
+        }
+
+        return (
+            codec,
+            channels,
+            usable(debug?.audioSpatialFormat) ?? "Not confirmed",
+            usable(debug?.audioPipeline) ?? "Unavailable"
         )
     }
 

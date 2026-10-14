@@ -21,6 +21,10 @@ struct PlaybackDebugInfo: Equatable {
     var resolution: String = ""
     var frameRate: String = ""
     var audio: String = ""
+    var audioSourceCodec: String? = nil
+    var audioSourceChannels: Int? = nil
+    var audioSpatialFormat: String? = nil
+    var audioPipeline: String? = nil
 
     // SOURCE section
     var addon: String = ""
@@ -79,6 +83,10 @@ struct PlaybackDebugInfo: Equatable {
         resolution: String = "",
         frameRate: String = "",
         audio: String = "",
+        audioSourceCodec: String? = nil,
+        audioSourceChannels: Int? = nil,
+        audioSpatialFormat: String? = nil,
+        audioPipeline: String? = nil,
         addon: String = "",
         provider: String = "",
         server: String = "",
@@ -124,6 +132,10 @@ struct PlaybackDebugInfo: Equatable {
         self.resolution = resolution
         self.frameRate = frameRate
         self.audio = audio
+        self.audioSourceCodec = audioSourceCodec
+        self.audioSourceChannels = audioSourceChannels
+        self.audioSpatialFormat = audioSpatialFormat
+        self.audioPipeline = audioPipeline
         self.addon = addon
         self.provider = provider
         self.server = server

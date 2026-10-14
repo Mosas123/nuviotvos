@@ -248,7 +248,8 @@ struct ScenePanelView: View {
                         infoRow(label: "Channels", value: info.audioChannels)
                         infoRow(label: "Language", value: info.audioLanguage)
                         infoRow(label: "Bitrate", value: info.audioBitrate)
-                        infoRow(label: "Decoder", value: info.audioDecoder)
+                        infoRow(label: "Spatial format", value: info.audioSpatialFormat)
+                        infoRow(label: "Audio pipeline", value: info.audioDecoder, lineLimit: 2)
                     }
                 }
             }
@@ -285,7 +286,7 @@ struct ScenePanelView: View {
         .modifier(TvCardGlassBackground(isFocused: false, shape: RoundedRectangle(cornerRadius: 32, style: .continuous)))
     }
     
-    private func infoRow(label: String, value: String) -> some View {
+    private func infoRow(label: String, value: String, lineLimit: Int = 1) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
             Text(label)
                 .font(.system(size: 15, weight: .regular))
@@ -298,8 +299,9 @@ struct ScenePanelView: View {
             Text(value)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.white)
-                .lineLimit(1)
+                .lineLimit(lineLimit)
                 .truncationMode(.tail)
+                .multilineTextAlignment(.trailing)
         }
     }
     

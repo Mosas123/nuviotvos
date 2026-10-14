@@ -1224,8 +1224,29 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         var audio = selectedAudio.map {
             $0.detail.isEmpty ? $0.title : $0.detail
         } ?? "Unknown"
+        let audioDetailComponents = selectedAudio?.detail
+            .components(separatedBy: "|")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? []
+        let rawAudioCodec = getString("current-tracks/audio/codec")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let audioSourceCodec = rawAudioCodec?.isEmpty == false ? rawAudioCodec : nil
+        let audioSourceChannels = audioDetailComponents
+            .first(where: { $0.localizedCaseInsensitiveContains("ch") })
+            .flatMap { component in
+                component.split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }.first
+            }
+        let audioCodecProfile = getString("current-tracks/audio/codec-profile")
+        let profileEvidence = audioCodecProfile?.lowercased() ?? ""
+        let audioSpatialFormat: String?
+        if profileEvidence.contains("atmos") || profileEvidence.contains("joc") {
+            audioSpatialFormat = "Atmos"
+        } else if profileEvidence.contains("dts:x") {
+            audioSpatialFormat = "DTS:X"
+        } else {
+            audioSpatialFormat = nil
+        }
         let atmosEvidence = [
-            getString("current-tracks/audio/codec-profile"),
+            audioCodecProfile,
             getString("current-tracks/audio/codec-desc"),
             getString("current-tracks/audio/title"),
             selectedAudio?.title,
@@ -1308,6 +1329,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             resolution: width > 0 && height > 0 ? "\(width)×\(height)" : "Unknown",
             frameRate: fpsStr,
             audio: audio,
+            audioSourceCodec: audioSourceCodec,
+            audioSourceChannels: audioSourceChannels,
+            audioSpatialFormat: audioSpatialFormat,
             video: videoStr,
             hdr: dynamicRange,
             vBitrate: vBitrateStr,

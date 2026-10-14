@@ -2822,6 +2822,13 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let audioDetail = selectedAudio.map {
             $0.detail.isEmpty ? $0.title : $0.detail
         } ?? "Unknown"
+        let selectedSourceAudio = engine.audioTracks.first(where: { $0.id == engine.activeAudioTrackIndex })
+            ?? engine.audioTracks.first
+        let audioSource = Self.audioSourceDiagnostics(
+            for: selectedSourceAudio,
+            activeDecoder: engine.activeAudioDecoder,
+            isLoading: engine.state == .loading
+        )
 
         let codecName = (sourceProbe?.videoCodecName ?? "hevc").lowercased()
         let isDV = engine.sourceDVProfile != nil || (sourceProbe?.dvProfile ?? 0) > 0 || engine.sourceVideoFormat == .dolbyVision
@@ -2981,6 +2988,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             resolution: width > 0 && height > 0 ? "\(width)×\(height)" : "Unknown",
             frameRate: fpsStr,
             audio: audioFormatted,
+            audioSourceCodec: audioSource.codec,
+            audioSourceChannels: audioSource.channels,
+            audioSpatialFormat: audioSource.spatialFormat,
+            audioPipeline: audioSource.pipeline,
             video: videoStr,
             hdr: sourceRange,
             vBitrate: vBitrateStr,
@@ -3666,6 +3677,33 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             return result
         }
         return "[Script Info]\nScriptType: v4.00+\nPlayResX: \(playResX)\nPlayResY: \(playResY)\n\n\(cleanHeader)"
+    }
+
+    static func audioSourceDiagnostics(
+        for track: TrackInfo?,
+        activeDecoder: String?,
+        isLoading: Bool = false
+    ) -> (codec: String?, channels: Int?, spatialFormat: String?, pipeline: String?) {
+        let codec = track?.codec.trimmingCharacters(in: .whitespacesAndNewlines)
+        let profile = track?.profile?.lowercased() ?? ""
+        let pipeline = activeDecoder?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visiblePipeline = !isLoading && pipeline?.isEmpty == false ? pipeline : nil
+        let pipelineEvidence = visiblePipeline?.lowercased() ?? ""
+        let spatialFormat: String?
+        if track?.isAtmos == true || profile.contains("atmos") || profile.contains("joc")
+            || pipelineEvidence.contains("atmos") || pipelineEvidence.contains("joc") {
+            spatialFormat = "Atmos"
+        } else if profile.contains("dts:x") || pipelineEvidence.contains("dts:x") {
+            spatialFormat = "DTS:X"
+        } else {
+            spatialFormat = nil
+        }
+        return (
+            codec?.isEmpty == false ? codec : nil,
+            track.flatMap { $0.channels > 0 ? $0.channels : nil },
+            spatialFormat,
+            visiblePipeline
+        )
     }
 
     private func audioDetail(_ t: TrackInfo) -> String {

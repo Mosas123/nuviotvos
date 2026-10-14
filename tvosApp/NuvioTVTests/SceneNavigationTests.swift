@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import AetherEngine
 @testable import NuvioTV
 
 @MainActor
@@ -117,7 +118,8 @@ final class SceneNavigationTests: XCTestCase {
         XCTAssertEqual(playbackInfo?.audioChannels, "—")
         XCTAssertEqual(playbackInfo?.audioLanguage, "—")
         XCTAssertEqual(playbackInfo?.audioBitrate, "—")
-        XCTAssertEqual(playbackInfo?.audioDecoder, "—")
+        XCTAssertEqual(playbackInfo?.audioSpatialFormat, "Not confirmed")
+        XCTAssertEqual(playbackInfo?.audioDecoder, "Unavailable")
         
         // Test Dolby Vision fallback telemetry model
         let dvInfo = ScenePlaybackInfo(
@@ -134,6 +136,218 @@ final class SceneNavigationTests: XCTestCase {
         XCTAssertNotNil(viewModel.sceneViewModel.playbackInfo)
     }
 
+    func testSceneAudioPresentationUsesStructuredSourceAndClearsOnTrackChangeOrHandoff() {
+        let eac3Atmos = PlayerViewModel.sceneAudioPresentation(
+            debug: PlaybackDebugInfo(
+                audioSourceCodec: "eac3",
+                audioSourceChannels: 6,
+                audioSpatialFormat: "Atmos",
+                audioPipeline: "APAC bridge"
+            ),
+            legacyDetails: "E-AC-3 | Atmos"
+        )
+        XCTAssertEqual(eac3Atmos.codec, "E-AC-3")
+        XCTAssertEqual(eac3Atmos.channels, "Surround (5.1ch)")
+        XCTAssertEqual(eac3Atmos.spatialFormat, "Atmos")
+        XCTAssertEqual(eac3Atmos.pipeline, "APAC bridge")
+
+        let ordinaryBridgeEAC3 = PlayerViewModel.sceneAudioPresentation(
+            debug: PlaybackDebugInfo(
+                audio: "E-AC-3 | 6 ch | passthrough",
+                audioSourceCodec: "eac3",
+                audioSourceChannels: 6
+            ),
+            legacyDetails: "E-AC-3 | 6 ch"
+        )
+        XCTAssertEqual(ordinaryBridgeEAC3.codec, "E-AC-3")
+        XCTAssertEqual(ordinaryBridgeEAC3.channels, "Surround (5.1ch)")
+        XCTAssertEqual(ordinaryBridgeEAC3.spatialFormat, "Not confirmed")
+        XCTAssertEqual(ordinaryBridgeEAC3.pipeline, "Unavailable")
+
+        let trueHDAtmos = PlayerViewModel.sceneAudioPresentation(
+            debug: PlaybackDebugInfo(
+                audioSourceCodec: "truehd",
+                audioSourceChannels: 8,
+                audioSpatialFormat: "Atmos",
+                audioPipeline: "APAC 9.1.6"
+            ),
+            legacyDetails: "TRUEHD | Atmos"
+        )
+        XCTAssertEqual(trueHDAtmos.codec, "TRUEHD")
+        XCTAssertEqual(trueHDAtmos.spatialFormat, "Atmos")
+        XCTAssertEqual(trueHDAtmos.pipeline, "APAC 9.1.6")
+
+        let dtsX = PlayerViewModel.sceneAudioPresentation(
+            debug: PlaybackDebugInfo(
+                audioSourceCodec: "dts-hd-ma",
+                audioSourceChannels: 8,
+                audioSpatialFormat: "DTS:X",
+                audioPipeline: "APAC"
+            ),
+            legacyDetails: "DTS-HD MA | 8 ch"
+        )
+        XCTAssertEqual(dtsX.codec, "DTS-HD MA")
+        XCTAssertEqual(dtsX.spatialFormat, "DTS:X")
+        XCTAssertEqual(dtsX.pipeline, "APAC")
+
+        let channelOnlyLegacyDetail = PlayerViewModel.sceneAudioPresentation(
+            debug: PlaybackDebugInfo(audioSourceChannels: 6),
+            legacyDetails: "6 ch | 48 kHz"
+        )
+        XCTAssertEqual(channelOnlyLegacyDetail.codec, "—")
+        XCTAssertEqual(channelOnlyLegacyDetail.channels, "Surround (5.1ch)")
+
+        let rawUnrecognizedCodec = PlayerViewModel.sceneAudioPresentation(
+            debug: PlaybackDebugInfo(audioSourceCodec: "opus"),
+            legacyDetails: "6 ch | 48 kHz"
+        )
+        XCTAssertEqual(rawUnrecognizedCodec.codec, "OPUS")
+
+        let changedTrack = PlayerViewModel.sceneAudioPresentation(
+            debug: PlaybackDebugInfo(audioSourceCodec: "eac3", audioSourceChannels: 2),
+            legacyDetails: "E-AC-3 | 2 ch"
+        )
+        XCTAssertEqual(changedTrack.spatialFormat, "Not confirmed")
+        XCTAssertEqual(changedTrack.pipeline, "Unavailable")
+
+        let previousAether = PlaybackDebugInfo(
+            audioSourceCodec: "truehd",
+            audioSourceChannels: 8,
+            audioSpatialFormat: "Atmos",
+            audioPipeline: "APAC 9.1.6"
+        )
+        let mpvSnapshot = PlaybackDebugInfo(audio: "AAC | 2 ch")
+        let activeSnapshot = PlayerViewModel.selectedScenePlaybackDebugInfo(
+            activeEngineKind: .mpv,
+            aether: previousAether,
+            mpv: mpvSnapshot
+        )
+        let afterHandoff = PlayerViewModel.sceneAudioPresentation(
+            debug: activeSnapshot,
+            legacyDetails: nil
+        )
+        XCTAssertEqual(afterHandoff.codec, "AAC")
+        XCTAssertEqual(afterHandoff.channels, "Stereo (2.0ch)")
+        XCTAssertEqual(afterHandoff.spatialFormat, "Not confirmed")
+        XCTAssertEqual(afterHandoff.pipeline, "Unavailable")
+    }
+
+    func testAetherAudioDiagnosticsUseTrackProfilesAndLivePipeline() {
+        let trueHDAtmosTrack = TrackInfo(
+            id: 1,
+            name: "TrueHD Atmos",
+            codec: "truehd",
+            language: "en",
+            channels: 8,
+            isDefault: true,
+            profile: "Dolby TrueHD + Dolby Atmos"
+        )
+        let trueHDAtmos = AetherPlaybackController.audioSourceDiagnostics(
+            for: trueHDAtmosTrack,
+            activeDecoder: "TrueHD Atmos → APAC 9.1.6"
+        )
+        XCTAssertEqual(trueHDAtmos.codec, "truehd")
+        XCTAssertEqual(trueHDAtmos.channels, 8)
+        XCTAssertEqual(trueHDAtmos.spatialFormat, "Atmos")
+        XCTAssertEqual(trueHDAtmos.pipeline, "TrueHD Atmos → APAC 9.1.6")
+
+        let trueHDAtmosWithoutProfile = TrackInfo(
+            id: 5,
+            name: "TrueHD",
+            codec: "truehd",
+            language: "en",
+            channels: 8,
+            isDefault: true,
+            profile: nil
+        )
+        let trueHDAtmosFromPipeline = AetherPlaybackController.audioSourceDiagnostics(
+            for: trueHDAtmosWithoutProfile,
+            activeDecoder: "TrueHD Atmos → APAC 9.1.6"
+        )
+        XCTAssertEqual(trueHDAtmosFromPipeline.spatialFormat, "Atmos")
+
+        let dtsXWithoutProfile = TrackInfo(
+            id: 6,
+            name: "DTS",
+            codec: "dts",
+            language: "en",
+            channels: 8,
+            isDefault: true,
+            profile: nil
+        )
+        let dtsXFromPipeline = AetherPlaybackController.audioSourceDiagnostics(
+            for: dtsXWithoutProfile,
+            activeDecoder: "DTS:X → APAC 9.1.6"
+        )
+        XCTAssertEqual(dtsXFromPipeline.spatialFormat, "DTS:X")
+
+        let loadingWithoutProfile = AetherPlaybackController.audioSourceDiagnostics(
+            for: trueHDAtmosWithoutProfile,
+            activeDecoder: "TrueHD Atmos → APAC 9.1.6",
+            isLoading: true
+        )
+        XCTAssertNil(loadingWithoutProfile.spatialFormat)
+        XCTAssertNil(loadingWithoutProfile.pipeline)
+
+        let dtsXTrack = TrackInfo(
+            id: 2,
+            name: "DTS:X",
+            codec: "dts",
+            language: "en",
+            channels: 8,
+            isDefault: true,
+            profile: "DTS-HD MA + DTS:X"
+        )
+        let dtsX = AetherPlaybackController.audioSourceDiagnostics(
+            for: dtsXTrack,
+            activeDecoder: "DTS:X → APAC 9.1.6"
+        )
+        XCTAssertEqual(dtsX.spatialFormat, "DTS:X")
+        XCTAssertEqual(dtsX.pipeline, "DTS:X → APAC 9.1.6")
+
+        let eac3JOCTrack = TrackInfo(
+            id: 3,
+            name: "E-AC-3 JOC",
+            codec: "eac3",
+            language: "en",
+            channels: 6,
+            isDefault: true,
+            isAtmos: true,
+            profile: "E-AC-3 + JOC"
+        )
+        let eac3JOC = AetherPlaybackController.audioSourceDiagnostics(
+            for: eac3JOCTrack,
+            activeDecoder: "Stream-copy (EAC3+JOC Atmos)"
+        )
+        XCTAssertEqual(eac3JOC.channels, 6)
+        XCTAssertEqual(eac3JOC.spatialFormat, "Atmos")
+        XCTAssertEqual(eac3JOC.pipeline, "Stream-copy (EAC3+JOC Atmos)")
+
+        let ordinaryEAC3Track = TrackInfo(
+            id: 4,
+            name: "E-AC-3",
+            codec: "eac3",
+            language: "en",
+            channels: 6,
+            isDefault: true,
+            profile: nil
+        )
+        let ordinaryBridge = AetherPlaybackController.audioSourceDiagnostics(
+            for: ordinaryEAC3Track,
+            activeDecoder: "E-AC3 → FLAC bridge"
+        )
+        XCTAssertNil(ordinaryBridge.spatialFormat)
+        XCTAssertEqual(ordinaryBridge.pipeline, "E-AC3 → FLAC bridge")
+
+        let loading = AetherPlaybackController.audioSourceDiagnostics(
+            for: trueHDAtmosTrack,
+            activeDecoder: "TrueHD Atmos → APAC 9.1.6",
+            isLoading: true
+        )
+        XCTAssertEqual(loading.spatialFormat, "Atmos")
+        XCTAssertNil(loading.pipeline, "a pipeline from the outgoing track is hidden during reload")
+    }
+
     func testFreshAetherMetricsStayUnavailableAndMPVHandoffUsesActiveSnapshot() throws {
         guard let aetherController = AetherPlaybackController() else {
             throw XCTSkip("AetherEngine is unavailable in this test environment")
@@ -141,6 +355,10 @@ final class SceneNavigationTests: XCTestCase {
         let aetherSnapshot = aetherController.playbackDebugInfo
         XCTAssertTrue(aetherSnapshot.frameRate.isEmpty)
         XCTAssertTrue(aetherSnapshot.aBitrate.isEmpty)
+        XCTAssertNil(aetherSnapshot.audioSourceCodec)
+        XCTAssertNil(aetherSnapshot.audioSourceChannels)
+        XCTAssertNil(aetherSnapshot.audioSpatialFormat)
+        XCTAssertNil(aetherSnapshot.audioPipeline)
 
         let mpvSnapshot = PlaybackDebugInfo(
             videoCodec: "AV1",
