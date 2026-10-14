@@ -3,6 +3,48 @@ import AetherLibavformat
 import AetherLibavcodec
 import AetherLibavutil
 
+/// Supplied headers can contain arbitrary secrets, not only well-known auth fields.
+/// Immutable per-task state; no request can replace another task's trusted origin.
+final class SubtitleHTTPRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let originalURL: URL?
+    private let suppliedHeaders: [String: String]
+
+    init(originalURL: URL?, suppliedHeaders: [String: String]) {
+        self.originalURL = originalURL
+        self.suppliedHeaders = suppliedHeaders
+        super.init()
+    }
+
+    func redirectRequest(_ request: URLRequest) -> URLRequest? {
+        // Header-free sidecars retain their existing CDN redirect behavior.
+        guard !suppliedHeaders.isEmpty else { return request }
+        guard let originalURL, let target = request.url,
+              let scheme = originalURL.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              target.scheme?.lowercased() == scheme,
+              let host = originalURL.host, let targetHost = target.host,
+              host.caseInsensitiveCompare(targetHost) == .orderedSame else { return nil }
+        let defaultPort = scheme == "https" ? 443 : 80
+        guard (originalURL.port ?? defaultPort) == (target.port ?? defaultPort) else { return nil }
+        var allowed = request
+        for (field, value) in suppliedHeaders {
+            allowed.setValue(value, forHTTPHeaderField: field)
+        }
+        return allowed
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        // Returning nil stops the hop BEFORE any supplied header reaches the target.
+        completionHandler(redirectRequest(request))
+    }
+}
+
 enum SubtitleDecoderError: Error, CustomStringConvertible, LocalizedError {
     case openFailed(code: Int32)
     case noSubtitleStream
@@ -36,6 +78,15 @@ struct SidecarDecodeResult {
 /// One-shot decoder for sidecar subtitle files (.srt/.ass/.vtt/.ssa).
 /// Opens the URL as its own AVFormatContext; sidecars are separate files the main demuxer never sees.
 enum SubtitleDecoder {
+
+    /// A per-task delegate covers both initial and dynamically selected sidecars.
+    static func downloadHTTPData(
+        for request: URLRequest,
+        suppliedHeaders: [String: String]
+    ) async throws -> (Data, URLResponse) {
+        let delegate = SubtitleHTTPRedirectDelegate(originalURL: request.url, suppliedHeaders: suppliedHeaders)
+        return try await URLSession.shared.data(for: request, delegate: delegate)
+    }
 
     /// Decode every cue from the subtitle file at `url`, cancellable via Task.cancel().
     /// When preserveASSMarkup is true, ASS/SSA cues carry the raw libavcodec event line
@@ -96,7 +147,7 @@ enum SubtitleDecoder {
             if request.value(forHTTPHeaderField: "User-Agent") == nil {
                 request.setValue("Mozilla/5.0 (AppleTV; tvOS 18.0) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
             }
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await downloadHTTPData(for: request, suppliedHeaders: httpHeaders)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
                 throw SubtitleDecoderError.openFailed(code: Int32(code))
