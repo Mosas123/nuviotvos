@@ -2251,7 +2251,8 @@ struct ContentView: View {
                     videoSize: candidate.videoSize,
                     videoHash: candidate.videoHash,
                     provider: providerName,
-                    bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate)
+                    bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate),
+                    trickplayURL: candidate.trickplayURL
                 )
             }
 
@@ -2280,7 +2281,8 @@ struct ContentView: View {
                 videoSize: candidate.videoSize,
                 videoHash: candidate.videoHash,
                 provider: "Direct",
-                bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate)
+                bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate),
+                trickplayURL: candidate.trickplayURL
             )
         }
         return nil
@@ -2417,7 +2419,8 @@ struct ContentView: View {
                 videoSize: stream.videoSize,
                 videoHash: stream.videoHash,
                 provider: providerName,
-                bingeGroup: bingeGroup
+                bingeGroup: bingeGroup,
+                trickplayURL: stream.trickplayURL
             )
         }
 
@@ -2445,7 +2448,8 @@ struct ContentView: View {
             videoSize: stream.videoSize,
             videoHash: stream.videoHash,
             provider: "Direct",
-            bingeGroup: bingeGroup
+            bingeGroup: bingeGroup,
+            trickplayURL: stream.trickplayURL
         )
     }
 

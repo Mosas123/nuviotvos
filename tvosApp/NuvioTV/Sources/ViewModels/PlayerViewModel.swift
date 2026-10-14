@@ -1869,6 +1869,7 @@ class PlayerViewModel: ObservableObject {
         // the previous file's cache namespace. Next-episode resolvers may supply
         // a new identity on the prepared stream.
         self.activeCacheFileIdentity = prepared.cacheFileIdentity
+        self.activeTrickplayURL = prepared.trickplayURL
         if let bg = prepared.bingeGroup, !bg.isEmpty {
             self.activeBingeGroup = bg
         }
