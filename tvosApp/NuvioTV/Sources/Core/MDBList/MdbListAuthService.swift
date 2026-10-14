@@ -130,7 +130,8 @@ struct MdbListStoredTokens: Codable, Equatable {
 
 protocol MdbListTokenStorage: AnyObject {
     func tokens(for profileScope: String) -> MdbListStoredTokens?
-    func save(_ tokens: MdbListStoredTokens, for profileScope: String)
+    @discardableResult
+    func save(_ tokens: MdbListStoredTokens, for profileScope: String) -> Bool
     func remove(for profileScope: String)
     func removeAll()
 }
@@ -165,22 +166,30 @@ final class MdbListKeychainTokenStorage: MdbListTokenStorage {
         return decoded
     }
 
-    func save(_ tokens: MdbListStoredTokens, for profileScope: String) {
-        Self.lock.withLock {
-            Self.tokenCache[profileScope] = tokens
-            Self.negativeCache.remove(profileScope)
-        }
-        guard let data = try? JSONEncoder().encode(tokens) else { return }
+    @discardableResult
+    func save(_ tokens: MdbListStoredTokens, for profileScope: String) -> Bool {
+        guard let data = try? JSONEncoder().encode(tokens) else { return false }
         var addQuery = keychainQuery(for: profileScope)
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         addQuery[kSecValueData as String] = data
         let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            _ = SecItemUpdate(
+        let didSave: Bool
+        if status == errSecSuccess {
+            didSave = true
+        } else if status == errSecDuplicateItem {
+            didSave = SecItemUpdate(
                 keychainQuery(for: profileScope) as CFDictionary,
                 [kSecValueData as String: data] as CFDictionary
-            )
+            ) == errSecSuccess
+        } else {
+            didSave = false
         }
+        guard didSave else { return false }
+        Self.lock.withLock {
+            Self.tokenCache[profileScope] = tokens
+            Self.negativeCache.remove(profileScope)
+        }
+        return true
     }
 
     func remove(for profileScope: String) {
@@ -216,8 +225,10 @@ final class MdbListMemoryTokenStorage: MdbListTokenStorage {
 
     func tokens(for profileScope: String) -> MdbListStoredTokens? { values[profileScope] }
 
-    func save(_ tokens: MdbListStoredTokens, for profileScope: String) {
+    @discardableResult
+    func save(_ tokens: MdbListStoredTokens, for profileScope: String) -> Bool {
         values[profileScope] = tokens
+        return true
     }
 
     func remove(for profileScope: String) {
@@ -352,17 +363,19 @@ enum MdbListAuthStore {
         defaults.set(min(max(seconds, 1), 3_600), forKey: Key.pollInterval)
     }
 
+    @discardableResult
     static func saveTokens(
         _ tokens: MdbListStoredTokens,
         user: MdbListUser?,
         profileScope: String,
         store defaults: UserDefaults,
         tokenStorage: MdbListTokenStorage
-    ) {
-        tokenStorage.save(tokens, for: profileScope)
+    ) -> Bool {
+        guard tokenStorage.save(tokens, for: profileScope) else { return false }
         saveUser(user, store: defaults)
         clearDeviceFlow(store: defaults)
         NotificationCenter.default.post(name: changedNotification, object: nil)
+        return true
     }
 
     static func saveUser(_ user: MdbListUser?, store defaults: UserDefaults) {
@@ -640,15 +653,19 @@ final class MdbListAuthService {
                       tokens.scope?.contains("write") != false else {
                     return .failed(MdbListAuthError.insufficientScope.localizedDescription)
                 }
-                let user = await fetchUser(tokens: tokens.value)
-                MdbListAuthStore.saveTokens(
+                let user = await fetchUser(tokens: tokens.value, saveIfCurrent: false)
+                guard !Task.isCancelled, shouldCommit() else { return .pending }
+                guard MdbListAuthStore.saveTokens(
                     tokens.value,
                     user: user,
                     profileScope: profileScope,
                     store: store,
                     tokenStorage: tokenStorage
-                )
+                ) else {
+                    return .failed("Unable to securely save the MDBList login. Try connecting again.")
+                }
                 await MdbListRatingsService.invalidate(store: store, profileScope: profileScope)
+                guard !Task.isCancelled, shouldCommit() else { return .pending }
                 TraktSettingsStore.selectWatchProgressSourceOnConnect(.mdblist, in: store)
                 return .approved
             }
@@ -722,14 +739,16 @@ final class MdbListAuthService {
             if tokenStorage.tokens(for: profileScope)?.accessToken != current.accessToken {
                 return true
             }
-            tokenStorage.save(parsed.value, for: profileScope)
-            return true
+            return tokenStorage.save(parsed.value, for: profileScope)
         } catch {
             return false
         }
     }
 
-    func fetchUser(tokens: MdbListStoredTokens? = nil) async -> MdbListUser? {
+    func fetchUser(
+        tokens: MdbListStoredTokens? = nil,
+        saveIfCurrent: Bool = true
+    ) async -> MdbListUser? {
         let credentials = tokens ?? tokenStorage.tokens(for: profileScope)
         guard let credentials else { return nil }
         do {
@@ -745,7 +764,10 @@ final class MdbListAuthService {
                 username: string(object["username"]),
                 displayName: string(object["name"]) ?? string(object["username"])
             )
-            MdbListAuthStore.saveUser(user, store: store)
+            if saveIfCurrent, !Task.isCancelled,
+               tokenStorage.tokens(for: profileScope)?.accessToken == credentials.accessToken {
+                MdbListAuthStore.saveUser(user, store: store)
+            }
             return user
         } catch {
             return nil
