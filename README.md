@@ -48,22 +48,22 @@ Download the latest Apple TV `.ipa` from [Releases](https://github.com/bobsupra/
 ## Latest tvOS Beta
 
 <!-- BEGIN LATEST_BETA -->
-**Beta 3.4.3** is the latest tvOS release.
+**Beta 3.4.4** is the latest tvOS release.
 
-[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.3/NuvioTV-3.4.3-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.3) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
+[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.4.4/NuvioTV-3.4.4-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.4.4) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
 <!-- END LATEST_BETA -->
 
 > 🎉 **Thank you for 200+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 200+ stars!
 
 The IPA requires a compatible tvOS development or sideloading signing workflow before installation.
 
-### New in Beta 3.4.3
+### New in Beta 3.4.4
 
-- **Apple TV-Inspired Grid View Hero Redesign:** Completely overhauled the hero slideshow in Home Grid View (`TVGridHeroSlideshowView`) with full-bleed cinematic artwork, dynamic typography, responsive action controls, and fluid focus handoff designed to mirror the native Apple TV interface.
-- **Enhanced Rewatch Tracking & Dynamic Multi-Watch Badges:** Rewatching content now visually tracks your completion count directly on poster cards (`WatchedCheckmarkPresentation`). The first complete watch displays a clean checkmark, while subsequent rewatches dynamically present the watch count (`2`, `3`, etc.).
-- **Search Artwork Enrichment & Custom Addon Posters:** Search result deduplication and metadata enrichment now recognize third-party catalog feeds, preserving custom posters, backdrops, and card aspect ratios instead of overwriting them with generic Cinemeta assets.
-- **Player Subtitle Menu & UI Polish:** Streamlined subtitle track selector with hierarchical language grouping, sanitized provider tags, clean track subtitles, and instant selection feedback.
-- **Tests & Stability:** 791 automated unit and regression tests passing with 0 failures across playback backends, stream caching, subtitle rendering, sync services, and layout settings.
+- **Redesigned Playback Info & Real-Time Telemetry:** Completely overhauled the Playback Info tab in the Siri Remote Scene panel (`ScenePanelView.swift`) into a horizontal glass dashboard with dedicated cards for active playback engine, video stream (codec, resolution, bitrate, Dolby Vision profile), and audio stream (channels, codec, spatial audio format).
+- **AetherEngine 7.36.0, DTS:X & Dolby Atmos Spatial Audio:** Upgraded AetherEngine to 7.36.0 with native DTS:X, multi-channel bitstreaming, and opt-in TrueHD Atmos spatial audio decoding through APAC on tvOS 26+.
+- **Simkl Synchronization & Profile Hardening:** Hardened Simkl activity, history, and library item synchronization with atomic snapshots and profile store cache isolation.
+- **Cloud Debrid, TorBox & Provider Isolation:** Scaled Real-Debrid cache availability resolution beyond 50 hashes and hardened cloud playback context.
+- **Tests & Stability:** 877 automated unit and regression tests passing with 0 failures across playback backends, stream caching, subtitle rendering, sync services, and layout settings.
 
 ### Built-in Player
 
