@@ -2556,10 +2556,12 @@ struct SimklProgressService {
             // succession drops the second event on the floor.
             if isLockCollision(status: response.status, data: response.data) {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
-                guard ProfileSettings.isActiveStore(store) else { return false }
+                guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
                 response = try await service.postReturningBody(path: path, body: body)
             }
-            guard ProfileSettings.isActiveStore(store) else { return false }
+            guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+                  TraktSettingsStore.watchProgressSource(in: store) == .simkl else { return false }
             let status = response.status
             // Simkl documents 409 stop as idempotent success for a recently
             // completed session.
