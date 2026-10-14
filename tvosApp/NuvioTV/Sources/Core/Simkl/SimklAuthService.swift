@@ -652,6 +652,7 @@ final class SimklAuthService {
     }
 
     func startPINAuth() async throws -> SimklPINCodeResponse {
+        let requestedClientID = clientID
         guard hasRequiredCredentials() else {
             throw SimklServiceError.message("Enter your Simkl Client ID first.")
         }
@@ -676,20 +677,22 @@ final class SimklAuthService {
         let v2Result: SimklHTTPResult<SimklPINCodeResponse> = try await client.postFormURLEncoded(
             path: "oauth2/device",
             parameters: [
-                "client_id": clientID,
+                "client_id": requestedClientID,
                 "scope": "media:read media:write"
             ]
         )
+
+        guard clientID == requestedClientID else { throw CancellationError() }
 
         if (200..<300).contains(v2Result.statusCode), let pin = v2Result.value {
             guard !pin.userCode.isEmpty else {
                 throw SimklServiceError.message("Simkl did not return a PIN code.")
             }
-            if state.credentialClientID != nil && state.credentialClientID != clientID {
+            if state.credentialClientID != nil && state.credentialClientID != requestedClientID {
                 tokenStorage.setAccessToken(nil, for: profileScope)
                 tokenStorage.setRefreshToken(nil, for: profileScope)
             }
-            SimklAuthStore.savePINFlow(pin, isV2Flow: true, clientID: clientID, store: store)
+            SimklAuthStore.savePINFlow(pin, isV2Flow: true, clientID: requestedClientID, store: store)
             return pin
         }
 
@@ -704,8 +707,10 @@ final class SimklAuthService {
         if shouldFallbackToV1 {
             let v1Response: SimklHTTPResult<SimklPINCodeResponse> = try await client.get(
                 path: "oauth/pin",
-                clientID: clientID
+                clientID: requestedClientID
             )
+
+            guard clientID == requestedClientID else { throw CancellationError() }
 
             switch v1Response.statusCode {
             case 200..<300:
@@ -713,11 +718,11 @@ final class SimklAuthService {
                 guard !pin.userCode.isEmpty else {
                     throw SimklServiceError.message("Simkl did not return a PIN code.")
                 }
-                if state.credentialClientID != nil && state.credentialClientID != clientID {
+                if state.credentialClientID != nil && state.credentialClientID != requestedClientID {
                     tokenStorage.setAccessToken(nil, for: profileScope)
                     tokenStorage.setRefreshToken(nil, for: profileScope)
                 }
-                SimklAuthStore.savePINFlow(pin, isV2Flow: false, clientID: clientID, store: store)
+                SimklAuthStore.savePINFlow(pin, isV2Flow: false, clientID: requestedClientID, store: store)
                 return pin
             case 403, 412:
                 throw SimklServiceError.message(
@@ -779,6 +784,8 @@ final class SimklAuthService {
     }
 
     private func pollV2DeviceToken(state: SimklAuthState) async -> SimklPollResult {
+        guard let requestedClientID = state.credentialClientID,
+              clientID == requestedClientID else { return .pending }
         guard let deviceCode = state.deviceCode, !deviceCode.isEmpty else {
             return .failed("No active Simkl device code.")
         }
@@ -788,10 +795,12 @@ final class SimklAuthService {
                 path: "oauth2/token",
                 parameters: [
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "client_id": clientID,
+                    "client_id": requestedClientID,
                     "device_code": deviceCode
                 ]
             )
+
+            guard clientID == requestedClientID else { return .pending }
 
             switch response.statusCode {
             case 200..<300:
@@ -802,7 +811,7 @@ final class SimklAuthService {
                     body.accessToken,
                     refreshToken: body.refreshToken,
                     expiresIn: body.expiresIn,
-                    clientID: clientID,
+                    clientID: requestedClientID,
                     profileScope: profileScope,
                     store: store,
                     tokenStorage: tokenStorage
@@ -813,6 +822,7 @@ final class SimklAuthService {
                 SimklAuthStore.clearPINFlow(store: store)
                 TraktSettingsStore.selectWatchProgressSourceOnConnect(.simkl, in: store)
                 let username = await fetchUserSettings()
+                guard clientID == requestedClientID else { return .pending }
                 return .approved(username)
 
             case 400:
@@ -855,6 +865,8 @@ final class SimklAuthService {
     }
 
     private func pollV1PINToken(state: SimklAuthState) async -> SimklPollResult {
+        guard let requestedClientID = state.credentialClientID,
+              clientID == requestedClientID else { return .pending }
         guard let userCode = state.userCode, !userCode.isEmpty else {
             return .failed("No active Simkl PIN code.")
         }
@@ -863,8 +875,10 @@ final class SimklAuthService {
             let encoded = userCode.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userCode
             let response: SimklHTTPResult<SimklPINPollResponse> = try await client.get(
                 path: "oauth/pin/\(encoded)",
-                clientID: clientID
+                clientID: requestedClientID
             )
+
+            guard clientID == requestedClientID else { return .pending }
 
             switch response.statusCode {
             case 200..<300:
@@ -878,7 +892,7 @@ final class SimklAuthService {
                 if let token = body.accessToken, !token.isEmpty, body.result?.uppercased() == "OK" {
                     SimklAuthStore.saveToken(
                         token,
-                        clientID: clientID,
+                        clientID: requestedClientID,
                         profileScope: profileScope,
                         store: store,
                         tokenStorage: tokenStorage
@@ -889,6 +903,7 @@ final class SimklAuthService {
                     SimklAuthStore.clearPINFlow(store: store)
                     TraktSettingsStore.selectWatchProgressSourceOnConnect(.simkl, in: store)
                     let username = await fetchUserSettings()
+                    guard clientID == requestedClientID else { return .pending }
                     return .approved(username)
                 }
                 if body.result?.uppercased() == "KO" {
