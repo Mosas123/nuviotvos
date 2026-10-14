@@ -78,11 +78,14 @@ enum BingeGroupStore {
 
         var records = loadRecords(profileId: profileId)
         records[trimmedId] = record
-        persistRecords(records, profileId: profileId)
+        let didPersist = persistRecords(records, profileId: profileId)
 
-        // Clear legacy UserDefaults key if present
-        let store = defaults(for: profileId)
-        store.removeObject(forKey: prefix + trimmedId)
+        // The legacy value is the recovery copy until the replacement has
+        // reached durable storage. Keep it if encoding or the file write fails.
+        if didPersist {
+            let store = defaults(for: profileId)
+            store.removeObject(forKey: prefix + trimmedId)
+        }
     }
 
     static func save(
@@ -125,8 +128,9 @@ enum BingeGroupStore {
            let record = try? JSONDecoder().decode(BingeGroupRecord.self, from: data) {
             var updated = records
             updated[trimmedId] = record
-            persistRecords(updated, profileId: profileId)
-            store.removeObject(forKey: key)
+            if persistRecords(updated, profileId: profileId) {
+                store.removeObject(forKey: key)
+            }
             return record
         }
         return nil
@@ -179,21 +183,28 @@ enum BingeGroupStore {
         // Migrate any legacy records found in UserDefaults
         let store = defaults(for: profileId)
         var migrated: [String: BingeGroupRecord] = [:]
+        var migratedKeys: [String] = []
         for (k, _) in store.dictionaryRepresentation() where k.hasPrefix(prefix) {
             let seriesId = String(k.dropFirst(prefix.count))
             if let data = store.data(forKey: k),
                let record = try? JSONDecoder().decode(BingeGroupRecord.self, from: data) {
                 migrated[seriesId] = record
+                migratedKeys.append(k)
             }
-            store.removeObject(forKey: k)
         }
-        if !migrated.isEmpty {
-            persistRecords(migrated, profileId: profileId)
+        if !migrated.isEmpty, persistRecords(migrated, profileId: profileId) {
+            for key in migratedKeys {
+                store.removeObject(forKey: key)
+            }
         }
         return migrated
     }
 
-    private static func persistRecords(_ records: [String: BingeGroupRecord], profileId: String?) {
+    @discardableResult
+    private static func persistRecords(
+        _ records: [String: BingeGroupRecord],
+        profileId: String?
+    ) -> Bool {
         let bounded = Dictionary(
             uniqueKeysWithValues: records
                 .sorted { $0.value.timestamp > $1.value.timestamp }
@@ -203,10 +214,10 @@ enum BingeGroupStore {
         let key = storageKey(for: profileId)
         if bounded.isEmpty {
             LargePayloadStore.remove(key: key, directory: storageDirectoryName)
-            return
+            return true
         }
-        guard let data = try? JSONEncoder().encode(bounded) else { return }
-        LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
+        guard let data = try? JSONEncoder().encode(bounded) else { return false }
+        return LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
