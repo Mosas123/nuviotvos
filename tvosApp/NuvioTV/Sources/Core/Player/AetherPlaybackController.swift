@@ -3742,13 +3742,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let matchContent = request.matchContentEnabled
             && frameRateMode.caseInsensitiveCompare("Off") != .orderedSame
 
-        var panelInHDR = false
+        // Supported HDR formats do not establish the display's current output mode.
+        // Use current EDR headroom as the positive HDR signal for this load.
+        let panelInHDR = (view.window?.screen ?? UIScreen.main).currentEDRHeadroom > 1.001
         var panelPresentsDV = false
         if #available(tvOS 11.0, *) {
-            // Prefer current EDR headroom when available; fall back to available HDR modes.
-            panelInHDR = AVPlayer.availableHDRModes.contains(.hdr10)
-                || AVPlayer.availableHDRModes.contains(.hlg)
-                || AVPlayer.availableHDRModes.contains(.dolbyVision)
             panelPresentsDV = AVPlayer.availableHDRModes.contains(.dolbyVision)
         }
 
