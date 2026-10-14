@@ -152,6 +152,39 @@ final class ExternalRatingsTests: XCTestCase {
         XCTAssertFalse(AddonRatingsService.builtInProviders.contains("kinopoisk"))
     }
 
+    func testAddonRatingAggregationDeduplicatesCaseInsensitiveSources() {
+        let ratings = [
+            NuvioExternalRating(source: "csfd", value: 15, name: "First", max: 20),
+            NuvioExternalRating(source: "CSFD", value: 16, name: "Duplicate", max: 20),
+            NuvioExternalRating(source: "IMDb", value: 8.2, name: "Built-in spoof"),
+            NuvioExternalRating(source: "douban", value: 8.4, name: "Douban")
+        ]
+
+        let result = AddonRatingsService.deduplicatedRatings(ratings)
+        XCTAssertEqual(result.map(\.source), ["csfd", "douban"])
+        XCTAssertEqual(result.first?.value, 15)
+        XCTAssertEqual(result.first?.name, "First")
+    }
+
+    func testAddonRatingFormattingUsesDeclaredScale() {
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 15, max: 20), "75%")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 150, max: 200), "75%")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 84, max: 100), "84%")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 8.4, max: 10), "8.4")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 84, max: nil), "84%")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 8, max: 0), "8.0")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 8, max: -10), "8.0")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 8, max: .infinity), "8.0")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: 8, max: .nan), "8.0")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: .nan, max: 20), "—")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: .infinity, max: 20), "—")
+        XCTAssertEqual(AddonRatingsService.formatRating(value: -.infinity, max: 20), "—")
+
+        let extreme = AddonRatingsService.formatRating(value: 2e18, max: 20)
+        XCTAssertFalse(extreme.isEmpty)
+        XCTAssertTrue(extreme.hasSuffix("%") || extreme.contains("/"))
+    }
+
     // MARK: - User Settings and Icon Overrides
 
     func testUserCanEnableDisableAndOverrideIconForAddonRatingSource() {

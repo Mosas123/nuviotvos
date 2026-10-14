@@ -1283,7 +1283,7 @@ final class MPVStreamSessionTests: XCTestCase {
         )
     }
 
-    func testOversizedRangeChunkAndSequentialBodyAreTerminalBeforeAppend() throws {
+    func testOversizedRangeChunkIsTerminalBeforeAppend() throws {
         MPVStreamSessionTestURLProtocol.handler = { _ in
             .init(
                 statusCode: 206,
@@ -1307,16 +1307,79 @@ final class MPVStreamSessionTests: XCTestCase {
         }
         XCTAssertTrue(rangeFailed, "An oversized range body must fail instead of being truncated")
         XCTAssertLessThanOrEqual(rangeBytes.count, 1_024)
+    }
+
+    func testSequentialBackpressureCompletesUnevenChunksAfterReaderStarts() throws {
+        let total = 6_000
+        let expected = Data((0..<total).map { UInt8(truncatingIfNeeded: $0 * 17) })
+        MPVStreamSessionTestURLProtocol.handler = { _ in
+            .init(
+                statusCode: 200,
+                body: expected,
+                contentLength: Int64(total),
+                chunkSizes: [1_000, 2_300, 2_700]
+            )
+        }
+        let baselineBufferedBytes = MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot().bufferedDataBytes
+        let session = try makeSession(rangeRequestSize: 1_024, bufferLimit: 4_096)
+        defer { session.close() }
+
+        XCTAssertTrue(waitForBufferedBytes(baselineBufferedBytes + 4_096))
+        XCTAssertEqual(readExactly(session, count: total), expected)
+        XCTAssertEqual(boundedRead(session, count: 1)?.count, 0)
+        XCTAssertEqual(MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot().bufferedDataBytes, baselineBufferedBytes)
+    }
+
+    func testBlockedSequentialProducerUnblocksOnCloseAndCancel() throws {
+        let body = Data(repeating: 0xA5, count: 6_000)
+        MPVStreamSessionTestURLProtocol.handler = { _ in
+            .init(statusCode: 200, body: body, contentLength: Int64(body.count))
+        }
+        let baselineBufferedBytes = MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot().bufferedDataBytes
+        let closedSession = try makeSession(rangeRequestSize: 1_024, bufferLimit: 4_096)
+        XCTAssertTrue(waitForBufferedBytes(baselineBufferedBytes + 4_096))
+        closedSession.close()
+        XCTAssertEqual(MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot().bufferedDataBytes, baselineBufferedBytes)
 
         MPVStreamSessionTestURLProtocol.reset()
         MPVStreamSessionTestURLProtocol.handler = { _ in
-            .init(statusCode: 200, body: Data(repeating: 0xDD, count: 4_097), contentLength: 4_097)
+            .init(statusCode: 200, body: body, contentLength: Int64(body.count))
         }
-        let sequentialSession = try makeSession(rangeRequestSize: 1_024, bufferLimit: 4_096)
-        defer { sequentialSession.close() }
-        let baselineBufferedBytes = MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot().bufferedDataBytes
-        XCTAssertEqual(boundedRead(sequentialSession, count: 1)?.count, -1)
+        let cancelledSession = try makeSession(rangeRequestSize: 1_024, bufferLimit: 4_096)
+        defer { cancelledSession.close() }
+        XCTAssertTrue(waitForBufferedBytes(baselineBufferedBytes + 4_096))
+        cancelledSession.cancel()
         XCTAssertEqual(MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot().bufferedDataBytes, baselineBufferedBytes)
+        XCTAssertEqual(boundedRead(cancelledSession, count: 1)?.count, -1)
+    }
+
+    func testSeekReleasesBlockedSequentialProducerAndUsesReplacementTask() throws {
+        let total = 6_000
+        let expected = Data((0..<total).map { UInt8(truncatingIfNeeded: $0 * 13) })
+        MPVStreamSessionTestURLProtocol.handler = { request in
+            if Self.requestStart(request) == 0 {
+                return .init(statusCode: 200, body: expected, contentLength: Int64(total))
+            }
+            let start = Self.requestStart(request) ?? -1
+            guard start == 5_000 else {
+                return .init(statusCode: 416, contentRange: "bytes */\(total)")
+            }
+            return .init(
+                statusCode: 206,
+                contentRange: "bytes 5000-5999/\(total)",
+                body: Data(expected.suffix(1_000)),
+                contentLength: 1_000
+            )
+        }
+        let baselineBufferedBytes = MPVStreamProtocolBridge.shared.memoryDiagnosticSnapshot().bufferedDataBytes
+        let session = try makeSession(rangeRequestSize: 1_000, bufferLimit: 4_096)
+        defer { session.close() }
+
+        XCTAssertTrue(waitForBufferedBytes(baselineBufferedBytes + 4_096))
+        XCTAssertEqual(session.seek(to: 5_000), 5_000)
+        XCTAssertEqual(readExactly(session, count: 1_000), Data(expected.suffix(1_000)))
+        XCTAssertEqual(boundedRead(session, count: 1)?.count, 0)
+        XCTAssertEqual(MPVStreamSessionTestURLProtocol.requestRanges, ["bytes=0-999", "bytes=5000-5999"])
     }
 
     func testSeekReplacesPendingRangeAndSeekToKnownEOFIsImmediate() throws {
@@ -1559,6 +1622,7 @@ private final class MPVStreamSessionTestURLProtocol: URLProtocol {
         let completionGate: DispatchSemaphore?
         let keepOpen: Bool
         let onStart: (() -> Void)?
+        let chunkSizes: [Int]?
 
         init(
             statusCode: Int,
@@ -1568,7 +1632,8 @@ private final class MPVStreamSessionTestURLProtocol: URLProtocol {
             error: Error? = nil,
             completionGate: DispatchSemaphore? = nil,
             keepOpen: Bool = false,
-            onStart: (() -> Void)? = nil
+            onStart: (() -> Void)? = nil,
+            chunkSizes: [Int]? = nil
         ) {
             self.statusCode = statusCode
             self.contentRange = contentRange
@@ -1578,6 +1643,7 @@ private final class MPVStreamSessionTestURLProtocol: URLProtocol {
             self.completionGate = completionGate
             self.keepOpen = keepOpen
             self.onStart = onStart
+            self.chunkSizes = chunkSizes
         }
     }
 
@@ -1631,7 +1697,18 @@ private final class MPVStreamSessionTestURLProtocol: URLProtocol {
         let http = HTTPURLResponse(url: url, statusCode: response.statusCode, httpVersion: "HTTP/1.1", headerFields: fields)!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         if !isStopped && !response.body.isEmpty {
-            client?.urlProtocol(self, didLoad: response.body)
+            var bodyOffset = 0
+            for requestedSize in response.chunkSizes ?? [response.body.count] where bodyOffset < response.body.count {
+                let chunkSize = min(max(0, requestedSize), response.body.count - bodyOffset)
+                guard chunkSize > 0 else { continue }
+                let endOffset = bodyOffset + chunkSize
+                client?.urlProtocol(self, didLoad: response.body.subdata(in: bodyOffset..<endOffset))
+                bodyOffset = endOffset
+                if isStopped { break }
+            }
+            if !isStopped && bodyOffset < response.body.count {
+                client?.urlProtocol(self, didLoad: response.body.subdata(in: bodyOffset..<response.body.count))
+            }
         }
         guard !isStopped else {
             deliveryLock.unlock()

@@ -49,21 +49,21 @@ struct ScenePlaybackInfo: Equatable, Sendable {
     var audioDecoder: String
     
     init(
-        engine: String = "AetherEngine",
-        version: String = "7.35.1",
-        videoCodec: String = "HEVC",
-        resolution: String = "3840 × 2160",
-        frameRate: String = "23.976 fps",
-        dynamicRange: String = "Dolby Vision",
-        dolbyVisionProfile: String? = "7",
-        videoBitrate: String = "51.28 Mbps",
-        container: String = "matroska,webm",
-        videoDecoder: String = "VideoToolbox HEVC (HW)",
-        audioCodec: String = "TRUEHD",
-        audioChannels: String = "Surround (7.1ch)",
-        audioLanguage: String = "ENG",
-        audioBitrate: String = "3.26 Mbps",
-        audioDecoder: String = "TRUEHD Atmos → APAC 9.1.6"
+        engine: String = "—",
+        version: String = "—",
+        videoCodec: String = "—",
+        resolution: String = "—",
+        frameRate: String = "—",
+        dynamicRange: String = "—",
+        dolbyVisionProfile: String? = nil,
+        videoBitrate: String = "—",
+        container: String = "—",
+        videoDecoder: String = "—",
+        audioCodec: String = "—",
+        audioChannels: String = "—",
+        audioLanguage: String = "—",
+        audioBitrate: String = "—",
+        audioDecoder: String = "—"
     ) {
         self.engine = engine
         self.version = version

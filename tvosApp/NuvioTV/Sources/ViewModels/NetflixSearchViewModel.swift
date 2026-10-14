@@ -142,8 +142,8 @@ class NetflixSearchViewModel: ObservableObject {
             guard let self else { return }
             do {
                 let found = try await self.repository.search(query: trimmed)
-                self.searchTimeoutTask?.cancel()
                 guard !Task.isCancelled, self.searchGeneration == generation else { return }
+                self.searchTimeoutTask?.cancel()
                 self.allResults = found
                 self.cache(found, for: cacheKey)
                 self.applyFilter()
@@ -155,8 +155,8 @@ class NetflixSearchViewModel: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                self.searchTimeoutTask?.cancel()
                 guard !Task.isCancelled, self.searchGeneration == generation else { return }
+                self.searchTimeoutTask?.cancel()
                 self.error = L10n.string(
                     "search_error_network",
                     fallback: "Couldn’t complete search. Check your connection and try again."

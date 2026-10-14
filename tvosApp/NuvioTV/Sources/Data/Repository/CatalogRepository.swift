@@ -238,6 +238,18 @@ actor StremioManifestDataCache {
 
     private var cachedData: [URL: Data] = [:]
     private var inFlight: [URL: Task<Data?, Never>] = [:]
+    private var session: URLSession
+
+    private init() {
+        session = Self.manifestSession
+    }
+
+    func setSessionForTesting(_ session: URLSession?) {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        cachedData.removeAll()
+        self.session = session ?? Self.manifestSession
+    }
 
     func data(for url: URL) async -> Data? {
         if let data = cachedData[url] { return data }
@@ -247,7 +259,7 @@ actor StremioManifestDataCache {
             do {
                 var request = URLRequest(url: url)
                 request.timeoutInterval = 8
-                let (data, response) = try await Self.manifestSession.data(for: request)
+                let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse,
                       200..<300 ~= http.statusCode else { return nil }
                 return data
@@ -392,6 +404,15 @@ final class CinemetaCatalogRepository: CatalogRepository {
         config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
+    private static var networkSessionOverrideForTesting: URLSession?
+
+    static func setNetworkSessionForTesting(_ session: URLSession?) {
+        networkSessionOverrideForTesting = session
+    }
+
+    private static var sessionForRequests: URLSession {
+        networkSessionOverrideForTesting ?? networkSession
+    }
 
     func cacheCatalogMetadata(_ meta: NuvioMeta) {
         Self.cacheCatalogMetadata(meta)
@@ -1498,6 +1519,31 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
     }
 
+    private func loadSearchManifestsWithinDeadline(urls: [URL], seconds: TimeInterval) async -> [URL: AddonManifest] {
+        guard !urls.isEmpty, !Task.isCancelled else { return [:] }
+        let collector = SearchManifestLoadCollector(expectedCount: urls.count)
+        let loads = urls.map { url in
+            Task {
+                let manifest = await self.manifest(for: url)
+                collector.record(manifest, for: url)
+            }
+        }
+        let timeout = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            collector.finish()
+        }
+        let manifests = await withTaskCancellationHandler {
+            await collector.wait()
+        } onCancel: {
+            loads.forEach { $0.cancel() }
+            collector.finish()
+        }
+        timeout.cancel()
+        loads.forEach { $0.cancel() }
+        return manifests
+    }
+
     /// Enabled installed add-ons whose manifest advertises the Stremio `subtitles` resource.
     func configuredSubtitleAddons(id: String, type: String,
                                   manifestURLs: [URL]? = nil) async -> [StremioSubtitleAddon] {
@@ -1615,18 +1661,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // with a short deadline (2.5s) so slow/offline add-on hosts never stall search.
         let candidateURLs = Self.configuredStreamAddonManifestURLs
         if !candidateURLs.isEmpty {
-            let manifests: [URL: AddonManifest] = await withTaskGroup(of: [URL: AddonManifest].self) { group in
-                group.addTask {
-                    await self.loadManifestsConcurrently(urls: candidateURLs)
-                }
-                group.addTask {
-                    try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    return [:]
-                }
-                let first = await group.next() ?? [:]
-                group.cancelAll()
-                return first
-            }
+            let manifests = await loadSearchManifestsWithinDeadline(urls: candidateURLs, seconds: 2.5)
 
             for manifestURL in candidateURLs {
                 guard let manifest = manifests[manifestURL] else { continue }
@@ -2459,7 +2494,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
         request.setValue("Mozilla/5.0 (AppleTV; tvOS 18.0) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await Self.networkSession.data(for: request)
+        let (data, response) = try await Self.sessionForRequests.data(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw URLError(.badServerResponse)
         }
@@ -2504,6 +2539,63 @@ private struct AddonManifest: Decodable {
             }
         }
         return false
+    }
+}
+
+private final class SearchManifestLoadCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+    private var manifests: [URL: AddonManifest] = [:]
+    private var continuation: CheckedContinuation<[URL: AddonManifest], Never>?
+    private var finished = false
+
+    init(expectedCount: Int) {
+        remaining = expectedCount
+    }
+
+    func wait() async -> [URL: AddonManifest] {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if finished {
+                let snapshot = manifests
+                lock.unlock()
+                continuation.resume(returning: snapshot)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func record(_ manifest: AddonManifest?, for url: URL) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        if let manifest { manifests[url] = manifest }
+        remaining -= 1
+        let completed = remaining == 0
+        if completed { finished = true }
+        let pendingContinuation = completed ? continuation : nil
+        if completed { continuation = nil }
+        let snapshot = manifests
+        lock.unlock()
+        pendingContinuation?.resume(returning: snapshot)
+    }
+
+    func finish() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let pendingContinuation = continuation
+        continuation = nil
+        let snapshot = manifests
+        lock.unlock()
+        pendingContinuation?.resume(returning: snapshot)
     }
 }
 

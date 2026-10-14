@@ -322,6 +322,7 @@ final class MPVStreamSession: NSObject, URLSessionDataDelegate, @unchecked Senda
                     dataTask?.resume()
                 }
                 publishMemoryDiagnosticsIfEnabled()
+                condition.broadcast()
 
                 return Int64(toRead)
             }
@@ -566,6 +567,7 @@ final class MPVStreamSession: NSObject, URLSessionDataDelegate, @unchecked Senda
             dataTask?.cancel()
         }
         publishMemoryDiagnosticsIfEnabled()
+        condition.broadcast()
     }
 
     private func truncatedResponseError(expected: Int64, received: Int64) -> NSError {
@@ -781,19 +783,55 @@ final class MPVStreamSession: NSObject, URLSessionDataDelegate, @unchecked Senda
             }
         }
 
-        guard buffer.count <= maxBufferSize,
-              data.count <= maxBufferSize - buffer.count else {
-            setTerminalError("Stream buffer exceeded \(maxBufferSize) byte hard cap", cancelTask: true)
-            condition.broadcast()
-            condition.unlock()
-            return
-        }
-
-        buffer.append(data)
         responseBytesReceived = receivedAfterChunk
-        if requestMode == .sequential && buffer.count >= maxBufferSize && !isTaskSuspended {
-            isTaskSuspended = true
-            dataTask.suspend()
+
+        if requestMode == .finiteRange {
+            guard buffer.count <= maxBufferSize,
+                  data.count <= maxBufferSize - buffer.count else {
+                setTerminalError("Stream buffer exceeded \(maxBufferSize) byte hard cap", cancelTask: true)
+                condition.broadcast()
+                condition.unlock()
+                return
+            }
+            buffer.append(data)
+        } else {
+            var appendedBytes = 0
+            while appendedBytes < data.count {
+                guard !isClosed, !isCancelled, taskError == nil, self.dataTask === dataTask else {
+                    condition.broadcast()
+                    condition.unlock()
+                    return
+                }
+
+                guard buffer.count <= maxBufferSize else {
+                    setTerminalError("Stream buffer exceeded \(maxBufferSize) byte hard cap", cancelTask: true)
+                    condition.broadcast()
+                    condition.unlock()
+                    return
+                }
+
+                let availableBytes = maxBufferSize - buffer.count
+                if availableBytes == 0 {
+                    if !isTaskSuspended {
+                        isTaskSuspended = true
+                        dataTask.suspend()
+                    }
+                    condition.wait()
+                    continue
+                }
+
+                let bytesToAppend = min(availableBytes, data.count - appendedBytes)
+                let endIndex = appendedBytes + bytesToAppend
+                buffer.append(data[appendedBytes..<endIndex])
+                appendedBytes = endIndex
+
+                if buffer.count >= maxBufferSize && !isTaskSuspended {
+                    isTaskSuspended = true
+                    dataTask.suspend()
+                }
+                publishMemoryDiagnosticsIfEnabled()
+                condition.broadcast()
+            }
         }
         if isLiveStream && !data.isEmpty { consecutiveReadFailures = 0 }
         publishMemoryDiagnosticsIfEnabled()

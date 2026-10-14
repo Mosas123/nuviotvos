@@ -201,6 +201,45 @@ enum AddonRatingsService {
         "letterboxd", "audience", "myanimelist", "mal", "tvdb"
     ]
 
+    static func deduplicatedRatings(_ ratings: [NuvioExternalRating]) -> [NuvioExternalRating] {
+        var seenSources = Set<String>()
+        return ratings.filter { rating in
+            let source = rating.source.lowercased()
+            return !builtInProviders.contains(source) && seenSources.insert(source).inserted
+        }
+    }
+
+    static func formatRating(value: Double, max: Double?) -> String {
+        guard value.isFinite else { return "—" }
+        if let max, max.isFinite, max > 10 {
+            let fraction = value / max
+            let percent = fraction * 100
+            guard fraction.isFinite, percent.isFinite else {
+                return "\(formattedRatingNumber(value))/\(formattedRatingNumber(max))"
+            }
+            return formattedRatingPercent(percent)
+        }
+        if max == nil, value > 10 {
+            return formattedRatingPercent(value)
+        }
+        return String(format: "%.1f", value)
+    }
+
+    private static func formattedRatingPercent(_ value: Double) -> String {
+        guard value.isFinite else { return "—" }
+        if abs(value) >= 1_000_000_000 {
+            return String(format: "%.3g%%", value)
+        }
+        return String(format: "%.0f%%", value)
+    }
+
+    private static func formattedRatingNumber(_ value: Double) -> String {
+        if abs(value) >= 1_000_000_000 || (value != 0 && abs(value) < 0.001) {
+            return String(format: "%.3g", value)
+        }
+        return String(format: "%.1f", value)
+    }
+
     private static let enabledKeyPrefix = "nuvio.tv.settings.ratings.addon_enabled."
     private static let iconOverrideKeyPrefix = "nuvio.tv.settings.ratings.addon_icon_override."
 
@@ -304,24 +343,28 @@ enum AddonRatingsService {
         }
         guard !eligible.isEmpty else { return [] }
 
-        return await withTaskGroup(of: [NuvioExternalRating].self) { group in
-            for item in eligible {
+        return await withTaskGroup(of: (Int, [NuvioExternalRating]).self) { group in
+            for (index, item) in eligible.enumerated() {
                 group.addTask {
-                    await fetchRatingsFromAddon(
-                        manifestURL: item.url,
-                        manifest: item.manifest,
-                        type: mediaType,
-                        id: contentID,
-                        session: session,
-                        defaults: defaults
+                    (
+                        index,
+                        await fetchRatingsFromAddon(
+                            manifestURL: item.url,
+                            manifest: item.manifest,
+                            type: mediaType,
+                            id: contentID,
+                            session: session,
+                            defaults: defaults
+                        )
                     )
                 }
             }
-            var allRatings: [NuvioExternalRating] = []
-            for await ratings in group {
-                allRatings.append(contentsOf: ratings)
+            var ratingsByAddon: [Int: [NuvioExternalRating]] = [:]
+            for await (index, ratings) in group {
+                ratingsByAddon[index] = ratings
             }
-            return allRatings
+            let orderedRatings = eligible.indices.flatMap { ratingsByAddon[$0] ?? [] }
+            return deduplicatedRatings(orderedRatings)
         }
     }
 

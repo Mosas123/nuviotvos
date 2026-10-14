@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import AetherEngine
 
 @MainActor
 protocol ScrubThumbnailProviding: AnyObject {
@@ -5078,21 +5079,44 @@ class PlayerViewModel: ObservableObject {
         switch activeEngineKind {
         case .aether:
             engineName = "AetherEngine"
-            engineVer = "7.35.1"
+            engineVer = AetherEngine.version
         case .mpv:
             engineName = "MPVKit"
-            engineVer = "0.38.0"
+            engineVer = "—"
         }
 
-        let debug = playbackDebugInfo
-        let aether = aetherController
-        let mpv = sessionCoordinator.mpvController
+        let aether: AetherPlaybackController?
+        let mpv: MPVPlayerViewController?
+        let debug: PlaybackDebugInfo?
+        switch activeEngineKind {
+        case .aether:
+            aether = aetherController
+            mpv = nil
+            debug = Self.selectedScenePlaybackDebugInfo(
+                activeEngineKind: .aether,
+                aether: aether?.playbackDebugInfo,
+                mpv: nil
+            )
+        case .mpv:
+            aether = nil
+            mpv = sessionCoordinator.mpvController
+            debug = Self.selectedScenePlaybackDebugInfo(
+                activeEngineKind: .mpv,
+                aether: nil,
+                mpv: mpv?.playbackDebugInfo
+            )
+        }
+        func reportedValue(_ candidates: [String?]) -> String? {
+            candidates.compactMap { candidate in
+                guard let candidate else { return nil }
+                let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty, value.caseInsensitiveCompare("Unknown") != .orderedSame else { return nil }
+                return value
+            }.first
+        }
 
         // Video Codec
-        let rawCodec = aether?.playbackDebugInfo.videoCodec
-            ?? mpv.playbackDebugInfo.videoCodec
-            ?? debug?.videoCodec
-            ?? "HEVC"
+        let rawCodec = reportedValue([debug?.videoCodec]) ?? "—"
         let videoCodec: String
         let codecUpper = rawCodec.uppercased()
         if codecUpper.contains("HEVC") || codecUpper.contains("H265") || codecUpper.contains("H.265") {
@@ -5103,57 +5127,54 @@ class PlayerViewModel: ObservableObject {
             videoCodec = "AV1"
         } else if codecUpper.contains("VP9") {
             videoCodec = "VP9"
-        } else if !rawCodec.isEmpty && rawCodec != "Unknown" {
+        } else if !rawCodec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && codecUpper != "UNKNOWN" {
             videoCodec = rawCodec.uppercased()
         } else {
-            videoCodec = "HEVC"
+            videoCodec = "—"
         }
 
         // Resolution
-        let resRaw = debug?.resolution
-            ?? aether?.playbackDebugInfo.resolution
-            ?? mpv.playbackDebugInfo.resolution
-            ?? ""
+        let resRaw = reportedValue([debug?.resolution]) ?? ""
         let resolution: String
-        if !resRaw.isEmpty && resRaw != "Unknown" {
+        if !resRaw.isEmpty {
             resolution = resRaw.replacingOccurrences(of: "×", with: " × ")
                                .replacingOccurrences(of: "x", with: " × ")
                                .replacingOccurrences(of: "  ×  ", with: " × ")
         } else if videoNaturalSize.width > 0 && videoNaturalSize.height > 0 {
             resolution = "\(Int(videoNaturalSize.width)) × \(Int(videoNaturalSize.height))"
         } else {
-            resolution = "3840 × 2160"
+            resolution = "—"
         }
 
         // Frame rate
-        let fpsRaw = debug?.frameRate
-            ?? aether?.playbackDebugInfo.frameRate
-            ?? mpv.playbackDebugInfo.frameRate
-            ?? ""
+        let fpsRaw = reportedValue([debug?.frameRate]) ?? ""
         let frameRate: String
-        if !fpsRaw.isEmpty && fpsRaw != "Unknown" {
+        if !fpsRaw.isEmpty {
             frameRate = fpsRaw.contains("fps") ? fpsRaw : "\(fpsRaw) fps"
         } else {
-            frameRate = "23.976 fps"
+            frameRate = "—"
         }
 
         // Dynamic Range & DV Profile
-        let hdrRaw = debug?.hdr
-            ?? aether?.playbackDebugInfo.hdr
-            ?? debug?.dynamicRange
-            ?? ""
+        let hdrRaw = reportedValue([
+            debug?.hdr,
+            debug?.dynamicRange
+        ]) ?? ""
+        let dvRaw = reportedValue([debug?.dv]) ?? ""
+        let mpvDVProfile = mpv?.dolbyVisionProfile ?? 0
         let isDV = aether?.engine.sourceDVProfile != nil
             || (aether?.engine.sourceVideoFormat == .dolbyVision)
-            || (sessionCoordinator.mpvController.dolbyVisionProfile > 0)
+            || mpvDVProfile > 0
             || hdrRaw.localizedCaseInsensitiveContains("Dolby")
-            || (debug?.dv != nil && debug?.dv != "None" && debug?.dv != "")
+            || (!dvRaw.isEmpty && dvRaw.caseInsensitiveCompare("None") != .orderedSame)
 
         var dvProfile: String? = nil
         if let p = aether?.engine.sourceDVProfile, p > 0 {
             dvProfile = "\(p)"
-        } else if sessionCoordinator.mpvController.dolbyVisionProfile > 0 {
-            dvProfile = "\(sessionCoordinator.mpvController.dolbyVisionProfile)"
-        } else if let dvStr = debug?.dv ?? aether?.playbackDebugInfo.dv, !dvStr.isEmpty, dvStr != "None" {
+        } else if mpvDVProfile > 0 {
+            dvProfile = "\(mpvDVProfile)"
+        } else if !dvRaw.isEmpty, dvRaw.caseInsensitiveCompare("None") != .orderedSame {
+            let dvStr = dvRaw
             if dvStr.contains("5") { dvProfile = "5" }
             else if dvStr.contains("7") { dvProfile = "7" }
             else if dvStr.contains("8") { dvProfile = "8" }
@@ -5172,9 +5193,9 @@ class PlayerViewModel: ObservableObject {
             tvSupportsHDR = false
         }
 
+        let engineOutputFormat = aether?.engine.videoFormat
         let dynamicRange: String
         if isDV {
-            let engineOutputFormat = aether?.engine.videoFormat
             if engineOutputFormat == .hdr10 || (!tvSupportsDV && tvSupportsHDR) {
                 dynamicRange = "Dolby Vision → HDR10"
             } else if engineOutputFormat == .sdr || (!tvSupportsDV && !tvSupportsHDR) {
@@ -5188,27 +5209,33 @@ class PlayerViewModel: ObservableObject {
             }
         } else if hdrRaw.localizedCaseInsensitiveContains("HLG") {
             dynamicRange = "HLG"
-        } else if hdrRaw.localizedCaseInsensitiveContains("HDR") {
+        } else if hdrRaw.localizedCaseInsensitiveContains("HDR") || engineOutputFormat == .hdr10 {
             dynamicRange = "HDR10"
-        } else {
+        } else if hdrRaw.localizedCaseInsensitiveContains("SDR") {
             dynamicRange = "SDR"
+        } else if engineOutputFormat == .sdr {
+            dynamicRange = "SDR"
+        } else {
+            dynamicRange = "—"
         }
 
         // Bitrate
-        let vBitrateRaw = debug?.vBitrate ?? aether?.playbackDebugInfo.vBitrate ?? ""
+        let vBitrateRaw = reportedValue([debug?.vBitrate]) ?? ""
         let videoBitrate: String
-        if let match = vBitrateRaw.components(separatedBy: " · ").first(where: { $0.contains("Mbit/s") || $0.contains("Mbps") }) {
+        if let match = vBitrateRaw.components(separatedBy: " · ").first(where: {
+            ($0.contains("Mbit/s") || $0.contains("Mbps")) && !$0.contains("--")
+        }) {
             let cleaned = match.replacingOccurrences(of: "avg mux ", with: "")
                                .replacingOccurrences(of: "now ", with: "")
                                .replacingOccurrences(of: "Mbit/s", with: "Mbps")
                                .trimmingCharacters(in: .whitespaces)
-            videoBitrate = cleaned.isEmpty ? "51.28 Mbps" : cleaned
+            videoBitrate = cleaned.isEmpty ? "—" : cleaned
         } else {
-            videoBitrate = "51.28 Mbps"
+            videoBitrate = "—"
         }
 
         // Container
-        let ext = debug?.fileExtension ?? ""
+        let ext = reportedValue([debug?.fileExtension]) ?? ""
         let container: String
         let extLower = ext.lowercased()
         if extLower == "mkv" || extLower == "webm" {
@@ -5220,23 +5247,23 @@ class PlayerViewModel: ObservableObject {
         } else if !ext.isEmpty {
             container = extLower
         } else {
-            container = "matroska,webm"
+            container = "—"
         }
 
         // Video Decoder
-        let decRaw = debug?.decoder ?? aether?.playbackDebugInfo.decoder ?? ""
+        let decRaw = reportedValue([debug?.decoder]) ?? ""
         let videoDecoder: String
-        if decRaw.contains("videotoolbox") || decRaw.contains("VideoToolbox") || activeEngineKind == .aether {
+        if decRaw.localizedCaseInsensitiveContains("videotoolbox") {
             videoDecoder = "VideoToolbox \(videoCodec) (HW)"
         } else if !decRaw.isEmpty {
             videoDecoder = decRaw
         } else {
-            videoDecoder = "VideoToolbox HEVC (HW)"
+            videoDecoder = "—"
         }
 
         // Audio stream info
         let selectedAudio = audioTracks.first(where: { $0.isSelected }) ?? audioTracks.first
-        let audioDetail = selectedAudio?.detail ?? debug?.audio ?? ""
+        let audioDetail = reportedValue([selectedAudio?.detail, debug?.audio]) ?? ""
         let detailUpper = audioDetail.uppercased()
 
         // Audio Codec
@@ -5256,7 +5283,7 @@ class PlayerViewModel: ObservableObject {
         } else if detailUpper.contains("FLAC") {
             audioCodec = "FLAC"
         } else {
-            audioCodec = "TRUEHD"
+            audioCodec = "—"
         }
 
         // Channels
@@ -5268,38 +5295,27 @@ class PlayerViewModel: ObservableObject {
         } else if detailUpper.contains("2 CH") || detailUpper.contains("STEREO") || detailUpper.contains("2.0") {
             audioChannels = "Stereo (2.0ch)"
         } else {
-            audioChannels = "Surround (7.1ch)"
+            audioChannels = "—"
         }
 
         // Language
-        let lang = selectedAudio?.language.uppercased() ?? "ENG"
-        let audioLanguage = lang.isEmpty || lang == "UND" ? "ENG" : lang
+        let lang = reportedValue([selectedAudio?.language])?.uppercased() ?? ""
+        let audioLanguage = lang.isEmpty || lang == "UND" ? "—" : lang
 
         // Audio Bitrate
-        let aBitRaw = debug?.aBitrate ?? aether?.playbackDebugInfo.aBitrate ?? ""
+        let aBitRaw = reportedValue([debug?.aBitrate]) ?? ""
         let audioBitrate: String
         if !aBitRaw.isEmpty && aBitRaw != "--" {
             let cleaned = aBitRaw.replacingOccurrences(of: "meas ", with: "")
                                  .replacingOccurrences(of: "Mbit/s", with: "Mbps")
                                  .trimmingCharacters(in: .whitespaces)
-            audioBitrate = cleaned.isEmpty ? "3.26 Mbps" : cleaned
+            audioBitrate = cleaned.isEmpty ? "—" : cleaned
         } else {
-            audioBitrate = "3.26 Mbps"
+            audioBitrate = "—"
         }
 
-        // Audio Decoder
-        let isAtmos = detailUpper.contains("ATMOS") || audioDetail.localizedCaseInsensitiveContains("Atmos")
-        let spatialRendering = SpatialAudioSettings.rendering()
-        let audioDecoder: String
-        if isAtmos && spatialRendering != .off {
-            audioDecoder = "\(audioCodec) Atmos → APAC 9.1.6"
-        } else if isAtmos {
-            audioDecoder = "\(audioCodec) Atmos (Direct Passthrough)"
-        } else if audioCodec == "TRUEHD" {
-            audioDecoder = "TRUEHD Atmos → APAC 9.1.6"
-        } else {
-            audioDecoder = "\(audioCodec) → CoreAudio"
-        }
+        // Decoder selection is not exposed as playback telemetry yet.
+        let audioDecoder = "—"
 
         return ScenePlaybackInfo(
             engine: engineName,
@@ -5318,6 +5334,17 @@ class PlayerViewModel: ObservableObject {
             audioBitrate: audioBitrate,
             audioDecoder: audioDecoder
         )
+    }
+
+    static func selectedScenePlaybackDebugInfo(
+        activeEngineKind: PlayerEngineKind,
+        aether: PlaybackDebugInfo?,
+        mpv: PlaybackDebugInfo?
+    ) -> PlaybackDebugInfo? {
+        switch activeEngineKind {
+        case .aether: return aether
+        case .mpv: return mpv
+        }
     }
 
     func openScene() {

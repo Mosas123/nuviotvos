@@ -4258,19 +4258,7 @@ private struct TvDetailsSummary: View {
                 iconUrl: extra.iconUrl.flatMap { URL(string: $0) },
                 iconWidth: 38,
                 color: Color(red: 0.96, green: 0.77, blue: 0.09),
-                format: { val in
-                    if let max = extra.max {
-                        if max > 10 {
-                            return "\(Int(val.rounded()))%"
-                        } else {
-                            return String(format: "%.1f", val)
-                        }
-                    } else if val > 10 {
-                        return "\(Int(val.rounded()))%"
-                    } else {
-                        return String(format: "%.1f", val)
-                    }
-                }
+                format: { AddonRatingsService.formatRating(value: $0, max: extra.max) }
             )
             badges.append(TvRatingBadge(visual: visual, rating: extra))
         }

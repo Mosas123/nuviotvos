@@ -2783,7 +2783,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let width = Int(engine.sourceVideoWidth > 0 ? engine.sourceVideoWidth : sourceProbe?.videoWidth ?? 0)
         let height = Int(engine.sourceVideoHeight > 0 ? engine.sourceVideoHeight : sourceProbe?.videoHeight ?? 0)
         let fpsVal = engine.sourceVideoFrameRate ?? sourceProbe?.videoFrameRate
-        let fpsStr = fpsVal.map { String(format: "%.3f fps", $0) } ?? "23.976 fps"
+        let fpsStr = fpsVal.map { String(format: "%.3f fps", $0) } ?? ""
         let sourceRange = Self.dynamicRangeLabel(
             engine.sourceVideoFormat,
             dolbyVisionProfile: engine.sourceDVProfile ?? sourceProbe?.dvProfile
@@ -2884,7 +2884,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         if let aRate = telemetry?.audioBridgeBitrateMbps, aRate > 0 {
             aBitrateStr = String(format: "meas %.2f Mbit/s", aRate)
         } else {
-            aBitrateStr = "meas 5.14 Mbit/s"
+            aBitrateStr = ""
         }
 
         // Audio route
