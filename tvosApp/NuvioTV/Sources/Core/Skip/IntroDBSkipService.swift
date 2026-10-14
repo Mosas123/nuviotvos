@@ -105,11 +105,11 @@ private struct FlexibleSeconds: Decodable {
     }
 }
 
-final class IntroDBSkipService {
+final class IntroDBSkipService: @unchecked Sendable {
     static let shared = IntroDBSkipService()
 
     private let session: URLSession
-    private let decoder = JSONDecoder()
+    private let stateLock = NSLock()
     private var cache: [String: [SkipInterval]] = [:]
     struct SeasonSample {
         let episode: Int
@@ -136,7 +136,7 @@ final class IntroDBSkipService {
         } else {
             cacheKey = imdbId
         }
-        if let cached = cache[cacheKey] {
+        if let cached = cachedIntervals(for: cacheKey) {
             if let season, let episode, let duration, duration > 0 { seedSeasonTemplate(imdbId: imdbId, season: season, episode: episode, intervals: cached, duration: duration) }
             return mergedWithSeasonInference(cached, imdbId: imdbId, season: season, episode: episode, duration: duration)
         }
@@ -153,7 +153,7 @@ final class IntroDBSkipService {
                   (200..<300).contains(http.statusCode) else {
                 return inferredSeasonIntervals(imdbId: imdbId, season: season, episode: episode, duration: duration)
             }
-            let decoded = try decoder.decode(IntroDBSegmentsResponse.self, from: data)
+            let decoded = try JSONDecoder().decode(IntroDBSegmentsResponse.self, from: data)
             let intervals = [
                 decoded.recap?.interval(type: "recap"),
                 decoded.intro?.interval(type: "intro"),
@@ -161,7 +161,7 @@ final class IntroDBSkipService {
             ]
             .compactMap { $0 }
             .sorted { $0.startTime < $1.startTime }
-            cache[cacheKey] = intervals
+            storeCachedIntervals(intervals, for: cacheKey)
             if let season, let episode, let duration, duration > 0 { seedSeasonTemplate(imdbId: imdbId, season: season, episode: episode, intervals: intervals, duration: duration) }
             return mergedWithSeasonInference(intervals, imdbId: imdbId, season: season, episode: episode, duration: duration)
         } catch {
@@ -174,13 +174,13 @@ final class IntroDBSkipService {
 
     private func inferredSeasonIntervals(imdbId: String, season: Int?, episode: Int?, duration: Double?) -> [SkipInterval] {
         guard let season, episode != nil, let duration, duration > 0,
-              let samples = seasonSamples["\(imdbId):\(season)"] else { return [] }
+              let samples = seasonSampleSnapshot(imdbId: imdbId, season: season) else { return [] }
         return Self.consensusIntervals(samples: Array(samples.values), targetDuration: duration)
     }
 
     private func mergedWithSeasonInference(_ exact: [SkipInterval], imdbId: String, season: Int?, episode: Int?, duration: Double?) -> [SkipInterval] {
         guard let season, episode != nil, let duration, duration > 0,
-              let samples = seasonSamples["\(imdbId):\(season)"] else { return exact }
+              let samples = seasonSampleSnapshot(imdbId: imdbId, season: season) else { return exact }
         let inferred = Self.consensusIntervals(samples: Array(samples.values), targetDuration: duration)
         return Self.mergingExactIntervals(exact, with: inferred)
     }
@@ -190,11 +190,31 @@ final class IntroDBSkipService {
     func seedSeasonTemplate(imdbId: String?, season: Int?, episode: Int? = nil, intervals: [SkipInterval], duration: Double) {
         guard let imdbId = normalizedImdbId(imdbId), let season, let episode, season >= 0,
               duration > 0, !intervals.contains(where: { $0.provider == "introdb-season" }) else { return }
+        stateLock.lock()
         seasonSamples["\(imdbId):\(season)", default: [:]][episode] = SeasonSample(
             episode: episode,
             intervals: intervals,
             duration: duration
         )
+        stateLock.unlock()
+    }
+
+    private func cachedIntervals(for key: String) -> [SkipInterval]? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cache[key]
+    }
+
+    private func storeCachedIntervals(_ intervals: [SkipInterval], for key: String) {
+        stateLock.lock()
+        cache[key] = intervals
+        stateLock.unlock()
+    }
+
+    private func seasonSampleSnapshot(imdbId: String, season: Int) -> [Int: SeasonSample]? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return seasonSamples["\(imdbId):\(season)"]
     }
 
     /// Exact episode markers always win; a season template only fills segment
