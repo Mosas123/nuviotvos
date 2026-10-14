@@ -2297,7 +2297,7 @@ struct SimklProgressService {
                         streamUrl: "",
                         position: position,
                         duration: duration,
-                        lastWatchedAt: entry.pausedAt ?? Date(),
+                        lastWatchedAt: entry.pausedAt ?? .distantPast,
                         season: entry.season,
                         episode: entry.episode,
                         released: nil,
