@@ -4290,10 +4290,23 @@ class PlayerViewModel: ObservableObject {
     private func applySavedTrackSelectionsIfNeeded() {
         guard let selection = pendingTrackSelection else { return }
 
-        if !didApplySavedAudioSelection, let audio = selection.audio,
-           let matchingTrack = matchingAudioTrack(for: audio) {
-            didApplySavedAudioSelection = true
-            selectAudio(matchingTrack, persist: false)
+        if !didApplySavedAudioSelection, let audio = selection.audio {
+            let showLanguageOverride = activeMeta.flatMap { ShowAudioLanguageStore.canonicalKey(meta: $0) }
+                .flatMap { ShowAudioLanguageStore.getLanguage(for: $0) }
+            let showPrefersDifferentLanguage: Bool
+            if let showLanguageOverride,
+               let target = SubtitleLanguagePreferences.preferredAudioLanguage(meta: activeMeta) {
+                showPrefersDifferentLanguage = !audioTrackMatches(audio, language: target)
+            } else {
+                showPrefersDifferentLanguage = false
+            }
+
+            if !showPrefersDifferentLanguage, let matchingTrack = matchingAudioTrack(for: audio) {
+                didApplySavedAudioSelection = true
+                selectAudio(matchingTrack, persist: false)
+            } else if showPrefersDifferentLanguage {
+                pendingTrackSelection?.audio = nil
+            }
         }
 
         guard !didApplySavedSubtitleSelection, let subtitle = selection.subtitle else { return }
@@ -4327,7 +4340,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func applyAudioPreferenceIfNeeded() {
-        guard !didApplyAudioPreference, pendingTrackSelection?.audio == nil else { return }
+        guard !didApplyAudioPreference, !didApplySavedAudioSelection, pendingTrackSelection?.audio == nil else { return }
         guard let preferred = SubtitleLanguagePreferences.preferredAudioLanguage(meta: activeMeta) else {
             didApplyAudioPreference = true
             return
@@ -4421,8 +4434,60 @@ class PlayerViewModel: ObservableObject {
             languageName: track.languageName
         )
         rememberSessionAudio(audio)
+        if let meta = activeMeta, let showId = ShowAudioLanguageStore.canonicalKey(meta: meta) {
+            if let lang = Self.detectedLanguage(for: track) {
+                ShowAudioLanguageStore.setLanguage(lang, for: showId)
+            }
+        }
         guard let activeTrackSelectionKey else { return }
         PlayerTrackSelectionStore.saveAudio(audio, for: activeTrackSelectionKey)
+    }
+
+    private func audioTrackMatches(_ audio: PlayerTrackSelection.Audio, language: String) -> Bool {
+        SubtitleLanguagePreferences.matches(audio.language, target: language) ||
+        SubtitleLanguagePreferences.matches(audio.languageName, target: language) ||
+        SubtitleLanguagePreferences.matches(audio.name, target: language)
+    }
+
+    nonisolated static func detectedLanguage(for track: AudioTrack) -> String? {
+        let langCode = track.language.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !langCode.isEmpty && langCode.lowercased() != "und" {
+            if let match = SubtitleLanguagePreferences.supportedLanguages.first(where: {
+                SubtitleLanguagePreferences.matches(langCode, target: $0)
+            }) {
+                return match
+            }
+        }
+
+        let langName = track.languageName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !langName.isEmpty {
+            if let match = SubtitleLanguagePreferences.supportedLanguages.first(where: {
+                SubtitleLanguagePreferences.matches(langName, target: $0)
+            }) {
+                return match
+            }
+        }
+
+        let trackTitle = track.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trackTitle.isEmpty {
+            if let match = SubtitleLanguagePreferences.supportedLanguages.first(where: {
+                SubtitleLanguagePreferences.matches(trackTitle, target: $0)
+            }) {
+                return match
+            }
+        }
+
+        let fallbackCandidate = !langCode.isEmpty && langCode.lowercased() != "und"
+            ? langCode
+            : (!langName.isEmpty ? langName : "")
+        if !fallbackCandidate.isEmpty {
+            let lower = fallbackCandidate.lowercased()
+            if let locName = Locale.current.localizedString(forLanguageCode: lower) ??
+                             Locale(identifier: "en").localizedString(forLanguageCode: lower) {
+                return locName.prefix(1).uppercased() + locName.dropFirst()
+            }
+        }
+        return nil
     }
 
     private func saveSubtitleSelection(_ track: SubtitleTrack) {
@@ -5079,10 +5144,10 @@ class PlayerViewModel: ObservableObject {
         switch activeEngineKind {
         case .aether:
             engineName = "AetherEngine"
-            engineVer = AetherEngine.version
+            engineVer = aetherController?.engineVersion ?? AetherEngine.version
         case .mpv:
             engineName = "MPVKit"
-            engineVer = "—"
+            engineVer = sessionCoordinator.mpvController.engineVersion ?? "—"
         }
 
         let aether: AetherPlaybackController?

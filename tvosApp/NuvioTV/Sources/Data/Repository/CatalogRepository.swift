@@ -1812,7 +1812,19 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     ?? existing.posterShape
                     ?? item.posterShape
                 let resolvedIsFromAddon = (existing.isFromAddon == true || item.isFromAddon == true) ? true : nil
+                let resolvedLandscapePoster: String? = {
+                    if preferAddonArtwork {
+                        if item.isFromAddon == true, let addonLandscape = trimmedNonEmpty(item.landscapePosterUrl) {
+                            return addonLandscape
+                        }
+                        if existing.isFromAddon == true, let existingLandscape = trimmedNonEmpty(existing.landscapePosterUrl) {
+                            return existingLandscape
+                        }
+                    }
+                    return trimmedNonEmpty(existing.landscapePosterUrl) ?? trimmedNonEmpty(item.landscapePosterUrl)
+                }()
                 let resolvedBackdrop = (preferAddonArtwork && item.isFromAddon == true ? trimmedNonEmpty(item.backgroundUrl) : nil)
+                    ?? (preferAddonArtwork && existing.isFromAddon == true ? trimmedNonEmpty(existing.backgroundUrl) : nil)
                     ?? trimmedNonEmpty(existing.backgroundUrl)
                     ?? trimmedNonEmpty(item.backgroundUrl)
                 let resolvedLogo = (preferAddonArtwork && item.isFromAddon == true ? trimmedNonEmpty(item.logoUrl) : nil)
@@ -1823,6 +1835,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 if resolvedTmdb != existing.tmdbId
                     || resolvedImdb != existing.imdbId
                     || resolvedPoster != existing.posterUrl
+                    || resolvedLandscapePoster != existing.landscapePosterUrl
                     || resolvedBackdrop != existing.backgroundUrl
                     || resolvedLogo != existing.logoUrl
                     || resolvedYear != existing.year
@@ -1855,7 +1868,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
                         trailerYtIds: existing.trailerYtIds ?? item.trailerYtIds,
                         externalRatings: existing.externalRatings ?? item.externalRatings,
                         posterShape: resolvedPosterShape,
-                        isFromAddon: resolvedIsFromAddon
+                        isFromAddon: resolvedIsFromAddon,
+                        landscapePosterUrl: resolvedLandscapePoster
                     )
                 }
 
@@ -2891,6 +2905,7 @@ struct CinemetaMeta: Decodable {
     let trailerStreams: [CinemetaTrailerStream]?
     let imdbId: String?
     let posterShape: String?
+    let landscapePoster: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, type, description, poster, background, logo, imdbRating
@@ -2900,6 +2915,8 @@ struct CinemetaMeta: Decodable {
         case imdbId = "imdb_id"
         case posterShape
         case poster_shape
+        case landscapePoster
+        case landscape_poster
     }
 
     init(from decoder: Decoder) throws {
@@ -2932,6 +2949,8 @@ struct CinemetaMeta: Decodable {
         imdbId = try? container.decodeIfPresent(String.self, forKey: .imdbId)
         posterShape = (try? container.decodeIfPresent(String.self, forKey: .posterShape))
             ?? (try? container.decodeIfPresent(String.self, forKey: .poster_shape))
+        landscapePoster = (try? container.decodeIfPresent(String.self, forKey: .landscapePoster))
+            ?? (try? container.decodeIfPresent(String.self, forKey: .landscape_poster))
     }
 
     func toMeta(fallbackType: String) -> NuvioMeta {
@@ -2961,7 +2980,9 @@ struct CinemetaMeta: Decodable {
             videos: videos?.compactMap { $0.toVideo() },
             trailerYtIds: trailerYtIds,
             externalRatings: nil,
-            posterShape: posterShape
+            posterShape: posterShape,
+            isFromAddon: nil,
+            landscapePosterUrl: landscapePoster?.trimmedNonEmpty
         )
     }
 

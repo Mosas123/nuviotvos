@@ -705,6 +705,7 @@ extension TVCatalogRow: Equatable {
                 && a.name == b.name
                 && a.posterUrl == b.posterUrl
                 && a.backgroundUrl == b.backgroundUrl
+                && a.landscapePosterUrl == b.landscapePosterUrl
                 && a.type == b.type
                 && a.posterShape == b.posterShape
         })

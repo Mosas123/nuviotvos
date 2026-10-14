@@ -715,6 +715,9 @@ struct PosterCard: View {
            let continueEpisodeArtworkURL, !continueEpisodeArtworkURL.isEmpty {
             return continueEpisodeArtworkURL
         }
+        if let customLandscape = meta.landscapePosterUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !customLandscape.isEmpty {
+            return customLandscape
+        }
         if meta.posterShape == "landscape" || meta.tileShape == .landscape {
             return meta.posterUrl ?? meta.backgroundUrl
         }
@@ -894,6 +897,7 @@ extension PosterCard: Equatable {
             && lhs.meta.name == rhs.meta.name
             && lhs.meta.posterUrl == rhs.meta.posterUrl
             && lhs.meta.backgroundUrl == rhs.meta.backgroundUrl
+            && lhs.meta.landscapePosterUrl == rhs.meta.landscapePosterUrl
             && lhs.meta.logoUrl == rhs.meta.logoUrl
             && lhs.meta.imdbId == rhs.meta.imdbId
             && lhs.meta.tmdbId == rhs.meta.tmdbId

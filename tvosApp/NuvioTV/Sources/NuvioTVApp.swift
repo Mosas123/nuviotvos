@@ -6244,7 +6244,7 @@ struct TVHomeView: View {
         // Match PosterCard's landscape artwork selection. BetterPosters catalog
         // entries intentionally contain `poster` without `background`; falling
         // back here keeps the focused card and the Home backdrop in sync.
-        for candidate in [meta.backgroundUrl, meta.posterUrl] {
+        for candidate in [meta.landscapePosterUrl, meta.backgroundUrl, meta.posterUrl] {
             let url = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !url.isEmpty { return url }
         }
@@ -9725,7 +9725,7 @@ private struct TVGridHeroSlideshowView: View {
 
         ZStack {
             CrossfadingBackdrop(
-                url: item.backgroundUrl ?? item.posterUrl,
+                url: item.backgroundUrl ?? item.landscapePosterUrl ?? item.posterUrl,
                 placeholder: background,
                 alignment: .top
             )

@@ -59,7 +59,9 @@ struct TmdbCreditMetadata {
             videos: meta.videos,
             trailerYtIds: meta.trailerYtIds,
             externalRatings: meta.externalRatings,
-            posterShape: meta.posterShape
+            posterShape: meta.posterShape,
+            isFromAddon: meta.isFromAddon,
+            landscapePosterUrl: meta.landscapePosterUrl
         )
     }
 }
@@ -601,13 +603,18 @@ enum TmdbDetailsService {
             : nil
         let tmdbLogoURL = imageURL(tmdbLogoPath, size: "w500")
 
+        let keepAddonArtwork = meta.isFromAddon == true
+        let resolvedBackground = (keepAddonArtwork && nonEmpty(meta.backgroundUrl) != nil)
+            ? meta.backgroundUrl
+            : (tmdbBackgroundURL ?? meta.backgroundUrl)
+
         let resolvedType = (!meta.isSeries && resolved.mediaType == "tv") ? "series" : meta.type
         return NuvioMeta(
             id: meta.id,
             name: localizedTitle ?? meta.name,
             description: localizedOverview ?? meta.description,
             posterUrl: nonEmpty(meta.posterUrl) ?? tmdbPosterURL,
-            backgroundUrl: tmdbBackgroundURL ?? meta.backgroundUrl,
+            backgroundUrl: resolvedBackground,
             logoUrl: tmdbLogoURL ?? meta.logoUrl,
             imdbId: meta.imdbId,
             tmdbId: meta.tmdbId ?? resolved.id,
@@ -629,7 +636,8 @@ enum TmdbDetailsService {
             trailerYtIds: meta.trailerYtIds,
             externalRatings: meta.externalRatings,
             posterShape: meta.posterShape,
-            isFromAddon: meta.isFromAddon
+            isFromAddon: meta.isFromAddon,
+            landscapePosterUrl: nonEmpty(meta.landscapePosterUrl)
         )
     }
 

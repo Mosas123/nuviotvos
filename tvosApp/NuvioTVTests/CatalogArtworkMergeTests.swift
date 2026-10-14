@@ -481,6 +481,89 @@ final class CatalogArtworkMergeTests: XCTestCase {
         XCTAssertEqual(enriched.first?.tmdbId, 1396)
     }
 
+    func testDecodesStremioLandscapePosterField() throws {
+        let json = Data("""
+        {"metas":[{
+          "id":"tt0903747","type":"series","name":"Breaking Bad",
+          "poster":"https://images.example/poster.jpg",
+          "landscapePoster":"https://images.example/landscape.jpg",
+          "background":"https://images.example/backdrop.jpg",
+          "logo":"https://images.example/logo.png"
+        }, {
+          "id":"tt1375666","type":"movie","name":"Inception",
+          "poster":"https://images.example/inception-poster.jpg",
+          "landscape_poster":"https://images.example/inception-landscape.jpg"
+        }]}
+        """.utf8)
+
+        let response = try decoder.decode(CinemetaCatalogResponse.self, from: json)
+        let metas = response.metas.map { $0.toMeta(fallbackType: "movie") }
+
+        XCTAssertEqual(metas[0].landscapePosterUrl, "https://images.example/landscape.jpg")
+        XCTAssertEqual(metas[0].landscapePoster, "https://images.example/landscape.jpg")
+        XCTAssertEqual(metas[0].backdropUrl, "https://images.example/backdrop.jpg")
+
+        XCTAssertEqual(metas[1].landscapePosterUrl, "https://images.example/inception-landscape.jpg")
+        XCTAssertEqual(metas[1].landscapePoster, "https://images.example/inception-landscape.jpg")
+        XCTAssertEqual(metas[1].backdropUrl, "https://images.example/inception-landscape.jpg")
+    }
+
+    func testMergingSearchMetadataPreservesAddonLandscapePosterWhenPreferAddonArtwork() {
+        let addonCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://addon.example/badge-poster.jpg",
+            backgroundUrl: nil,
+            logoUrl: nil,
+            runtime: nil,
+            status: nil,
+            isFromAddon: true,
+            landscapePosterUrl: "https://addon.example/custom-landscape.jpg"
+        )
+        let full = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: 1396,
+            posterUrl: "https://cinemeta.example/official-poster.jpg",
+            backgroundUrl: "https://cinemeta.example/backdrop.jpg",
+            logoUrl: "https://cinemeta.example/logo.png",
+            runtime: "47 min",
+            status: "Ended",
+            landscapePosterUrl: nil
+        )
+
+        let enriched = addonCard.mergingSearchMetadata(from: full, preferAddonArtwork: true)
+
+        XCTAssertEqual(enriched.posterUrl, "https://addon.example/badge-poster.jpg", "Add-on custom poster must be preserved")
+        XCTAssertEqual(enriched.landscapePosterUrl, "https://addon.example/custom-landscape.jpg", "Add-on custom landscape poster must be preserved")
+        XCTAssertEqual(enriched.backgroundUrl, "https://cinemeta.example/backdrop.jpg", "Missing backdrop must be filled")
+    }
+
+    func testSearchDeduplicationPrefersAddonLandscapePosterOverCinemeta() {
+        let cinemetaCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://cinemeta.example/poster.jpg",
+            isFromAddon: nil,
+            landscapePosterUrl: nil
+        )
+        let addonCard = makeMeta(
+            id: "tt0903747",
+            imdbId: "tt0903747",
+            tmdbId: nil,
+            posterUrl: "https://addon.example/badge-poster.jpg",
+            isFromAddon: true,
+            landscapePosterUrl: "https://addon.example/custom-landscape.jpg"
+        )
+
+        let deduplicated = CinemetaCatalogRepository.deduplicatedSearchResults([cinemetaCard, addonCard], preferAddonArtwork: true)
+        XCTAssertEqual(deduplicated.count, 1)
+        XCTAssertEqual(deduplicated.first?.landscapePosterUrl, "https://addon.example/custom-landscape.jpg")
+        XCTAssertEqual(deduplicated.first?.isFromAddon, true)
+    }
+
     private func makeMeta(
         id: String,
         imdbId: String?,
@@ -494,7 +577,8 @@ final class CatalogArtworkMergeTests: XCTestCase {
         logoUrl: String? = "logo",
         runtime: String? = "45 min",
         status: String? = "Ended",
-        isFromAddon: Bool? = nil
+        isFromAddon: Bool? = nil,
+        landscapePosterUrl: String? = nil
     ) -> NuvioMeta {
         NuvioMeta(
             id: id,
@@ -518,7 +602,8 @@ final class CatalogArtworkMergeTests: XCTestCase {
             country: nil,
             released: nil,
             status: status,
-            isFromAddon: isFromAddon
+            isFromAddon: isFromAddon,
+            landscapePosterUrl: landscapePosterUrl
         )
     }
 }

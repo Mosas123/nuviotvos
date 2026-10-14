@@ -353,6 +353,7 @@ struct MPVLoadConfiguration: Equatable {
     let audioDelaySeconds: Double
     let audioGainDB: Double
     let autoplay: Bool
+    let preferredAudioLanguages: [String]
 
     init(request: PlaybackLoadRequest) {
         resumePositionMs = request.resumePositionSeconds.map { Int64(max(0, $0) * 1_000) }
@@ -362,6 +363,7 @@ struct MPVLoadConfiguration: Equatable {
         audioDelaySeconds = request.audioDelaySeconds
         audioGainDB = request.audioGainDB
         autoplay = request.autoplay
+        preferredAudioLanguages = request.preferredAudioLanguages
     }
 }
 
@@ -1019,6 +1021,11 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 #endif
 
         // Commit seek, tracks, controls and autoplay together at FILE_LOADED.
+        if let langs = pendingLoadConfiguration?.preferredAudioLanguages,
+           !langs.isEmpty,
+           let alang = SubtitleLanguagePreferences.mpvLanguageList(for: langs) {
+            setStringProperty("alang", alang)
+        }
         setFlag("pause", true)
         command("loadfile", args: [url, "replace"])
         setAspectMode(currentAspectMode)
@@ -1174,6 +1181,15 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let h = getInt("video-params/h")
         guard w > 1, h > 1 else { return .zero }
         return CGSize(width: w, height: h)
+    }
+
+    var engineVersion: String? {
+        guard let raw = getString("mpv-version"), !raw.isEmpty else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("mpv ") {
+            return String(trimmed.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return trimmed
     }
 
     var playbackDebugInfo: PlaybackDebugInfo {

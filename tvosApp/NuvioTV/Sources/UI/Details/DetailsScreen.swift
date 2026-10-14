@@ -68,6 +68,7 @@ struct DetailsScreen: View {
     @State private var didHandleInitialStreamPicker = false
     @State private var expandedComment: TraktCommentReview?
     @State private var showingMdbListRating = false
+    @State private var isAudioLanguagePickerPresented = false
     /// Set while an episode card's context menu is up. tvOS hands the Menu press
     /// that dismisses the menu to this screen as well, and without this the
     /// screen would treat it as Back and return to Home.
@@ -235,12 +236,15 @@ struct DetailsScreen: View {
                     onCommentSelect: { comment in
                         expandedComment = comment
                     },
+                    onAudioLanguageClick: {
+                        isAudioLanguagePickerPresented = true
+                    },
                     onBack: handleBack
                 )
                 // While the stream picker is open it sits on top as a full-screen
                 // overlay; disable the details content so the focus engine can't
                 // route focus to the (hidden) buttons behind it.
-                .disabled(isStreamPickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
+                .disabled(isStreamPickerPresented || expandedComment != nil || isAudioLanguagePickerPresented || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
                 #else
                 MobileDetailsContent(
                     uiState: viewModel.uiState,
@@ -263,6 +267,17 @@ struct DetailsScreen: View {
                 CommentDetailOverlay(
                     comment: expandedComment,
                     onDismiss: { self.expandedComment = nil }
+                )
+                .transition(.opacity)
+                .zIndex(20)
+            }
+
+            if isAudioLanguagePickerPresented, let meta = viewModel.uiState.meta {
+                ShowAudioLanguageOverlay(
+                    meta: meta,
+                    onDismiss: {
+                        isAudioLanguagePickerPresented = false
+                    }
                 )
                 .transition(.opacity)
                 .zIndex(20)
@@ -367,6 +382,8 @@ struct DetailsScreen: View {
                 isPreparingPlayback = false
             } else if isStreamPickerPresented {
                 isStreamPickerPresented = false
+            } else if isAudioLanguagePickerPresented {
+                isAudioLanguagePickerPresented = false
             } else {
                 handleBack()
             }
@@ -2740,6 +2757,7 @@ struct TvDetailsContent: View {
     var onOpenProduction: ((MetaCompany) -> Void)? = nil
     var onOpenPerson: ((TmdbPersonMetadata) -> Void)? = nil
     var onCommentSelect: ((TraktCommentReview) -> Void)? = nil
+    var onAudioLanguageClick: (() -> Void)? = nil
     let onBack: () -> Void
 
     @FocusState private var actionFocus: DetailsActionFocus?
@@ -2777,6 +2795,7 @@ struct TvDetailsContent: View {
     /// without this the episode strip keeps drawing the bar it rendered with —
     /// marking an episode watched cleared the stores but nothing re-read them.
     @State private var progressRevision = 0
+    @State private var audioLanguageRevision = 0
     @State private var scrollOffset: CGFloat = 0
     @State private var hasAppearedBefore = false
     @State private var reentryProgressRefreshPending = false
@@ -3008,6 +3027,11 @@ struct TvDetailsContent: View {
                 stopBackgroundTrailer(manual: false)
                 onRateClick?()
             } : nil,
+            onAudioLanguageClick: onAudioLanguageClick != nil ? {
+                stopBackgroundTrailer(manual: false)
+                onAudioLanguageClick?()
+            } : nil,
+            audioLanguageLabel: audioLanguageRevision >= 0 ? ShowAudioLanguageStore.getLanguage(for: meta.id) : nil,
             onTrailerClick: {
                 presentFullscreenTrailer()
             },
@@ -3511,6 +3535,9 @@ struct TvDetailsContent: View {
             ) { _ in
                 progressRevision &+= 1
             }
+            .onReceive(NotificationCenter.default.publisher(for: .showAudioLanguageDidChange).receive(on: RunLoop.main)) { _ in
+                audioLanguageRevision &+= 1
+            }
             #if os(tvOS)
             .onChange(of: initialPlayRequestID, initial: true) { _, requestID in
                 guard let requestID,
@@ -3820,7 +3847,7 @@ private struct TvDetailsLogo: View {
 /// (tvOS doesn't auto-focus the primary button when the details content swaps in
 /// after the async load — see `TvDetailsContent`).
 private enum DetailsActionFocus: Hashable {
-    case play, watchlist, watched, rate, trailer
+    case play, watchlist, watched, rate, audioLanguage, trailer
 }
 
 private enum DetailsCastHeaderFocus: Hashable {
@@ -3839,6 +3866,8 @@ private struct TvDetailsActionRow: View {
     var mdbListUserRating: Int? = nil
     var showMdbListRating: Bool = false
     var onRateClick: (() -> Void)? = nil
+    var onAudioLanguageClick: (() -> Void)? = nil
+    var audioLanguageLabel: String? = nil
     let onTrailerClick: () -> Void
     var onBack: (() -> Void)? = nil
     var focus: FocusState<DetailsActionFocus?>.Binding
@@ -3915,6 +3944,20 @@ private struct TvDetailsActionRow: View {
 
             TvDetailsActionButton(
                 title: nil,
+                systemName: "speaker.wave.2.fill",
+                accessibilityLabel: audioLanguageAccessibilityLabel,
+                accessibilityHint: L10n.string("details_audio_language_hint", fallback: "Change audio playback language for this show"),
+                isPrimary: false,
+                focus: focus,
+                tag: .audioLanguage,
+                action: { onAudioLanguageClick?() },
+                onFocus: onFocus,
+                onBack: onBack
+            )
+            .disabled(entryLocked)
+
+            TvDetailsActionButton(
+                title: nil,
                 systemName: "play.rectangle.fill",
                 accessibilityLabel: L10n.string("details_trailer", fallback: "Trailer"),
                 accessibilityHint: L10n.string("details_trailer_hint", fallback: "Plays the trailer when available"),
@@ -3931,6 +3974,11 @@ private struct TvDetailsActionRow: View {
         .onExitCommand {
             onBack?()
         }
+    }
+
+    private var audioLanguageAccessibilityLabel: String {
+        let lang = audioLanguageLabel ?? L10n.string("details_audio_language_default", fallback: "Default")
+        return "\(L10n.string("details_audio_language", fallback: "Audio Language")): \(lang)"
     }
 }
 

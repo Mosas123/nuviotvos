@@ -198,6 +198,7 @@ protocol PlaybackEngineControlling: AnyObject {
     var currentSpeed: Float { get }
     var currentErrorMessage: String { get }
     var videoFrameSize: CGSize { get }
+    var engineVersion: String? { get }
     var playbackDebugInfo: PlaybackDebugInfo { get }
     var loadingStepMessage: String? { get }
 
@@ -220,7 +221,9 @@ protocol PlaybackEngineControlling: AnyObject {
     func refreshPlaybackState()
 }
 
+@MainActor
 extension PlaybackEngineControlling {
+    var engineVersion: String? { nil }
     func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool) {}
 }
 

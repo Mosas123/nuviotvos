@@ -2801,6 +2801,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         }
     }
 
+    var engineVersion: String? {
+        AetherEngine.version
+    }
+
     var playbackDebugInfo: PlaybackDebugInfo {
         let width = Int(engine.sourceVideoWidth > 0 ? engine.sourceVideoWidth : sourceProbe?.videoWidth ?? 0)
         let height = Int(engine.sourceVideoHeight > 0 ? engine.sourceVideoHeight : sourceProbe?.videoHeight ?? 0)

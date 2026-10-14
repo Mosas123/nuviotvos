@@ -153,6 +153,16 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
     /// Indicates this card was served by a third-party add-on catalog rather than Cinemeta.
     /// Used by Search enrichment and deduplication to keep the add-on's custom artwork intact.
     let isFromAddon: Bool?
+    /// Custom landscape artwork URL from add-on metadata ("landscapePoster" / "landscape_poster").
+    let landscapePosterUrl: String?
+
+    var landscapePoster: String? {
+        landscapePosterUrl
+    }
+
+    var backdropUrl: String? {
+        backgroundUrl ?? landscapePosterUrl ?? posterUrl
+    }
 
     var tileShape: CollectionTileShape {
         CollectionTileShape.fromStored(posterShape, fallback: .poster)
@@ -308,7 +318,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             trailerYtIds: trailerYtIds,
             externalRatings: nil,
             posterShape: posterShape,
-            isFromAddon: isFromAddon
+            isFromAddon: isFromAddon,
+            landscapePosterUrl: landscapePosterUrl
         )
     }
 
@@ -359,6 +370,7 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
     func fillingMissingHeroMetadata(from fullMeta: NuvioMeta) -> NuvioMeta {
         let resolvedPoster = trimmedNonEmpty(posterUrl) ?? fullMeta.posterUrl
         let resolvedBackground = trimmedNonEmpty(backgroundUrl) ?? fullMeta.backgroundUrl
+        let resolvedLandscape = trimmedNonEmpty(landscapePosterUrl) ?? fullMeta.landscapePosterUrl
         let resolvedLogo = trimmedNonEmpty(logoUrl) ?? fullMeta.logoUrl
         let resolvedRuntime = trimmedNonEmpty(runtime) ?? fullMeta.runtime
         let resolvedStatus = trimmedNonEmpty(status) ?? fullMeta.status
@@ -390,7 +402,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             trailerYtIds: trailerYtIds,
             externalRatings: externalRatings,
             posterShape: posterShape ?? fullMeta.posterShape,
-            isFromAddon: isFromAddon ?? fullMeta.isFromAddon
+            isFromAddon: isFromAddon ?? fullMeta.isFromAddon,
+            landscapePosterUrl: resolvedLandscape
         )
     }
 
@@ -399,10 +412,13 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
     /// is present, so the refreshed poster, backdrop, and logo win. For third-party
     /// add-on results with custom artwork, the catalog poster is kept intact.
     func mergingSearchMetadata(from fullMeta: NuvioMeta, preferAddonArtwork: Bool = true) -> NuvioMeta {
-        let keepCatalogPoster = preferAddonArtwork && isFromAddon == true && trimmedNonEmpty(posterUrl) != nil
+        let keepCatalogPoster = preferAddonArtwork && isFromAddon == true && (trimmedNonEmpty(posterUrl) != nil || trimmedNonEmpty(landscapePosterUrl) != nil)
         let resolvedPoster = keepCatalogPoster
             ? (trimmedNonEmpty(posterUrl) ?? trimmedNonEmpty(fullMeta.posterUrl))
             : (trimmedNonEmpty(fullMeta.posterUrl) ?? trimmedNonEmpty(posterUrl))
+        let resolvedLandscape = (keepCatalogPoster ? trimmedNonEmpty(landscapePosterUrl) : nil)
+            ?? trimmedNonEmpty(fullMeta.landscapePosterUrl)
+            ?? trimmedNonEmpty(landscapePosterUrl)
         let resolvedBackground = (keepCatalogPoster ? trimmedNonEmpty(backgroundUrl) : nil)
             ?? trimmedNonEmpty(fullMeta.backgroundUrl)
             ?? trimmedNonEmpty(backgroundUrl)
@@ -442,7 +458,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             trailerYtIds: trailerYtIds ?? fullMeta.trailerYtIds,
             externalRatings: externalRatings,
             posterShape: posterShape ?? fullMeta.posterShape,
-            isFromAddon: isFromAddon ?? fullMeta.isFromAddon
+            isFromAddon: isFromAddon ?? fullMeta.isFromAddon,
+            landscapePosterUrl: resolvedLandscape
         )
     }
 
@@ -487,7 +504,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
                 trailerYtIds: resolved.trailerYtIds,
                 externalRatings: resolved.externalRatings,
                 posterShape: resolved.posterShape,
-                isFromAddon: resolved.isFromAddon ?? existing.isFromAddon
+                isFromAddon: resolved.isFromAddon ?? existing.isFromAddon,
+                landscapePosterUrl: resolved.landscapePosterUrl
             )
         }
         return resolved
@@ -521,7 +539,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             trailerYtIds: trailerYtIds,
             externalRatings: ratings.isEmpty ? nil : ratings,
             posterShape: posterShape,
-            isFromAddon: isFromAddon
+            isFromAddon: isFromAddon,
+            landscapePosterUrl: landscapePosterUrl
         )
     }
 
@@ -556,7 +575,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             trailerYtIds: trailerYtIds,
             externalRatings: externalRatings,
             posterShape: posterShape,
-            isFromAddon: isFromAddon
+            isFromAddon: isFromAddon,
+            landscapePosterUrl: landscapePosterUrl
         )
     }
 
@@ -587,7 +607,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
         trailerYtIds: [String]? = nil,
         externalRatings: [NuvioExternalRating]? = nil,
         posterShape: String? = nil,
-        isFromAddon: Bool? = nil
+        isFromAddon: Bool? = nil,
+        landscapePosterUrl: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -616,6 +637,7 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
         self.externalRatings = externalRatings
         self.posterShape = posterShape
         self.isFromAddon = isFromAddon
+        self.landscapePosterUrl = landscapePosterUrl
     }
 
     func withIsFromAddon(_ isFromAddon: Bool?) -> NuvioMeta {
@@ -646,7 +668,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             trailerYtIds: trailerYtIds,
             externalRatings: externalRatings,
             posterShape: posterShape,
-            isFromAddon: isFromAddon
+            isFromAddon: isFromAddon,
+            landscapePosterUrl: landscapePosterUrl
         )
     }
 }

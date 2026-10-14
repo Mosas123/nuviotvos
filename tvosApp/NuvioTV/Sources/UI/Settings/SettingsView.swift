@@ -300,6 +300,7 @@ enum SettingsKey {
     static let hybridDiskCacheEnabled = "nuvio.tv.settings.playback.hybridDiskCacheEnabled"
     static let hybridDiskCacheLimitGB = "nuvio.tv.settings.playback.hybridDiskCacheLimitGB"
     static let playbackTrackSelections = "nuvio.tv.settings.playback.trackSelections"
+    static let showAudioLanguages = "nuvio.tv.settings.playback.showAudioLanguages"
     static let externalPlayerForwardSubtitles = "nuvio.tv.settings.playback.externalPlayerForwardSubtitles"
     static let assOverrideMode = "nuvio.tv.settings.playback.assOverrideMode"
     static let playerShowPiP = "nuvio.tv.settings.playback.showPiP"
@@ -369,7 +370,7 @@ enum SettingsKey {
         autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
         focusedPosterBackdropEnabled, focusedPosterBackdropDelay, audioLanguage,
         subtitleLanguages, subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
-        forcedSubtitles, subtitleSize, frameRateMatching, networkCache, hybridDiskCacheEnabled, hybridDiskCacheLimitGB, playbackTrackSelections,
+        forcedSubtitles, subtitleSize, frameRateMatching, networkCache, hybridDiskCacheEnabled, hybridDiskCacheLimitGB, playbackTrackSelections, showAudioLanguages,
         externalPlayerForwardSubtitles, assOverrideMode,
         playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles, playerShowAudio, seekPreviewEnabled, showLoadingStatus,
         sceneFeatureEnabled,
@@ -678,7 +679,13 @@ enum SubtitleLanguagePreferences {
         meta: NuvioMeta? = nil,
         defaults: UserDefaults = ProfileSettings.current
     ) -> String? {
-        let preferred = defaults.string(forKey: SettingsKey.audioLanguage) ?? "System"
+        let preferred: String
+        if let showId = meta.flatMap({ ShowAudioLanguageStore.canonicalKey(meta: $0) }),
+           let showOverride = ShowAudioLanguageStore.getLanguage(for: showId, defaults: defaults) {
+            preferred = showOverride
+        } else {
+            preferred = defaults.string(forKey: SettingsKey.audioLanguage) ?? "System"
+        }
         if preferred.caseInsensitiveCompare("Original") == .orderedSame {
             if let metaLanguage = meta?.language?.trimmingCharacters(in: .whitespacesAndNewlines), !metaLanguage.isEmpty {
                 return supportedLanguages.first { matches(metaLanguage, target: $0) } ?? metaLanguage

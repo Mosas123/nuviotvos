@@ -7,8 +7,12 @@ final class HomeLayoutSettingsTests: XCTestCase {
         ProfileSettings.clearActiveProfile()
         super.tearDown()
     }
-    private func title(_ id: String, type: String = "movie") throws -> NuvioMeta {
-        let data = try JSONSerialization.data(withJSONObject: ["id": id, "type": type, "name": id])
+    private func title(_ id: String, type: String = "movie", landscapePosterUrl: String? = nil) throws -> NuvioMeta {
+        var payload: [String: Any] = ["id": id, "type": type, "name": id]
+        if let landscapePosterUrl {
+            payload["landscapePosterUrl"] = landscapePosterUrl
+        }
+        let data = try JSONSerialization.data(withJSONObject: payload)
         return try JSONDecoder().decode(NuvioMeta.self, from: data)
     }
 
@@ -616,6 +620,46 @@ final class HomeLayoutSettingsTests: XCTestCase {
 
         XCTAssertNotEqual(cardAt0, cardAt1)
         XCTAssertEqual(cardAt0, cardAt0Again)
+    }
+
+    func testPosterCardEquatableChecksLandscapePosterURL() throws {
+        let withoutLandscape = PosterCard(meta: try title("item1")) {}
+        let withLandscape = PosterCard(meta: try title("item1", landscapePosterUrl: "https://example.com/landscape.jpg")) {}
+        let withChangedLandscape = PosterCard(meta: try title("item1", landscapePosterUrl: "https://example.com/changed-landscape.jpg")) {}
+        let withoutLandscapeAgain = PosterCard(meta: try title("item1")) {}
+
+        XCTAssertEqual(withoutLandscape, withoutLandscapeAgain)
+        XCTAssertNotEqual(withoutLandscape, withLandscape)
+        XCTAssertNotEqual(withLandscape, withChangedLandscape)
+        XCTAssertNotEqual(withLandscape, withoutLandscapeAgain)
+    }
+
+    func testTVCatalogRowEquatableChecksLandscapePosterURL() throws {
+        func row(item: NuvioMeta) -> TVCatalogRow {
+            TVCatalogRow(
+                id: "catalog-1",
+                title: "Popular Movies",
+                horizontalEdgeInset: 40,
+                items: [item],
+                initialFocusCardKey: nil,
+                landscapeFocusedId: nil,
+                onInitialFocusRequested: {},
+                onFocus: { _ in },
+                onBlur: { _ in },
+                onApproachEnd: { _ in },
+                onSelect: { _ in }
+            )
+        }
+
+        let withoutLandscape = row(item: try title("item1"))
+        let withLandscape = row(item: try title("item1", landscapePosterUrl: "https://example.com/landscape.jpg"))
+        let withChangedLandscape = row(item: try title("item1", landscapePosterUrl: "https://example.com/changed-landscape.jpg"))
+        let withoutLandscapeAgain = row(item: try title("item1"))
+
+        XCTAssertEqual(withoutLandscape, withoutLandscapeAgain)
+        XCTAssertNotEqual(withoutLandscape, withLandscape)
+        XCTAssertNotEqual(withLandscape, withChangedLandscape)
+        XCTAssertNotEqual(withLandscape, withoutLandscapeAgain)
     }
 
     func testTVCollectionFolderCardEquatableChecksCardIndex() throws {
