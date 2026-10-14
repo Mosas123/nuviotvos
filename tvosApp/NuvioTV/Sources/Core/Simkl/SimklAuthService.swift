@@ -950,8 +950,12 @@ final class SimklAuthService {
 
     /// Automatically refreshes the OAuth 2.0 access token when expiring or expired.
     /// AUTH V1 legacy tokens (which have no refresh grant) return `true` immediately.
-    func refreshTokenIfNeeded(force: Bool = false) async -> Bool {
-        guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
+    func refreshTokenIfNeeded(
+        force: Bool = false,
+        shouldCommit: () -> Bool = { true },
+        didRefreshToken: (String) -> Void = { _ in }
+    ) async -> Bool {
+        guard shouldCommit(), ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
         let state = currentState()
         guard state.isAuthenticated(in: store) else { return false }
         let requestedClientID = clientID
@@ -975,7 +979,8 @@ final class SimklAuthService {
             )
 
             let latestState = currentState()
-            guard !Task.isCancelled, clientID == requestedClientID,
+            guard !Task.isCancelled, shouldCommit(), ProfileSettings.isActiveStore(store),
+                  clientID == requestedClientID,
                   latestState.accessToken == state.accessToken,
                   latestState.refreshToken == refreshToken else { return false }
 
@@ -999,6 +1004,7 @@ final class SimklAuthService {
                 store: store,
                 tokenStorage: tokenStorage
             )
+            didRefreshToken(token.accessToken)
             return true
         } catch {
             return false

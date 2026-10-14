@@ -705,11 +705,61 @@ enum SimklSyncCache {
     }
 }
 
-private struct SimklAuthorizedClient {
+/// Copies of one client share only tokens adopted by that client's refreshes.
+/// All mutable state is accessed through synchronous lock helpers.
+final class SimklAuthorizationOwner: @unchecked Sendable {
+    private let lock = NSLock()
+    private var accessToken: String
+    private var pendingRefresh: (id: UUID, token: String, task: Task<String?, Never>)?
+
+    init(token: String) { accessToken = token }
+
+    var token: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return accessToken
+    }
+
+    @discardableResult
+    func adopt(_ token: String, replacing previous: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard accessToken == previous else { return false }
+        accessToken = token
+        return true
+    }
+
+    func refresh(using operation: @escaping () async -> String?) async -> String? {
+        let (id, task) = refreshTask(using: operation)
+        let value = await task.value
+        finishRefresh(id)
+        return value
+    }
+
+    private func refreshTask(using operation: @escaping () async -> String?) -> (UUID, Task<String?, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let pendingRefresh, pendingRefresh.token == accessToken {
+            return (pendingRefresh.id, pendingRefresh.task)
+        }
+        let id = UUID()
+        let task = Task { await operation() }
+        pendingRefresh = (id, accessToken, task)
+        return (id, task)
+    }
+
+    private func finishRefresh(_ id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        if pendingRefresh?.id == id { pendingRefresh = nil }
+    }
+}
+
+struct SimklAuthorizedClient {
     let client: SimklAPIClient
     let store: UserDefaults
     let clientID: String
-    let token: String
+    private let owner: SimklAuthorizationOwner
     let tokenStorage: SimklTokenStorage
     let profileScope: String
 
@@ -729,24 +779,32 @@ private struct SimklAuthorizedClient {
         self.client = client
         self.store = store
         self.clientID = SimklConfig.clientID(in: store)
-        self.token = token
+        self.owner = SimklAuthorizationOwner(token: token)
         self.tokenStorage = tokenStorage
         self.profileScope = resolvedProfileScope
     }
 
-    private func tryRefreshToken() async -> String? {
-        let authService = SimklAuthService(
-            client: client,
-            store: store,
-            profileScope: profileScope,
-            tokenStorage: tokenStorage
-        )
-        guard await authService.refreshTokenIfNeeded(force: true) else { return nil }
-        return SimklRuntimeSession.authenticatedState(
-            store: store,
-            tokenStorage: tokenStorage,
-            profileScope: profileScope
-        )?.accessToken
+    private func tryRefreshToken(rejectedToken: String) async -> String? {
+        guard isCurrentAuthorization() else { return nil }
+        if owner.token != rejectedToken { return owner.token }
+        let refreshed = await owner.refresh {
+            guard self.isCurrentAuthorization() else { return nil }
+            let previous = self.owner.token
+            if previous != rejectedToken { return previous }
+            let authService = SimklAuthService(
+                client: self.client, store: self.store,
+                profileScope: self.profileScope, tokenStorage: self.tokenStorage
+            )
+            let succeeded = await authService.refreshTokenIfNeeded(
+                force: true,
+                shouldCommit: { self.owner.token == previous && self.isCurrentAuthorization() },
+                didRefreshToken: { _ = self.owner.adopt($0, replacing: previous) }
+            )
+            guard succeeded, self.isCurrentAuthorization() else { return nil }
+            return self.owner.token
+        }
+        guard isCurrentAuthorization() else { return nil }
+        return refreshed
     }
 
     func get<T: Decodable>(
@@ -754,14 +812,17 @@ private struct SimklAuthorizedClient {
         path: String,
         query: [URLQueryItem] = []
     ) async throws -> T {
+        let requestToken = owner.token
+        var rejectedToken = requestToken
         let result: SimklHTTPResult<T> = try await client.get(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query
         )
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                rejectedToken = refreshedToken
                 let retry: SimklHTTPResult<T> = try await client.get(
                     path: path,
                     clientID: clientID,
@@ -772,11 +833,7 @@ private struct SimklAuthorizedClient {
                     return try retry.valueOrThrow()
                 }
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent(rejectedToken: rejectedToken)
         }
         return try result.valueOrThrow()
     }
@@ -786,28 +843,27 @@ private struct SimklAuthorizedClient {
         path: String,
         query: [URLQueryItem] = []
     ) async -> T? {
+        let requestToken = owner.token
         guard let result: SimklHTTPResult<T> = try? await client.get(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query
         ) else { return nil }
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
-                if let retry: SimklHTTPResult<T> = try? await client.get(
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                guard let retry: SimklHTTPResult<T> = try? await client.get(
                     path: path,
                     clientID: clientID,
                     accessToken: refreshedToken,
                     queryItems: query
-                ), (200..<300).contains(retry.statusCode) {
-                    return retry.value
+                ) else { return nil }
+                if retry.statusCode == 401 {
+                    clearAuthIfCurrent(rejectedToken: refreshedToken)
                 }
+                return (200..<300).contains(retry.statusCode) ? retry.value : nil
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent(rejectedToken: requestToken)
         }
         guard (200..<300).contains(result.statusCode) else { return nil }
         return result.value
@@ -822,14 +878,17 @@ private struct SimklAuthorizedClient {
     }
 
     func delete(path: String, query: [URLQueryItem] = []) async throws -> Int {
+        let requestToken = owner.token
+        var rejectedToken = requestToken
         let result = try await client.delete(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query
         )
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                rejectedToken = refreshedToken
                 let retry = try await client.delete(
                     path: path,
                     clientID: clientID,
@@ -840,11 +899,7 @@ private struct SimklAuthorizedClient {
                     return retry.statusCode
                 }
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent(rejectedToken: rejectedToken)
         }
         return result.statusCode
     }
@@ -857,15 +912,18 @@ private struct SimklAuthorizedClient {
         query: [URLQueryItem] = [],
         body: B
     ) async throws -> (status: Int, data: Data) {
+        let requestToken = owner.token
+        var rejectedToken = requestToken
         let result = try await client.post(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query,
             body: body
         )
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                rejectedToken = refreshedToken
                 let retry = try await client.post(
                     path: path,
                     clientID: clientID,
@@ -877,14 +935,26 @@ private struct SimklAuthorizedClient {
                     return (retry.statusCode, retry.rawData)
                 }
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent(rejectedToken: rejectedToken)
         }
         return (result.statusCode, result.rawData)
     }
+    func isCurrentAuthorization() -> Bool {
+        guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+              SimklConfig.clientID(in: store) == clientID,
+              let state = SimklRuntimeSession.authenticatedState(
+                  store: store, tokenStorage: tokenStorage, profileScope: profileScope
+              ) else { return false }
+        return state.accessToken == owner.token && state.credentialClientID == clientID
+    }
+
+    private func clearAuthIfCurrent(rejectedToken: String) {
+        guard owner.token == rejectedToken, isCurrentAuthorization() else { return }
+        SimklAuthStore.clearAuth(
+            profileScope: profileScope, store: store, tokenStorage: tokenStorage
+        )
+    }
+
 }
 
 private enum SimklSyncLoader {
@@ -906,8 +976,19 @@ private enum SimklSyncLoader {
             client: client,
             tokenStorage: tokenStorage,
             profileScope: profileScope
-        ),
-              let activities = try? await activities(using: service) else { return nil }
+        ) else { return nil }
+        return await libraryItems(using: service, force: force)
+    }
+
+    static func libraryItems(
+        using service: SimklAuthorizedClient,
+        force: Bool = false
+    ) async -> SimklAllItemsResponse? {
+        let store = service.store
+        let sourceAtStart = TraktSettingsStore.librarySourceMode(in: store)
+        guard let activities = try? await activities(using: service) else { return nil }
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
 
         let snapshot = SimklSyncCache.itemSnapshot(in: store)
         let cached = snapshot?.items
@@ -922,6 +1003,8 @@ private enum SimklSyncLoader {
         if shouldBootstrap {
             result = SimklAllItemsResponse()
             for type in ["shows", "movies", "anime"] {
+                guard service.isCurrentAuthorization(),
+                      TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
                 if let response = await service.getOptional(
                     SimklAllItemsResponse.self,
                     path: "sync/all-items/\(type)"
@@ -939,6 +1022,8 @@ private enum SimklSyncLoader {
             }
         }
 
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
         SimklSyncCache.saveItems(result, activities: activities, store: store)
         return result
     }
@@ -962,6 +1047,7 @@ struct SimklHistoryService {
     ) async -> Bool {
         guard ProfileSettings.isActiveStore(store) else { return false }
         let syncStartedAt = Date()
+        let sourceAtStart = TraktSettingsStore.watchProgressSource(in: store)
         guard let service = SimklAuthorizedClient(
             store: store,
             client: client,
@@ -971,6 +1057,8 @@ struct SimklHistoryService {
               let activities = try? await SimklSyncLoader.activities(using: service) else {
             return false
         }
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.watchProgressSource(in: store) == sourceAtStart else { return false }
 
         let previousSnapshot = SimklSyncCache.historySnapshot(in: store)
         let previousRecords = previousSnapshot?.records ?? []
@@ -1031,7 +1119,8 @@ struct SimklHistoryService {
             }
         }
 
-        guard ProfileSettings.isActiveStore(store) else { return false }
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.watchProgressSource(in: store) == sourceAtStart else { return false }
         let previousItems = previousRecords.flatMap(\.items)
         let remoteItems = records.flatMap(\.items)
         guard WatchedStore.reconcileSimklSnapshot(
@@ -1109,7 +1198,7 @@ struct SimklHistoryService {
                 path: isWatched ? "sync/history" : "sync/history/remove",
                 body: body
             )
-            guard (200..<300).contains(status) else { return false }
+            guard (200..<300).contains(status), service.isCurrentAuthorization() else { return false }
             // A mark does not move Simkl's *playback* watermark, so the cached
             // paused list would keep serving this episode's old position for as
             // long as it stayed valid. Force the next fetch to re-read it.
@@ -1643,7 +1732,8 @@ struct SimklLibraryService {
                 path: isInWatchlist ? "sync/add-to-list" : "sync/history/remove",
                 body: body
             )
-            guard (200..<300).contains(status), ProfileSettings.isActiveStore(store) else { return false }
+            guard (200..<300).contains(status), service.isCurrentAuthorization(),
+                  TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return false }
             NotificationCenter.default.post(
                 name: TraktLibraryService.mutationNotification,
                 object: TraktLibraryMutation(meta: meta, isInWatchlist: isInWatchlist)
@@ -1668,20 +1758,18 @@ struct SimklLibraryService {
     ) async -> [LibraryStoreItem]? {
         let resolvedProfile = profileScope ?? SimklRuntimeSession.profileScope()
         guard TraktSettingsStore.librarySourceMode(in: store) == .simkl,
-              SimklRuntimeSession.authenticatedState(
-                  store: store,
-                  tokenStorage: tokenStorage,
-                  profileScope: resolvedProfile
-              ) != nil,
+              let owner = SimklAuthorizedClient(
+                  store: store, client: client,
+                  tokenStorage: tokenStorage, profileScope: resolvedProfile
+              ),
               let response = await SimklSyncLoader.libraryItems(
-                  store: store,
-                  force: force,
-                  client: client,
-                  tokenStorage: tokenStorage,
-                  profileScope: resolvedProfile
+                  using: owner,
+                  force: force
               ) else {
             return []
         }
+        guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
 
         let seeds: [(String, SimklSyncItem)] =
             (response.movies ?? []).filter(isLibraryItem).map { ("movie", $0) }
@@ -1691,11 +1779,15 @@ struct SimklLibraryService {
         var results: [LibraryStoreItem] = []
         var seen = Set<String>()
         for (type, item) in seeds {
+            guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
             guard !Task.isCancelled,
                   let placeholder = placeholderMeta(item: item, type: type),
                   seen.insert("\(type):\(placeholder.id)").inserted else { continue }
             let meta = (try? await repository.getMetadata(id: placeholder.id, type: type))
                 ?? placeholder
+            guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
             results.append(
                 LibraryStoreItem(
                     meta: meta,
@@ -1703,6 +1795,8 @@ struct SimklLibraryService {
                 )
             )
         }
+        guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
         return results.sorted { $0.addedAt > $1.addedAt }
     }
 
