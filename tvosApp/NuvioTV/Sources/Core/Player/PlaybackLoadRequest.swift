@@ -25,6 +25,8 @@ struct PlaybackLoadRequest: Equatable {
     var audioURL: URL?
     var resumePositionSeconds: Double?
     var httpHeaders: [String: String]
+    /// Original header origin when videoURL is replaced by the local cache proxy.
+    var httpHeaderSourceURL: URL? = nil
     var externalSubtitles: [NuvioSubtitle]
     var preferredAudioLanguages: [String]
     var preferredSubtitleLanguages: [String]
