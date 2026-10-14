@@ -603,7 +603,7 @@ enum SimklSyncCache {
         guard let data = try? JSONEncoder().encode(value) else { return }
         guard LargePayloadStore.write(
             data,
-            key: scopedKey(key),
+            key: scopedKey(key, store: store),
             directory: storageDirectoryName
         ) else {
             // Deliberately no preferences fallback. Losing the cache costs one
@@ -617,10 +617,15 @@ enum SimklSyncCache {
     }
 
     /// Profile-scoped: the `UserDefaults` key is shared across profiles and only
-    /// the suite differed, so the filename has to carry the scope instead. Uses
-    /// the same scope Simkl's session helpers already key on.
-    private static func scopedKey(_ key: String) -> String {
-        "\(key).\(SimklRuntimeSession.profileScope())"
+    /// the suite differed, so the filename has to carry the scope instead.
+    /// Use the captured store's identity, not whichever profile is active when
+    /// a suspended request resumes. Unmarked stores use the stable legacy
+    /// default namespace rather than borrowing another profile's identity.
+    private static func scopedKey(_ key: String, store: UserDefaults) -> String {
+        let storeProfileID = store.string(forKey: "nuvio.tv.profile.settings.profileID")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let scope = storeProfileID.flatMap { $0.isEmpty ? nil : $0 } ?? "default"
+        return "\(key).\(scope)"
     }
 
     private static func decode<T: Decodable>(
@@ -629,7 +634,7 @@ enum SimklSyncCache {
         store: UserDefaults
     ) -> T? {
         if let data = LargePayloadStore.read(
-            key: scopedKey(key),
+            key: scopedKey(key, store: store),
             directory: storageDirectoryName
         ) {
             return try? JSONDecoder().decode(type, from: data)
