@@ -708,11 +708,7 @@ private struct SimklAuthorizedClient {
                     return try retry.valueOrThrow()
                 }
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent()
         }
         return try result.valueOrThrow()
     }
@@ -739,11 +735,7 @@ private struct SimklAuthorizedClient {
                     return retry.value
                 }
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent()
         }
         guard (200..<300).contains(result.statusCode) else { return nil }
         return result.value
@@ -776,11 +768,7 @@ private struct SimklAuthorizedClient {
                     return retry.statusCode
                 }
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent()
         }
         return result.statusCode
     }
@@ -813,14 +801,26 @@ private struct SimklAuthorizedClient {
                     return (retry.statusCode, retry.rawData)
                 }
             }
-            SimklAuthStore.clearAuth(
-                profileScope: profileScope,
-                store: store,
-                tokenStorage: tokenStorage
-            )
+            clearAuthIfCurrent()
         }
         return (result.statusCode, result.rawData)
     }
+    func isCurrentAuthorization() -> Bool {
+        guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
+              SimklConfig.clientID(in: store) == clientID,
+              let state = SimklRuntimeSession.authenticatedState(
+                  store: store, tokenStorage: tokenStorage, profileScope: profileScope
+              ) else { return false }
+        return state.accessToken == token && state.credentialClientID == clientID
+    }
+
+    private func clearAuthIfCurrent() {
+        guard isCurrentAuthorization() else { return }
+        SimklAuthStore.clearAuth(
+            profileScope: profileScope, store: store, tokenStorage: tokenStorage
+        )
+    }
+
 }
 
 private enum SimklSyncLoader {
@@ -837,6 +837,7 @@ private enum SimklSyncLoader {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> SimklAllItemsResponse? {
+        let sourceAtStart = TraktSettingsStore.librarySourceMode(in: store)
         guard let service = SimklAuthorizedClient(
             store: store,
             client: client,
@@ -844,6 +845,8 @@ private enum SimklSyncLoader {
             profileScope: profileScope
         ),
               let activities = try? await activities(using: service) else { return nil }
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
 
         let cached = SimklSyncCache.items(in: store)
         let previousActivities = SimklSyncCache.itemActivities(in: store)
@@ -857,6 +860,8 @@ private enum SimklSyncLoader {
         if shouldBootstrap {
             result = SimklAllItemsResponse()
             for type in ["shows", "movies", "anime"] {
+                guard service.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
                 if let response = await service.getOptional(
                     SimklAllItemsResponse.self,
                     path: "sync/all-items/\(type)"
@@ -874,6 +879,8 @@ private enum SimklSyncLoader {
             }
         }
 
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
         SimklSyncCache.saveItems(result, activities: activities, store: store)
         return result
     }
@@ -897,6 +904,7 @@ struct SimklHistoryService {
     ) async -> Bool {
         guard ProfileSettings.isActiveStore(store) else { return false }
         let syncStartedAt = Date()
+        let sourceAtStart = TraktSettingsStore.watchProgressSource(in: store)
         guard let service = SimklAuthorizedClient(
             store: store,
             client: client,
@@ -906,6 +914,8 @@ struct SimklHistoryService {
               let activities = try? await SimklSyncLoader.activities(using: service) else {
             return false
         }
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.watchProgressSource(in: store) == sourceAtStart else { return false }
 
         let previousRecords = SimklSyncCache.history(in: store)
         let oldWatermark = SimklSyncCache.historyWatermark(in: store)
@@ -965,7 +975,8 @@ struct SimklHistoryService {
             }
         }
 
-        guard ProfileSettings.isActiveStore(store) else { return false }
+        guard service.isCurrentAuthorization(),
+              TraktSettingsStore.watchProgressSource(in: store) == sourceAtStart else { return false }
         let previousItems = previousRecords.flatMap(\.items)
         let remoteItems = records.flatMap(\.items)
         guard WatchedStore.reconcileSimklSnapshot(
@@ -1043,7 +1054,7 @@ struct SimklHistoryService {
                 path: isWatched ? "sync/history" : "sync/history/remove",
                 body: body
             )
-            guard (200..<300).contains(status) else { return false }
+            guard (200..<300).contains(status), service.isCurrentAuthorization() else { return false }
             // A mark does not move Simkl's *playback* watermark, so the cached
             // paused list would keep serving this episode's old position for as
             // long as it stayed valid. Force the next fetch to re-read it.
@@ -1577,7 +1588,8 @@ struct SimklLibraryService {
                 path: isInWatchlist ? "sync/add-to-list" : "sync/history/remove",
                 body: body
             )
-            guard (200..<300).contains(status), ProfileSettings.isActiveStore(store) else { return false }
+            guard (200..<300).contains(status), service.isCurrentAuthorization(),
+                  TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return false }
             NotificationCenter.default.post(
                 name: TraktLibraryService.mutationNotification,
                 object: TraktLibraryMutation(meta: meta, isInWatchlist: isInWatchlist)
@@ -1602,11 +1614,10 @@ struct SimklLibraryService {
     ) async -> [LibraryStoreItem]? {
         let resolvedProfile = profileScope ?? SimklRuntimeSession.profileScope()
         guard TraktSettingsStore.librarySourceMode(in: store) == .simkl,
-              SimklRuntimeSession.authenticatedState(
-                  store: store,
-                  tokenStorage: tokenStorage,
-                  profileScope: resolvedProfile
-              ) != nil,
+              let owner = SimklAuthorizedClient(
+                  store: store, client: client,
+                  tokenStorage: tokenStorage, profileScope: resolvedProfile
+              ),
               let response = await SimklSyncLoader.libraryItems(
                   store: store,
                   force: force,
@@ -1616,6 +1627,8 @@ struct SimklLibraryService {
               ) else {
             return []
         }
+        guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
 
         let seeds: [(String, SimklSyncItem)] =
             (response.movies ?? []).filter(isLibraryItem).map { ("movie", $0) }
@@ -1625,11 +1638,15 @@ struct SimklLibraryService {
         var results: [LibraryStoreItem] = []
         var seen = Set<String>()
         for (type, item) in seeds {
+            guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
             guard !Task.isCancelled,
                   let placeholder = placeholderMeta(item: item, type: type),
                   seen.insert("\(type):\(placeholder.id)").inserted else { continue }
             let meta = (try? await repository.getMetadata(id: placeholder.id, type: type))
                 ?? placeholder
+            guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
             results.append(
                 LibraryStoreItem(
                     meta: meta,
@@ -1637,6 +1654,8 @@ struct SimklLibraryService {
                 )
             )
         }
+        guard owner.isCurrentAuthorization(),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl else { return [] }
         return results.sorted { $0.addedAt > $1.addedAt }
     }
 
