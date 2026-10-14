@@ -2027,6 +2027,122 @@ final class SimklAuthServiceTests: XCTestCase {
         ))
     }
 
+    func testFetchLibrarySharesAuthorizationOwnerAcross401RefreshAndMetadata() async throws {
+        authorizeReviewV2()
+        defaults.set(TraktLibrarySourceMode.simkl.rawValue, forKey: SettingsKey.traktLibrarySourceMode)
+
+        final class SimklLibraryTestRepository: MockCatalogRepository {
+            let resolvedMeta: NuvioMeta
+            init(resolvedMeta: NuvioMeta) { self.resolvedMeta = resolvedMeta }
+            override func getMetadata(id: String, type: String) async throws -> NuvioMeta {
+                resolvedMeta
+            }
+        }
+
+        let repository = SimklLibraryTestRepository(resolvedMeta: makeMeta(type: "series"))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SimklURLProtocolStub.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            SimklURLProtocolStub.handler = nil
+        }
+
+        var rejectedAllItemsRequests = 0
+        var retriedAllItemsRequests = 0
+        var refreshRequests = 0
+        SimklURLProtocolStub.handler = { request in
+            let path = request.url?.path ?? ""
+            let authorization = request.value(forHTTPHeaderField: "Authorization")
+            switch path {
+            case "/sync/activities":
+                return Self.response(for: request, json: #"{"all":"2026-10-14T00:00:00Z","tv_shows":{"all":"2026-10-14T00:00:00Z"}}"#)
+            case "/sync/all-items/shows":
+                if authorization == "Bearer simkl_at_review_old" {
+                    rejectedAllItemsRequests += 1
+                    return Self.response(for: request, status: 401, json: "{}")
+                }
+                guard authorization == "Bearer simkl_at_review_new" else {
+                    XCTFail("The retried library request must use the token adopted by its owner")
+                    return Self.response(for: request, status: 401, json: "{}")
+                }
+                retriedAllItemsRequests += 1
+                return Self.response(
+                    for: request,
+                    json: #"{"shows":[{"status":"plantowatch","added_to_watchlist_at":"2026-10-13T00:00:00Z","show":{"title":"Source Placeholder","year":2024,"ids":{"imdb":"tt1234567"}}}]}"#
+                )
+            case "/sync/all-items/movies":
+                XCTAssertEqual(authorization, "Bearer simkl_at_review_new")
+                return Self.response(for: request, json: #"{"movies":[]}"#)
+            case "/sync/all-items/anime":
+                XCTAssertEqual(authorization, "Bearer simkl_at_review_new")
+                return Self.response(for: request, json: #"{"anime":[]}"#)
+            case "/oauth2/token":
+                let form = try Self.extractFormBody(from: request)
+                XCTAssertEqual(form["grant_type"], "refresh_token")
+                XCTAssertEqual(form["refresh_token"], "simkl_rt_review_old")
+                refreshRequests += 1
+                return Self.response(
+                    for: request,
+                    json: #"{"access_token":"simkl_at_review_new","refresh_token":"simkl_rt_review_new","expires_in":604800}"#
+                )
+            default:
+                XCTFail("Unexpected Simkl request: \(request.url?.absoluteString ?? "nil")")
+                return Self.response(for: request, status: 404, json: "{}")
+            }
+        }
+
+        let items = await SimklLibraryService.fetchLibrary(
+            repository: repository,
+            store: defaults,
+            force: true,
+            client: SimklAPIClient(session: session),
+            tokenStorage: tokenStorage,
+            profileScope: "profile-1"
+        )
+
+        XCTAssertEqual(rejectedAllItemsRequests, 1)
+        XCTAssertEqual(refreshRequests, 1)
+        XCTAssertEqual(retriedAllItemsRequests, 1)
+        XCTAssertEqual(items?.map(\.meta.name), ["Example Show"])
+        XCTAssertEqual(tokenStorage.accessToken(for: "profile-1"), "simkl_at_review_new")
+    }
+
+    func testFetchLibraryDiscardsResultsAfterSourceChangesDuringActivities() async throws {
+        authorizeReviewV2()
+        defaults.set(TraktLibrarySourceMode.simkl.rawValue, forKey: SettingsKey.traktLibrarySourceMode)
+        let store = defaults!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SimklURLProtocolStub.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            session.invalidateAndCancel()
+            SimklURLProtocolStub.handler = nil
+        }
+        var requestsAfterActivities = 0
+        SimklURLProtocolStub.handler = { request in
+            if request.url?.path == "/sync/activities" {
+                store.set(TraktLibrarySourceMode.local.rawValue, forKey: SettingsKey.traktLibrarySourceMode)
+                return Self.response(for: request, json: #"{"all":"2026-10-14T00:00:00Z"}"#)
+            }
+            requestsAfterActivities += 1
+            return Self.response(for: request, status: 404, json: "{}")
+        }
+
+        let items = await SimklLibraryService.fetchLibrary(
+            repository: MockCatalogRepository(),
+            store: store,
+            force: true,
+            client: SimklAPIClient(session: session),
+            tokenStorage: tokenStorage,
+            profileScope: "profile-1"
+        )
+
+        XCTAssertEqual(items?.count, 0)
+        XCTAssertEqual(requestsAfterActivities, 0, "a source change during activities must stop the remaining sync and metadata stages")
+        XCTAssertEqual(TraktSettingsStore.librarySourceMode(in: store), .local)
+    }
+
     func testSyncOwnerAcceptsItsRefreshAcrossCopiedClients() async throws {
         authorizeReviewV2()
         let client = try reviewClient()

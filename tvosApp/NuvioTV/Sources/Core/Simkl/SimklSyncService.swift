@@ -971,14 +971,22 @@ private enum SimklSyncLoader {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> SimklAllItemsResponse? {
-        let sourceAtStart = TraktSettingsStore.librarySourceMode(in: store)
         guard let service = SimklAuthorizedClient(
             store: store,
             client: client,
             tokenStorage: tokenStorage,
             profileScope: profileScope
-        ),
-              let activities = try? await activities(using: service) else { return nil }
+        ) else { return nil }
+        return await libraryItems(using: service, force: force)
+    }
+
+    static func libraryItems(
+        using service: SimklAuthorizedClient,
+        force: Bool = false
+    ) async -> SimklAllItemsResponse? {
+        let store = service.store
+        let sourceAtStart = TraktSettingsStore.librarySourceMode(in: store)
+        guard let activities = try? await activities(using: service) else { return nil }
         guard service.isCurrentAuthorization(),
               TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
 
@@ -996,7 +1004,7 @@ private enum SimklSyncLoader {
             result = SimklAllItemsResponse()
             for type in ["shows", "movies", "anime"] {
                 guard service.isCurrentAuthorization(),
-              TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
+                      TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
                 if let response = await service.getOptional(
                     SimklAllItemsResponse.self,
                     path: "sync/all-items/\(type)"
@@ -1755,11 +1763,8 @@ struct SimklLibraryService {
                   tokenStorage: tokenStorage, profileScope: resolvedProfile
               ),
               let response = await SimklSyncLoader.libraryItems(
-                  store: store,
-                  force: force,
-                  client: client,
-                  tokenStorage: tokenStorage,
-                  profileScope: resolvedProfile
+                  using: owner,
+                  force: force
               ) else {
             return []
         }
