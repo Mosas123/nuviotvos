@@ -954,6 +954,7 @@ final class SimklAuthService {
         guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
         let state = currentState()
         guard state.isAuthenticated(in: store) else { return false }
+        let requestedClientID = clientID
 
         // V1 tokens are long-lived (5 years) and do not support refreshing
         guard state.isV2 else { return true }
@@ -968,10 +969,15 @@ final class SimklAuthService {
                 path: "oauth2/token",
                 parameters: [
                     "grant_type": "refresh_token",
-                    "client_id": clientID,
+                    "client_id": requestedClientID,
                     "refresh_token": refreshToken
                 ]
             )
+
+            let latestState = currentState()
+            guard !Task.isCancelled, clientID == requestedClientID,
+                  latestState.accessToken == state.accessToken,
+                  latestState.refreshToken == refreshToken else { return false }
 
             guard (200..<300).contains(response.statusCode), let token = response.value else {
                 if response.statusCode == 401 || (response.statusCode == 400 && response.oauthError == "invalid_grant") {
@@ -988,7 +994,7 @@ final class SimklAuthService {
                 token.accessToken,
                 refreshToken: token.refreshToken ?? refreshToken,
                 expiresIn: token.expiresIn,
-                clientID: clientID,
+                clientID: requestedClientID,
                 profileScope: profileScope,
                 store: store,
                 tokenStorage: tokenStorage
@@ -1084,19 +1090,24 @@ final class SimklAuthService {
     func fetchUserSettings() async -> String? {
         guard await refreshTokenIfNeeded(), !Task.isCancelled else { return nil }
         guard let token = currentState().accessToken, !token.isEmpty else { return nil }
+        let requestedClientID = clientID
         do {
             let response: SimklHTTPResult<SimklUserSettingsResponse> = try await client.postEmptyBody(
                 path: "users/settings",
-                clientID: clientID,
+                clientID: requestedClientID,
                 accessToken: token
             )
             guard !Task.isCancelled else { return nil }
             if response.statusCode == 401 {
+                guard currentState().accessToken == token,
+                      clientID == requestedClientID else { return nil }
+                var rejectedToken = token
                 if await refreshTokenIfNeeded(force: true),
                    let refreshedToken = currentState().accessToken {
+                    rejectedToken = refreshedToken
                     let retryResponse: SimklHTTPResult<SimklUserSettingsResponse> = try await client.postEmptyBody(
                         path: "users/settings",
-                        clientID: clientID,
+                        clientID: requestedClientID,
                         accessToken: refreshedToken
                     )
                     guard !Task.isCancelled else { return nil }
@@ -1115,12 +1126,9 @@ final class SimklAuthService {
                         )
                         return username
                     }
+                    guard retryResponse.statusCode == 401 else { return nil }
                 }
-                SimklAuthStore.clearAuth(
-                    profileScope: profileScope,
-                    store: store,
-                    tokenStorage: tokenStorage
-                )
+                clearAuthIfCurrent(token: rejectedToken, clientID: requestedClientID)
                 return nil
             }
             guard !Task.isCancelled, currentState().accessToken == token,
@@ -1145,6 +1153,7 @@ final class SimklAuthService {
     func fetchUserStats() async -> SimklCachedStats? {
         guard await refreshTokenIfNeeded(), !Task.isCancelled else { return nil }
         guard let token = currentState().accessToken, !token.isEmpty else { return nil }
+        let requestedClientID = clientID
         var accountID = currentState().accountID
         if accountID?.isEmpty != false {
             _ = await fetchUserSettings()
@@ -1155,16 +1164,20 @@ final class SimklAuthService {
         do {
             let response: SimklHTTPResult<SimklUserStatsResponse> = try await client.postEmptyBody(
                 path: "users/\(accountID)/stats",
-                clientID: clientID,
+                clientID: requestedClientID,
                 accessToken: token
             )
             guard !Task.isCancelled else { return nil }
             if response.statusCode == 401 {
+                guard currentState().accessToken == token,
+                      clientID == requestedClientID else { return nil }
+                var rejectedToken = token
                 if await refreshTokenIfNeeded(force: true),
                    let refreshedToken = currentState().accessToken {
+                    rejectedToken = refreshedToken
                     let retryResponse: SimklHTTPResult<SimklUserStatsResponse> = try await client.postEmptyBody(
                         path: "users/\(accountID)/stats",
-                        clientID: clientID,
+                        clientID: requestedClientID,
                         accessToken: refreshedToken
                     )
                     guard !Task.isCancelled else { return nil }
@@ -1174,12 +1187,9 @@ final class SimklAuthService {
                         SimklAuthStore.saveCachedStats(stats, store: store)
                         return stats
                     }
+                    guard retryResponse.statusCode == 401 else { return nil }
                 }
-                SimklAuthStore.clearAuth(
-                    profileScope: profileScope,
-                    store: store,
-                    tokenStorage: tokenStorage
-                )
+                clearAuthIfCurrent(token: rejectedToken, clientID: requestedClientID)
                 return nil
             }
             guard !Task.isCancelled, currentState().accessToken == token,
@@ -1190,6 +1200,18 @@ final class SimklAuthService {
         } catch {
             return nil
         }
+    }
+
+    private func clearAuthIfCurrent(token: String, clientID expectedClientID: String) {
+        let state = currentState()
+        guard !Task.isCancelled, clientID == expectedClientID,
+              state.credentialClientID == expectedClientID,
+              state.accessToken == token else { return }
+        SimklAuthStore.clearAuth(
+            profileScope: profileScope,
+            store: store,
+            tokenStorage: tokenStorage
+        )
     }
 
     private var clientID: String { SimklConfig.clientID(in: store) }
