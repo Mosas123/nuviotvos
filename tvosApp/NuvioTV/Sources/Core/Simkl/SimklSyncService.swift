@@ -2064,6 +2064,14 @@ struct SimklProgressTransferService {
                 )
                 if isLockCollision(status: response.status, data: response.data) {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard !Task.isCancelled else {
+                        return SimklProgressTransferResult(
+                            total: total,
+                            transferred: transferred,
+                            skipped: skipped,
+                            failed: total - transferred - skipped
+                        )
+                    }
                     response = try await service.postReturningBody(
                         path: "scrobble/pause",
                         body: body
