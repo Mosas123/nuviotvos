@@ -885,7 +885,8 @@ extension PlaybackStreamCacheTests {
             cacheRoot: cacheRoot,
             sessionConfiguration: configuration,
             maxConcurrentUpstream: 2,
-            freeSpaceProvider: freeSpaceProvider
+            freeSpaceProvider: freeSpaceProvider,
+            thermalStateProvider: { .nominal }
         )
         await server.updateTimeline(
             playheadOffset: Int64(chunkSize * 2), durationSeconds: 120, isSeek: true
