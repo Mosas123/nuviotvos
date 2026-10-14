@@ -383,6 +383,18 @@ enum SimklSyncCache {
     private static let playbackWatermarkKey = "nuvio.tv.simkl.sync.playback.watermark"
     private static let storageDirectoryName = "SimklSyncCache"
 
+    // Split v2 payloads cannot prove that their activity watermark belongs to
+    // the same item list. Start a fresh namespace and bootstrap once.
+    private static let itemSnapshotKey = "nuvio.tv.simkl.sync.items.snapshot.v3"
+    struct ItemSnapshot: Codable {
+        let items: SimklAllItemsResponse
+        let activities: SimklActivitiesResponse?
+    }
+
+    static func itemSnapshot(in store: UserDefaults) -> ItemSnapshot? {
+        decode(ItemSnapshot.self, key: itemSnapshotKey, store: store)
+    }
+
     /// Removes cache blobs earlier builds wrote into preferences.
     ///
     /// Lazy migration in ``encode(_:key:store:)`` is not enough on a device that
@@ -411,7 +423,7 @@ enum SimklSyncCache {
     }
 
     static func items(in store: UserDefaults) -> SimklAllItemsResponse? {
-        decode(SimklAllItemsResponse.self, key: itemCacheKey, store: store)
+        itemSnapshot(in: store)?.items
     }
 
     static func saveItems(
@@ -419,12 +431,12 @@ enum SimklSyncCache {
         activities: SimklActivitiesResponse,
         store: UserDefaults
     ) {
-        encode(items, key: itemCacheKey, store: store)
-        encode(activities, key: itemActivityKey, store: store)
+        encode(ItemSnapshot(items: items, activities: activities), key: itemSnapshotKey, store: store)
     }
 
     static func addLibraryItems(_ libraryItems: [LibraryStoreItem], store: UserDefaults) {
-        var items = items(in: store) ?? SimklAllItemsResponse()
+        let snapshot = itemSnapshot(in: store)
+        var items = snapshot?.items ?? SimklAllItemsResponse()
         let addedAt = iso8601(Date())
         var additions = SimklAllItemsResponse()
 
@@ -447,11 +459,11 @@ enum SimklSyncCache {
         }
 
         items.merge(additions)
-        encode(items, key: itemCacheKey, store: store)
+        encode(ItemSnapshot(items: items, activities: snapshot?.activities), key: itemSnapshotKey, store: store)
     }
 
     static func itemActivities(in store: UserDefaults) -> SimklActivitiesResponse? {
-        decode(SimklActivitiesResponse.self, key: itemActivityKey, store: store)
+        itemSnapshot(in: store)?.activities
     }
 
     static func history(in store: UserDefaults) -> [SimklHistoryRecord] {
@@ -845,13 +857,14 @@ private enum SimklSyncLoader {
         ),
               let activities = try? await activities(using: service) else { return nil }
 
-        let cached = SimklSyncCache.items(in: store)
-        let previousActivities = SimklSyncCache.itemActivities(in: store)
+        let snapshot = SimklSyncCache.itemSnapshot(in: store)
+        let cached = snapshot?.items
+        let previousActivities = snapshot?.activities
         if !force, cached != nil, previousActivities?.all == activities.all {
             return cached
         }
 
-        let shouldBootstrap = cached == nil || activities.removalsChanged(comparedWith: previousActivities)
+        let shouldBootstrap = cached == nil || previousActivities == nil || activities.removalsChanged(comparedWith: previousActivities)
         var result = cached ?? SimklAllItemsResponse()
 
         if shouldBootstrap {
