@@ -7852,12 +7852,15 @@ private struct PlaybackSettingsView: View {
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_match_subtitle_language", fallback: "Match Subtitle Language"),
-                    subtitle: L10n.string("tvos_settings_prefer_links_and_tracks_matching_preferr_cbe68328", fallback: "Prefer links and tracks matching Preferred Subtitle"),
+                    // The player half (auto-selecting the subtitle track) applies to every playback,
+                    // including manual stream picks, so the row is never locked.
+                    subtitle: L10n.string(
+                        "tvos_settings_match_subtitle_language_subtitle",
+                        fallback: "Turn on the subtitle track matching Preferred Subtitle in the player. With Auto Select Stream, also prefer links that have it."
+                    ),
                     isOn: $smartSubtitleMatching,
                     accentColor: accentColor
                 )
-                .opacity((smartStreamSelection && !smartStreamUseTopResult) ? 1 : 0.46)
-                .disabled(!smartStreamSelection || smartStreamUseTopResult)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_cached_only", fallback: "Cached Only"),
