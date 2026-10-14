@@ -379,7 +379,8 @@ enum SimklSyncCache {
     private static let historyCacheKey = "nuvio.tv.simkl.sync.history.v2"
     private static let historySnapshotKey = "nuvio.tv.simkl.sync.history.snapshot.v3"
     private static let playbackCacheKey = "nuvio.tv.simkl.sync.playback"
-    private static let playbackWatermarkKey = "nuvio.tv.simkl.sync.playback.watermark"
+    private static let playbackSnapshotKey = "nuvio.tv.simkl.sync.playback.snapshot.v3"
+    private static let playbackInvalidatedKey = "nuvio.tv.simkl.sync.playback.invalidated.v3"
     private static let storageDirectoryName = "SimklSyncCache"
 
     // Split v2 payloads cannot prove that their activity watermark belongs to
@@ -533,12 +534,34 @@ enum SimklSyncCache {
         return false
     }
 
+    struct PlaybackSnapshot: Codable {
+        let playbacks: [SimklPlaybackDTO]
+        let watermark: String?
+    }
+
+    static func playbackSnapshot(in store: UserDefaults) -> PlaybackSnapshot? {
+        if let snapshot = decode(PlaybackSnapshot.self, key: playbackSnapshotKey, store: store) {
+            // Invalidation only makes a snapshot less reusable. Keep it separate
+            // so a failed payload replacement cannot undo a successful scrobble.
+            return PlaybackSnapshot(
+                playbacks: snapshot.playbacks,
+                watermark: store.bool(forKey: playbackInvalidatedKey) ? nil : snapshot.watermark
+            )
+        }
+        guard let playbacks = decode([SimklPlaybackDTO].self, key: playbackCacheKey, store: store) else {
+            return nil
+        }
+        // Legacy records remain available to removePlayback, but the separate
+        // legacy watermark cannot establish that they are a consistent pair.
+        return PlaybackSnapshot(playbacks: playbacks, watermark: nil)
+    }
+
     static func playbacks(in store: UserDefaults) -> [SimklPlaybackDTO]? {
-        decode([SimklPlaybackDTO].self, key: playbackCacheKey, store: store)
+        playbackSnapshot(in: store)?.playbacks
     }
 
     static func playbackWatermark(in store: UserDefaults) -> String? {
-        store.string(forKey: playbackWatermarkKey)
+        playbackSnapshot(in: store)?.watermark
     }
 
     static func savePlaybacks(
@@ -546,8 +569,10 @@ enum SimklSyncCache {
         watermark: String,
         store: UserDefaults
     ) {
-        encode(playbacks, key: playbackCacheKey, store: store)
-        store.set(watermark, forKey: playbackWatermarkKey)
+        let snapshot = PlaybackSnapshot(playbacks: playbacks, watermark: watermark)
+        if encode(snapshot, key: playbackSnapshotKey, store: store) {
+            store.removeObject(forKey: playbackInvalidatedKey)
+        }
     }
 
     /// Forces the next Continue Watching read to re-fetch `sync/playback`.
@@ -559,7 +584,7 @@ enum SimklSyncCache {
     /// session, and the title vanishes as soon as the optimistic local
     /// checkpoint stops masking it.
     static func invalidatePlaybacks(in store: UserDefaults) {
-        store.removeObject(forKey: playbackWatermarkKey)
+        store.set(true, forKey: playbackInvalidatedKey)
     }
 
     static func addPlayback(
@@ -591,11 +616,16 @@ enum SimklSyncCache {
             anime: nil
         )
 
-        var cached = playbacks(in: store) ?? []
+        let snapshot = playbackSnapshot(in: store)
+        var cached = snapshot?.playbacks ?? []
         let newIdentity = playbackIdentity(playback)
         cached.removeAll { playbackIdentity($0) == newIdentity }
         cached.append(playback)
-        encode(cached, key: playbackCacheKey, store: store)
+        encode(
+            PlaybackSnapshot(playbacks: cached, watermark: snapshot?.watermark),
+            key: playbackSnapshotKey,
+            store: store
+        )
     }
 
     private static func playbackIdentity(_ playback: SimklPlaybackDTO) -> String {
@@ -626,8 +656,9 @@ enum SimklSyncCache {
     /// `WatchedStore` moved to files for exactly this reason; this is the same
     /// treatment. Small scalars (watermarks, activity timestamps) stay in
     /// `UserDefaults`, which is what it is for.
-    private static func encode<T: Encodable>(_ value: T, key: String, store: UserDefaults) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
+    @discardableResult
+    private static func encode<T: Encodable>(_ value: T, key: String, store: UserDefaults) -> Bool {
+        guard let data = try? JSONEncoder().encode(value) else { return false }
         guard LargePayloadStore.write(
             data,
             key: scopedKey(key, store: store),
@@ -636,11 +667,12 @@ enum SimklSyncCache {
             // Deliberately no preferences fallback. Losing the cache costs one
             // full re-pull on the next sync; writing a payload this size to
             // preferences is the abort this whole path exists to avoid.
-            return
+            return false
         }
         // An older build's copy would otherwise keep counting against the
         // preferences budget forever.
         store.removeObject(forKey: key)
+        return true
     }
 
     /// Profile-scoped: the `UserDefaults` key is shared across profiles and only
@@ -2025,10 +2057,11 @@ struct SimklProgressService {
 
         let watermark = activities.playbackWatermark
         let playbacks: [SimklPlaybackDTO]
+        let playbackSnapshot = SimklSyncCache.playbackSnapshot(in: store)
         if !watermark.isEmpty,
-           SimklSyncCache.playbackWatermark(in: store) == watermark,
-           let cached = SimklSyncCache.playbacks(in: store) {
-            playbacks = cached
+           let playbackSnapshot,
+           playbackSnapshot.watermark == watermark {
+            playbacks = playbackSnapshot.playbacks
         } else {
             let fetched = await service.getOptional(
                 [SimklPlaybackDTO].self,
