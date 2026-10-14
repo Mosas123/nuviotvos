@@ -377,8 +377,7 @@ enum SimklSyncCache {
     private static let itemCacheKey = "nuvio.tv.simkl.sync.items.v2"
     private static let itemActivityKey = "nuvio.tv.simkl.sync.items.activities.v2"
     private static let historyCacheKey = "nuvio.tv.simkl.sync.history.v2"
-    private static let historyWatermarkKey = "nuvio.tv.simkl.sync.history.watermark"
-    private static let historyActivityKey = "nuvio.tv.simkl.sync.history.activities"
+    private static let historySnapshotKey = "nuvio.tv.simkl.sync.history.snapshot.v3"
     private static let playbackCacheKey = "nuvio.tv.simkl.sync.playback"
     private static let playbackWatermarkKey = "nuvio.tv.simkl.sync.playback.watermark"
     private static let storageDirectoryName = "SimklSyncCache"
@@ -454,16 +453,35 @@ enum SimklSyncCache {
         decode(SimklActivitiesResponse.self, key: itemActivityKey, store: store)
     }
 
+    struct HistorySnapshot: Codable {
+        let records: [SimklHistoryRecord]
+        let watermark: String?
+        let activities: SimklActivitiesResponse?
+    }
+
+    static func historySnapshot(in store: UserDefaults) -> HistorySnapshot? {
+        if let snapshot = decode(HistorySnapshot.self, key: historySnapshotKey, store: store) {
+            return snapshot
+        }
+        // Keep legacy records for watched-state reconciliation, but do not trust
+        // separately saved watermarks or activities. A nil watermark forces a
+        // full reload before the cache can be used for incremental history sync.
+        guard let records = decode([SimklHistoryRecord].self, key: historyCacheKey, store: store) else {
+            return nil
+        }
+        return HistorySnapshot(records: records, watermark: nil, activities: nil)
+    }
+
     static func history(in store: UserDefaults) -> [SimklHistoryRecord] {
-        decode([SimklHistoryRecord].self, key: historyCacheKey, store: store) ?? []
+        historySnapshot(in: store)?.records ?? []
     }
 
     static func historyWatermark(in store: UserDefaults) -> String? {
-        store.string(forKey: historyWatermarkKey)
+        historySnapshot(in: store)?.watermark
     }
 
     static func historyActivities(in store: UserDefaults) -> SimklActivitiesResponse? {
-        decode(SimklActivitiesResponse.self, key: historyActivityKey, store: store)
+        historySnapshot(in: store)?.activities
     }
 
     static func saveHistory(
@@ -472,11 +490,8 @@ enum SimklSyncCache {
         activities: SimklActivitiesResponse?,
         store: UserDefaults
     ) {
-        encode(records, key: historyCacheKey, store: store)
-        store.set(watermark, forKey: historyWatermarkKey)
-        if let activities {
-            encode(activities, key: historyActivityKey, store: store)
-        }
+        let snapshot = HistorySnapshot(records: records, watermark: watermark, activities: activities)
+        encode(snapshot, key: historySnapshotKey, store: store)
     }
 
     /// Seasons Simkl currently holds watched episodes in for a title. Used to
@@ -907,9 +922,10 @@ struct SimklHistoryService {
             return false
         }
 
-        let previousRecords = SimklSyncCache.history(in: store)
-        let oldWatermark = SimklSyncCache.historyWatermark(in: store)
-        let previousActivities = SimklSyncCache.historyActivities(in: store)
+        let previousSnapshot = SimklSyncCache.historySnapshot(in: store)
+        let previousRecords = previousSnapshot?.records ?? []
+        let oldWatermark = previousSnapshot?.watermark
+        let previousActivities = previousSnapshot?.activities
         if !force, !previousRecords.isEmpty, oldWatermark == activities.all {
             return true
         }
@@ -2008,8 +2024,9 @@ struct SimklProgressService {
         // display-only suggestions Nuvio Sync builds from the provider's
         // watched episode history. Refresh that history before reading the
         // cache so a first Home load is not one refresh behind.
-        if SimklSyncCache.historyWatermark(in: store) != activities.all
-            || SimklSyncCache.history(in: store).isEmpty {
+        let historySnapshot = SimklSyncCache.historySnapshot(in: store)
+        if historySnapshot?.watermark != activities.all
+            || (historySnapshot?.records.isEmpty ?? true) {
             _ = await SimklHistoryService.syncWatchedHistory(
                 store: store,
                 client: client,
