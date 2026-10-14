@@ -7346,11 +7346,14 @@ enum WatchedStore {
                 currentItems: current
             )
             updated = [marker] + current.filter { !matchesSeries($0) }
-            clearTombstone(meta: meta, season: nil, episode: nil)
         } else {
             updated = current.filter { !matchesSeries($0) }
         }
-        _ = persist(updated)
+        // Retain deletion protection until the replacement watched state is durable.
+        guard persist(updated) else { return }
+        if allAiredEpisodesWatched {
+            clearTombstone(meta: meta, season: nil, episode: nil)
+        }
     }
 
     private static func manualMark(
