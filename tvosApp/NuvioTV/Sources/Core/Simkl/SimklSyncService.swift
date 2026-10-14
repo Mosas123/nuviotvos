@@ -1441,7 +1441,8 @@ struct SimklHistoryTransferService {
 
         var entriesPerShow: [String: Int] = [:]
         for show in batch.flatMap({ $0.shows ?? [] }) {
-            entriesPerShow[transferKey(show), default: 0] += 1
+            guard let key = transferKey(show) else { continue }
+            entriesPerShow[key, default: 0] += 1
         }
 
         let rejectedShows = rows("shows").reduce(0) { partial, row in
@@ -1461,8 +1462,7 @@ struct SimklHistoryTransferService {
         }
         if let tmdb = intValue(ids?["tmdb"]) { return "tmdb:\(tmdb)" }
         if let simkl = intValue(ids?["simkl"]) { return "simkl:\(simkl)" }
-        guard let title = row["title"] as? String else { return nil }
-        return "title:\(title.lowercased()):\(intValue(row["year"]) ?? 0)"
+        return nil
     }
 
     private static func intValue(_ value: Any?) -> Int? {
@@ -1476,26 +1476,30 @@ struct SimklHistoryTransferService {
     ) -> SimklHistoryMutation {
         let movies = mutations.flatMap { $0.movies ?? [] }
         var groupedShows: [String: SimklWriteMedia] = [:]
+        var ungroupedShows: [SimklWriteMedia] = []
         for show in mutations.flatMap({ $0.shows ?? [] }) {
-            let key = transferKey(show)
+            guard let key = transferKey(show) else {
+                ungroupedShows.append(show)
+                continue
+            }
             if let existing = groupedShows[key] {
                 groupedShows[key] = merge(existing, show)
             } else {
                 groupedShows[key] = show
             }
         }
-        let shows = Array(groupedShows.values)
+        let shows = Array(groupedShows.values) + ungroupedShows
         return SimklHistoryMutation(
             movies: movies.isEmpty ? nil : movies,
             shows: shows.isEmpty ? nil : shows
         )
     }
 
-    private static func transferKey(_ media: SimklWriteMedia) -> String {
-        if let imdb = media.ids.imdb { return "imdb:\(imdb.lowercased())" }
+    private static func transferKey(_ media: SimklWriteMedia) -> String? {
+        if let imdb = media.ids.imdb, !imdb.isEmpty { return "imdb:\(imdb.lowercased())" }
         if let tmdb = media.ids.tmdb { return "tmdb:\(tmdb)" }
         if let simkl = media.ids.simkl { return "simkl:\(simkl)" }
-        return "title:\(media.title.lowercased()):\(media.year ?? 0)"
+        return nil
     }
 
     private static func merge(
