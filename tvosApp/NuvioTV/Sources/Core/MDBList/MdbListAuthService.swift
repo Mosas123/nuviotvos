@@ -640,7 +640,8 @@ final class MdbListAuthService {
                       tokens.scope?.contains("write") != false else {
                     return .failed(MdbListAuthError.insufficientScope.localizedDescription)
                 }
-                let user = await fetchUser(tokens: tokens.value)
+                let user = await fetchUser(tokens: tokens.value, saveIfCurrent: false)
+                guard !Task.isCancelled, shouldCommit() else { return .pending }
                 MdbListAuthStore.saveTokens(
                     tokens.value,
                     user: user,
@@ -649,6 +650,7 @@ final class MdbListAuthService {
                     tokenStorage: tokenStorage
                 )
                 await MdbListRatingsService.invalidate(store: store, profileScope: profileScope)
+                guard !Task.isCancelled, shouldCommit() else { return .pending }
                 TraktSettingsStore.selectWatchProgressSourceOnConnect(.mdblist, in: store)
                 return .approved
             }
@@ -729,7 +731,10 @@ final class MdbListAuthService {
         }
     }
 
-    func fetchUser(tokens: MdbListStoredTokens? = nil) async -> MdbListUser? {
+    func fetchUser(
+        tokens: MdbListStoredTokens? = nil,
+        saveIfCurrent: Bool = true
+    ) async -> MdbListUser? {
         let credentials = tokens ?? tokenStorage.tokens(for: profileScope)
         guard let credentials else { return nil }
         do {
@@ -745,7 +750,10 @@ final class MdbListAuthService {
                 username: string(object["username"]),
                 displayName: string(object["name"]) ?? string(object["username"])
             )
-            MdbListAuthStore.saveUser(user, store: store)
+            if saveIfCurrent, !Task.isCancelled,
+               tokenStorage.tokens(for: profileScope)?.accessToken == credentials.accessToken {
+                MdbListAuthStore.saveUser(user, store: store)
+            }
             return user
         } catch {
             return nil
