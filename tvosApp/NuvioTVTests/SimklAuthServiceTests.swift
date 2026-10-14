@@ -2012,6 +2012,154 @@ final class SimklAuthServiceTests: XCTestCase {
         XCTAssertFalse(tokenEndpointCalled)
     }
 
+    private func authorizeReviewV2() {
+        SimklAuthStore.saveToken(
+            "simkl_at_review_old", refreshToken: "simkl_rt_review_old", expiresIn: 604800,
+            clientID: "client-id", profileScope: "profile-1", store: defaults,
+            tokenStorage: tokenStorage
+        )
+    }
+
+    private func reviewClient() throws -> SimklAuthorizedClient {
+        try XCTUnwrap(SimklAuthorizedClient(
+            store: defaults, client: makeClient(), tokenStorage: tokenStorage,
+            profileScope: "profile-1"
+        ))
+    }
+
+    func testSyncOwnerAcceptsItsRefreshAcrossCopiedClients() async throws {
+        authorizeReviewV2()
+        let client = try reviewClient()
+        let copy = client
+        SimklURLProtocolStub.handler = { request in
+            if request.url?.path == "/oauth2/token" {
+                return Self.response(for: request, json: #"{"access_token":"simkl_at_review_new","refresh_token":"simkl_rt_review_new","expires_in":604800}"#)
+            }
+            let old = request.value(forHTTPHeaderField: "Authorization") == "Bearer simkl_at_review_old"
+            return Self.response(for: request, status: old ? 401 : 200, json: "{}")
+        }
+        let _: [String: String] = try await client.get([String: String].self, path: "sync/activities")
+        XCTAssertTrue(client.isCurrentAuthorization())
+        XCTAssertTrue(copy.isCurrentAuthorization())
+        XCTAssertEqual(tokenStorage.accessToken(for: "profile-1"), "simkl_at_review_new")
+    }
+
+    func testSyncOwnerClearsTheRefreshedTokenRejectedByRetry() async throws {
+        authorizeReviewV2()
+        let client = try reviewClient()
+        SimklURLProtocolStub.handler = { request in
+            if request.url?.path == "/oauth2/token" {
+                return Self.response(for: request, json: #"{"access_token":"simkl_at_review_new","refresh_token":"simkl_rt_review_new","expires_in":604800}"#)
+            }
+            return Self.response(for: request, status: 401, json: "{}")
+        }
+        let value = await client.getOptional([String: String].self, path: "sync/activities")
+        XCTAssertNil(value)
+        XCTAssertNil(tokenStorage.accessToken(for: "profile-1"))
+    }
+
+    func testSyncOwnerKeepsRefreshedCredentialsAfterRetryServerFailure() async throws {
+        authorizeReviewV2()
+        let client = try reviewClient()
+        SimklURLProtocolStub.handler = { request in
+            if request.url?.path == "/oauth2/token" {
+                return Self.response(for: request, json: #"{"access_token":"simkl_at_review_new","refresh_token":"simkl_rt_review_new","expires_in":604800}"#)
+            }
+            let old = request.value(forHTTPHeaderField: "Authorization") == "Bearer simkl_at_review_old"
+            return Self.response(for: request, status: old ? 401 : 500, json: "{}")
+        }
+        let value = await client.getOptional([String: String].self, path: "sync/activities")
+        XCTAssertNil(value)
+        XCTAssertEqual(tokenStorage.accessToken(for: "profile-1"), "simkl_at_review_new")
+    }
+
+    func testSyncOwnerDoesNotAdoptOrClearAnotherLoginAfterRefresh() async throws {
+        authorizeReviewV2()
+        let client = try reviewClient()
+        let store = defaults!
+        let storage = tokenStorage!
+        SimklURLProtocolStub.handler = { request in
+            if request.url?.path == "/oauth2/token" {
+                return Self.response(for: request, json: #"{"access_token":"simkl_at_review_new","refresh_token":"simkl_rt_review_new","expires_in":604800}"#)
+            }
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer simkl_at_review_old" {
+                return Self.response(for: request, status: 401, json: "{}")
+            }
+            SimklAuthStore.saveToken(
+                "simkl_at_other_login", refreshToken: "simkl_rt_other_login", expiresIn: 604800,
+                clientID: "client-id", profileScope: "profile-1", store: store, tokenStorage: storage
+            )
+            return Self.response(for: request, status: 401, json: "{}")
+        }
+        let value = await client.getOptional([String: String].self, path: "sync/activities")
+        XCTAssertNil(value)
+        XCTAssertFalse(client.isCurrentAuthorization())
+        XCTAssertEqual(storage.accessToken(for: "profile-1"), "simkl_at_other_login")
+    }
+
+    func testSyncOwnerDoesNotAdoptRefreshAfterAnotherLogin() async throws {
+        authorizeReviewV2()
+        let client = try reviewClient()
+        let store = defaults!
+        let storage = tokenStorage!
+        SimklURLProtocolStub.handler = { request in
+            if request.url?.path == "/oauth2/token" {
+                SimklAuthStore.saveToken(
+                    "simkl_at_other_login", refreshToken: "simkl_rt_other_login", expiresIn: 604800,
+                    clientID: "client-id", profileScope: "profile-1", store: store, tokenStorage: storage
+                )
+                return Self.response(for: request, json: #"{"access_token":"simkl_at_review_new","refresh_token":"simkl_rt_review_new","expires_in":604800}"#)
+            }
+            return Self.response(for: request, status: 401, json: "{}")
+        }
+        let value = await client.getOptional([String: String].self, path: "sync/activities")
+        XCTAssertNil(value)
+        XCTAssertFalse(client.isCurrentAuthorization())
+        XCTAssertEqual(storage.accessToken(for: "profile-1"), "simkl_at_other_login")
+    }
+
+    func testSyncOwnerChecksCancellationInTheCallingTask() async throws {
+        authorizeReviewV2()
+        let client = try reviewClient()
+        let result = await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return client.isCurrentAuthorization()
+        }.value
+        XCTAssertFalse(result)
+        XCTAssertTrue(client.isCurrentAuthorization(), "one cancelled caller does not invalidate other copies")
+    }
+
+    func testWatchlistRejectsResponseAfterSourceChanges() async throws {
+        authorize()
+        defaults.set(TraktLibrarySourceMode.simkl.rawValue, forKey: SettingsKey.traktLibrarySourceMode)
+        let store = defaults!
+        SimklURLProtocolStub.handler = { request in
+            store.set(TraktLibrarySourceMode.local.rawValue, forKey: SettingsKey.traktLibrarySourceMode)
+            return Self.response(for: request, status: 201, json: "{}")
+        }
+        let accepted = await SimklLibraryService.setWatchlist(
+            makeMeta(type: "movie"), isInWatchlist: true, store: defaults,
+            client: makeClient(), tokenStorage: tokenStorage, profileScope: "profile-1"
+        )
+        XCTAssertFalse(accepted)
+    }
+
+    func testSyncOwnerRejectsResultsAfterProfileChanges() async throws {
+        authorizeReviewV2()
+        let client = try reviewClient()
+        let scope = "SimklReviewSwitch.\(UUID().uuidString)"
+        defer {
+            ProfileSettings.clearActiveProfile()
+            UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(scope)")
+        }
+        SimklURLProtocolStub.handler = { request in
+            ProfileSettings.setActiveProfile(scope)
+            return Self.response(for: request, json: "{}")
+        }
+        let _: [String: String] = try await client.get([String: String].self, path: "sync/activities")
+        XCTAssertFalse(client.isCurrentAuthorization())
+    }
+
     func testStartPINAuthFallbackToV1WhenV2FailsInvalidClient() async throws {
         SimklURLProtocolStub.handler = { request in
             switch request.url?.path {

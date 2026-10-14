@@ -605,6 +605,7 @@ private struct SimklUserStatsResponse: Decodable {
 enum SimklPollResult {
     case pending
     case approved(String?)
+    case superseded
     case expired
     case originalCodeGone
     case rateLimited(Int)
@@ -652,6 +653,7 @@ final class SimklAuthService {
     }
 
     func startPINAuth() async throws -> SimklPINCodeResponse {
+        let requestedClientID = clientID
         guard hasRequiredCredentials() else {
             throw SimklServiceError.message("Enter your Simkl Client ID first.")
         }
@@ -676,20 +678,22 @@ final class SimklAuthService {
         let v2Result: SimklHTTPResult<SimklPINCodeResponse> = try await client.postFormURLEncoded(
             path: "oauth2/device",
             parameters: [
-                "client_id": clientID,
+                "client_id": requestedClientID,
                 "scope": "media:read media:write"
             ]
         )
+
+        guard !Task.isCancelled, clientID == requestedClientID else { throw CancellationError() }
 
         if (200..<300).contains(v2Result.statusCode), let pin = v2Result.value {
             guard !pin.userCode.isEmpty else {
                 throw SimklServiceError.message("Simkl did not return a PIN code.")
             }
-            if state.credentialClientID != nil && state.credentialClientID != clientID {
+            if state.credentialClientID != nil && state.credentialClientID != requestedClientID {
                 tokenStorage.setAccessToken(nil, for: profileScope)
                 tokenStorage.setRefreshToken(nil, for: profileScope)
             }
-            SimklAuthStore.savePINFlow(pin, isV2Flow: true, clientID: clientID, store: store)
+            SimklAuthStore.savePINFlow(pin, isV2Flow: true, clientID: requestedClientID, store: store)
             return pin
         }
 
@@ -704,8 +708,10 @@ final class SimklAuthService {
         if shouldFallbackToV1 {
             let v1Response: SimklHTTPResult<SimklPINCodeResponse> = try await client.get(
                 path: "oauth/pin",
-                clientID: clientID
+                clientID: requestedClientID
             )
+
+            guard !Task.isCancelled, clientID == requestedClientID else { throw CancellationError() }
 
             switch v1Response.statusCode {
             case 200..<300:
@@ -713,11 +719,11 @@ final class SimklAuthService {
                 guard !pin.userCode.isEmpty else {
                     throw SimklServiceError.message("Simkl did not return a PIN code.")
                 }
-                if state.credentialClientID != nil && state.credentialClientID != clientID {
+                if state.credentialClientID != nil && state.credentialClientID != requestedClientID {
                     tokenStorage.setAccessToken(nil, for: profileScope)
                     tokenStorage.setRefreshToken(nil, for: profileScope)
                 }
-                SimklAuthStore.savePINFlow(pin, isV2Flow: false, clientID: clientID, store: store)
+                SimklAuthStore.savePINFlow(pin, isV2Flow: false, clientID: requestedClientID, store: store)
                 return pin
             case 403, 412:
                 throw SimklServiceError.message(
@@ -779,6 +785,8 @@ final class SimklAuthService {
     }
 
     private func pollV2DeviceToken(state: SimklAuthState) async -> SimklPollResult {
+        guard let requestedClientID = state.credentialClientID,
+              clientID == requestedClientID else { return .pending }
         guard let deviceCode = state.deviceCode, !deviceCode.isEmpty else {
             return .failed("No active Simkl device code.")
         }
@@ -788,10 +796,17 @@ final class SimklAuthService {
                 path: "oauth2/token",
                 parameters: [
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "client_id": clientID,
+                    "client_id": requestedClientID,
                     "device_code": deviceCode
                 ]
             )
+
+            let latestState = currentState()
+            guard !Task.isCancelled,
+                  latestState.hasActivePINFlow(in: store),
+                  latestState.userCode == state.userCode,
+                  latestState.deviceCode == state.deviceCode,
+                  latestState.credentialClientID == requestedClientID else { return .superseded }
 
             switch response.statusCode {
             case 200..<300:
@@ -802,7 +817,7 @@ final class SimklAuthService {
                     body.accessToken,
                     refreshToken: body.refreshToken,
                     expiresIn: body.expiresIn,
-                    clientID: clientID,
+                    clientID: requestedClientID,
                     profileScope: profileScope,
                     store: store,
                     tokenStorage: tokenStorage
@@ -813,6 +828,7 @@ final class SimklAuthService {
                 SimklAuthStore.clearPINFlow(store: store)
                 TraktSettingsStore.selectWatchProgressSourceOnConnect(.simkl, in: store)
                 let username = await fetchUserSettings()
+                guard !Task.isCancelled, clientID == requestedClientID else { return .superseded }
                 return .approved(username)
 
             case 400:
@@ -850,11 +866,14 @@ final class SimklAuthService {
                 return .failed(response.errorMessage ?? "Simkl polling failed (\(response.statusCode)).")
             }
         } catch {
+            if Task.isCancelled { return .superseded }
             return .failed("Network error. Retrying is safe.")
         }
     }
 
     private func pollV1PINToken(state: SimklAuthState) async -> SimklPollResult {
+        guard let requestedClientID = state.credentialClientID,
+              clientID == requestedClientID else { return .pending }
         guard let userCode = state.userCode, !userCode.isEmpty else {
             return .failed("No active Simkl PIN code.")
         }
@@ -863,8 +882,15 @@ final class SimklAuthService {
             let encoded = userCode.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userCode
             let response: SimklHTTPResult<SimklPINPollResponse> = try await client.get(
                 path: "oauth/pin/\(encoded)",
-                clientID: clientID
+                clientID: requestedClientID
             )
+
+            let latestState = currentState()
+            guard !Task.isCancelled,
+                  latestState.hasActivePINFlow(in: store),
+                  latestState.userCode == state.userCode,
+                  latestState.deviceCode == state.deviceCode,
+                  latestState.credentialClientID == requestedClientID else { return .superseded }
 
             switch response.statusCode {
             case 200..<300:
@@ -878,7 +904,7 @@ final class SimklAuthService {
                 if let token = body.accessToken, !token.isEmpty, body.result?.uppercased() == "OK" {
                     SimklAuthStore.saveToken(
                         token,
-                        clientID: clientID,
+                        clientID: requestedClientID,
                         profileScope: profileScope,
                         store: store,
                         tokenStorage: tokenStorage
@@ -889,6 +915,7 @@ final class SimklAuthService {
                     SimklAuthStore.clearPINFlow(store: store)
                     TraktSettingsStore.selectWatchProgressSourceOnConnect(.simkl, in: store)
                     let username = await fetchUserSettings()
+                    guard !Task.isCancelled, clientID == requestedClientID else { return .superseded }
                     return .approved(username)
                 }
                 if body.result?.uppercased() == "KO" {
@@ -916,16 +943,22 @@ final class SimklAuthService {
                 )
             }
         } catch {
+            if Task.isCancelled { return .superseded }
             return .failed("Network error. Retrying is safe.")
         }
     }
 
     /// Automatically refreshes the OAuth 2.0 access token when expiring or expired.
     /// AUTH V1 legacy tokens (which have no refresh grant) return `true` immediately.
-    func refreshTokenIfNeeded(force: Bool = false) async -> Bool {
-        guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
+    func refreshTokenIfNeeded(
+        force: Bool = false,
+        shouldCommit: () -> Bool = { true },
+        didRefreshToken: (String) -> Void = { _ in }
+    ) async -> Bool {
+        guard shouldCommit(), ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
         let state = currentState()
         guard state.isAuthenticated(in: store) else { return false }
+        let requestedClientID = clientID
 
         // V1 tokens are long-lived (5 years) and do not support refreshing
         guard state.isV2 else { return true }
@@ -940,10 +973,16 @@ final class SimklAuthService {
                 path: "oauth2/token",
                 parameters: [
                     "grant_type": "refresh_token",
-                    "client_id": clientID,
+                    "client_id": requestedClientID,
                     "refresh_token": refreshToken
                 ]
             )
+
+            let latestState = currentState()
+            guard !Task.isCancelled, shouldCommit(), ProfileSettings.isActiveStore(store),
+                  clientID == requestedClientID,
+                  latestState.accessToken == state.accessToken,
+                  latestState.refreshToken == refreshToken else { return false }
 
             guard (200..<300).contains(response.statusCode), let token = response.value else {
                 if response.statusCode == 401 || (response.statusCode == 400 && response.oauthError == "invalid_grant") {
@@ -960,11 +999,12 @@ final class SimklAuthService {
                 token.accessToken,
                 refreshToken: token.refreshToken ?? refreshToken,
                 expiresIn: token.expiresIn,
-                clientID: clientID,
+                clientID: requestedClientID,
                 profileScope: profileScope,
                 store: store,
                 tokenStorage: tokenStorage
             )
+            didRefreshToken(token.accessToken)
             return true
         } catch {
             return false
@@ -1037,7 +1077,7 @@ final class SimklAuthService {
         }
 
         let username = await fetchUserSettings()
-        if username != nil {
+        if username != nil, !Task.isCancelled, currentState().accessToken == token {
             SimklAuthStore.saveSettingsWatermark(watermark, store: store)
         }
         return username
@@ -1054,23 +1094,31 @@ final class SimklAuthService {
 
     @discardableResult
     func fetchUserSettings() async -> String? {
-        guard await refreshTokenIfNeeded() else { return nil }
+        guard await refreshTokenIfNeeded(), !Task.isCancelled else { return nil }
         guard let token = currentState().accessToken, !token.isEmpty else { return nil }
+        let requestedClientID = clientID
         do {
             let response: SimklHTTPResult<SimklUserSettingsResponse> = try await client.postEmptyBody(
                 path: "users/settings",
-                clientID: clientID,
+                clientID: requestedClientID,
                 accessToken: token
             )
+            guard !Task.isCancelled else { return nil }
             if response.statusCode == 401 {
+                guard currentState().accessToken == token,
+                      clientID == requestedClientID else { return nil }
+                var rejectedToken = token
                 if await refreshTokenIfNeeded(force: true),
                    let refreshedToken = currentState().accessToken {
+                    rejectedToken = refreshedToken
                     let retryResponse: SimklHTTPResult<SimklUserSettingsResponse> = try await client.postEmptyBody(
                         path: "users/settings",
-                        clientID: clientID,
+                        clientID: requestedClientID,
                         accessToken: refreshedToken
                     )
+                    guard !Task.isCancelled else { return nil }
                     if (200..<300).contains(retryResponse.statusCode), let body = retryResponse.value {
+                        guard currentState().accessToken == refreshedToken else { return nil }
                         let username = body.user?.name
                         let accountID = body.account?.id.map(String.init)
                         let plan = body.account?.type
@@ -1084,15 +1132,13 @@ final class SimklAuthService {
                         )
                         return username
                     }
+                    guard retryResponse.statusCode == 401 else { return nil }
                 }
-                SimklAuthStore.clearAuth(
-                    profileScope: profileScope,
-                    store: store,
-                    tokenStorage: tokenStorage
-                )
+                clearAuthIfCurrent(token: rejectedToken, clientID: requestedClientID)
                 return nil
             }
-            guard let body = try? response.valueOrThrow() else { return nil }
+            guard !Task.isCancelled, currentState().accessToken == token,
+                  let body = try? response.valueOrThrow() else { return nil }
             let username = body.user?.name
             let accountID = body.account?.id.map(String.init)
             let plan = body.account?.type
@@ -1111,49 +1157,67 @@ final class SimklAuthService {
     }
 
     func fetchUserStats() async -> SimklCachedStats? {
-        guard await refreshTokenIfNeeded() else { return nil }
+        guard await refreshTokenIfNeeded(), !Task.isCancelled else { return nil }
         guard let token = currentState().accessToken, !token.isEmpty else { return nil }
+        let requestedClientID = clientID
         var accountID = currentState().accountID
         if accountID?.isEmpty != false {
             _ = await fetchUserSettings()
             accountID = currentState().accountID
         }
-        guard let accountID, !accountID.isEmpty else { return nil }
+        guard !Task.isCancelled, let accountID, !accountID.isEmpty else { return nil }
 
         do {
             let response: SimklHTTPResult<SimklUserStatsResponse> = try await client.postEmptyBody(
                 path: "users/\(accountID)/stats",
-                clientID: clientID,
+                clientID: requestedClientID,
                 accessToken: token
             )
+            guard !Task.isCancelled else { return nil }
             if response.statusCode == 401 {
+                guard currentState().accessToken == token,
+                      clientID == requestedClientID else { return nil }
+                var rejectedToken = token
                 if await refreshTokenIfNeeded(force: true),
                    let refreshedToken = currentState().accessToken {
+                    rejectedToken = refreshedToken
                     let retryResponse: SimklHTTPResult<SimklUserStatsResponse> = try await client.postEmptyBody(
                         path: "users/\(accountID)/stats",
-                        clientID: clientID,
+                        clientID: requestedClientID,
                         accessToken: refreshedToken
                     )
+                    guard !Task.isCancelled else { return nil }
                     if (200..<300).contains(retryResponse.statusCode), let body = retryResponse.value {
+                        guard currentState().accessToken == refreshedToken else { return nil }
                         let stats = body.cachedStats
                         SimklAuthStore.saveCachedStats(stats, store: store)
                         return stats
                     }
+                    guard retryResponse.statusCode == 401 else { return nil }
                 }
-                SimklAuthStore.clearAuth(
-                    profileScope: profileScope,
-                    store: store,
-                    tokenStorage: tokenStorage
-                )
+                clearAuthIfCurrent(token: rejectedToken, clientID: requestedClientID)
                 return nil
             }
-            guard let body = try? response.valueOrThrow() else { return nil }
+            guard !Task.isCancelled, currentState().accessToken == token,
+                  let body = try? response.valueOrThrow() else { return nil }
             let stats = body.cachedStats
             SimklAuthStore.saveCachedStats(stats, store: store)
             return stats
         } catch {
             return nil
         }
+    }
+
+    private func clearAuthIfCurrent(token: String, clientID expectedClientID: String) {
+        let state = currentState()
+        guard !Task.isCancelled, clientID == expectedClientID,
+              state.credentialClientID == expectedClientID,
+              state.accessToken == token else { return }
+        SimklAuthStore.clearAuth(
+            profileScope: profileScope,
+            store: store,
+            tokenStorage: tokenStorage
+        )
     }
 
     private var clientID: String { SimklConfig.clientID(in: store) }
@@ -1202,6 +1266,9 @@ final class SimklSettingsViewModel: ObservableObject {
     private var historyTransferTask: Task<Void, Never>?
     private var libraryTransferTask: Task<Void, Never>?
     private var progressTransferTask: Task<Void, Never>?
+    private var authGeneration: UInt = 0
+    private var connectedDataTask: Task<Void, Never>?
+    private var connectedDataRequestID: UUID?
 
     init(
         store: UserDefaults = ProfileSettings.current,
@@ -1219,6 +1286,7 @@ final class SimklSettingsViewModel: ObservableObject {
     }
 
     deinit {
+        connectedDataTask?.cancel()
         connectionTask?.cancel()
         loadingTimeoutTask?.cancel()
         pollTask?.cancel()
@@ -1259,6 +1327,10 @@ final class SimklSettingsViewModel: ObservableObject {
     }
 
     func credentialsDidChange() {
+        cancelConnectedDataTask()
+        isLoading = false
+        isStatsLoading = false
+        finishLoading(clearDebug: true)
         errorMessage = nil
         statusMessage = nil
         pollTask?.cancel()
@@ -1285,12 +1357,17 @@ final class SimklSettingsViewModel: ObservableObject {
         statusMessage = nil
         errorMessage = nil
         beginLoadingTimeout(stage: "requesting authorization from Simkl")
+        authGeneration &+= 1
+        let generation = authGeneration
         connectionTask?.cancel()
         connectionTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let response = try await service.startPINAuth()
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == authGeneration else {
+                    if service.currentState().userCode == response.userCode { service.clearPINFlow() }
+                    return
+                }
                 deviceUserCode = response.userCode
                 verificationURI = response.verificationURI
                 verificationURIComplete = response.verificationURIComplete
@@ -1302,7 +1379,7 @@ final class SimklSettingsViewModel: ObservableObject {
                 finishLoading(clearDebug: true)
                 startPolling()
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == authGeneration else { return }
                 errorMessage = error.localizedDescription
                 isLoading = false
                 finishLoading(clearDebug: false)
@@ -1311,6 +1388,7 @@ final class SimklSettingsViewModel: ObservableObject {
     }
 
     func cancelPINFlow() {
+        authGeneration &+= 1
         connectionTask?.cancel()
         connectionTask = nil
         loadingTimeoutTask?.cancel()
@@ -1332,6 +1410,8 @@ final class SimklSettingsViewModel: ObservableObject {
     }
 
     func disconnect() {
+        cancelConnectedDataTask()
+        authGeneration &+= 1
         connectionTask?.cancel()
         connectionTask = nil
         loadingTimeoutTask?.cancel()
@@ -1377,15 +1457,31 @@ final class SimklSettingsViewModel: ObservableObject {
         guard mode == .connected, !isLoading, !isStatsLoading,
               !isTransferringHistory, !isTransferringLibrary,
               !isTransferringProgress else { return }
+        connectedDataTask?.cancel()
+        let requestID = UUID()
+        connectedDataRequestID = requestID
+        let generation = authGeneration
         isLoading = true
         isStatsLoading = includeStats
         beginLoadingTimeout(stage: includeStats
             ? "loading Simkl account, watch history, library, and stats"
             : "loading Simkl account details")
-        Task {
+        connectedDataTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if connectedDataRequestID == requestID {
+                    connectedDataTask = nil
+                    connectedDataRequestID = nil
+                }
+            }
             _ = await service.refreshUserSettingsIfNeeded()
+            guard !Task.isCancelled, generation == authGeneration,
+                  connectedDataRequestID == requestID else { return }
             if includeStats {
-                connectedStats = await service.fetchUserStats()
+                let stats = await service.fetchUserStats()
+                guard !Task.isCancelled, generation == authGeneration,
+                      connectedDataRequestID == requestID else { return }
+                connectedStats = stats
                 isStatsLoading = false
             }
             isLoading = false
@@ -1398,24 +1494,44 @@ final class SimklSettingsViewModel: ObservableObject {
         guard mode == .connected, !isLoading,
               !isTransferringHistory, !isTransferringLibrary,
               !isTransferringProgress else { return }
+        connectedDataTask?.cancel()
+        let requestID = UUID()
+        connectedDataRequestID = requestID
+        let generation = authGeneration
         isLoading = true
         isStatsLoading = true
         statusMessage = "Syncing Simkl…"
         errorMessage = nil
         beginLoadingTimeout(stage: "refreshing Simkl account, history, library, and stats")
-        Task {
+        connectedDataTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if connectedDataRequestID == requestID {
+                    connectedDataTask = nil
+                    connectedDataRequestID = nil
+                }
+            }
             _ = await service.fetchUserSettings()
+            guard !Task.isCancelled, generation == authGeneration,
+                  connectedDataRequestID == requestID else { return }
             async let stats = service.fetchUserStats()
             let historySynced = await SimklHistoryService.syncWatchedHistory(
                 store: store,
                 force: true
             )
+            guard !Task.isCancelled, generation == authGeneration,
+                  connectedDataRequestID == requestID else { return }
             _ = await SimklLibraryService.fetchLibrary(
                 repository: CinemetaCatalogRepository(),
                 store: store,
                 force: true
             )
-            connectedStats = await stats
+            guard !Task.isCancelled, generation == authGeneration,
+                  connectedDataRequestID == requestID else { return }
+            let fetchedStats = await stats
+            guard !Task.isCancelled, generation == authGeneration,
+                  connectedDataRequestID == requestID else { return }
+            connectedStats = fetchedStats
             isStatsLoading = false
             isLoading = false
             finishLoading(clearDebug: true)
@@ -1618,12 +1734,20 @@ final class SimklSettingsViewModel: ObservableObject {
         }
     }
 
+    private func cancelConnectedDataTask() {
+        connectedDataRequestID = nil
+        connectedDataTask?.cancel()
+        connectedDataTask = nil
+    }
+
     private func startPolling() {
         pollTask?.cancel()
         isPolling = true
+        let generation = authGeneration
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                guard generation == self.authGeneration else { return }
                 let state = self.service.currentState()
                 if let expiresAt = state.expiresAt,
                    Date().timeIntervalSince1970 * 1000.0 >= expiresAt {
@@ -1636,9 +1760,11 @@ final class SimklSettingsViewModel: ObservableObject {
 
                 let wait = UInt64(max(state.pollInterval ?? self.pollInterval, 5))
                 try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
-                if Task.isCancelled { return }
+                if Task.isCancelled || generation != self.authGeneration { return }
 
-                switch await self.service.pollPINToken() {
+                let result = await self.service.pollPINToken()
+                guard !Task.isCancelled, generation == self.authGeneration else { return }
+                switch result {
                 case .pending:
                     self.statusMessage = "Waiting for Simkl approval…"
                 case .approved(let username):
@@ -1649,6 +1775,9 @@ final class SimklSettingsViewModel: ObservableObject {
                     // Connecting is the explicit action that earns the one
                     // expensive stats read.
                     self.loadConnectedData(includeStats: true)
+                    return
+                case .superseded:
+                    self.isPolling = false
                     return
                 case .expired:
                     self.errorMessage = "Simkl PIN expired. Start again."

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import AetherEngine
 
 @MainActor
 protocol ScrubThumbnailProviding: AnyObject {
@@ -171,7 +172,8 @@ class PlayerViewModel: ObservableObject {
     @Published private(set) var videoNaturalSize: CGSize = .zero
     private var pauseOverlayTask: Task<Void, Never>?
     /// Seconds to wait after pausing before the metadata sheet appears.
-    private static let pauseOverlayDelaySeconds: UInt64 = 15
+    private let pauseOverlayDelaySeconds: TimeInterval
+    private var pauseOverlayGeneration: UInt64 = 0
 
     // MARK: - Picture in Picture
     var isPictureInPictureSupported: Bool {
@@ -230,6 +232,9 @@ class PlayerViewModel: ObservableObject {
     private var autoHiddenNextEpisodeCard = false
     private var nextEpisodeAutoHideDeadline: Date?
     private var nextEpisodeAutoPlayDeadline: Date?
+    /// While a next-episode resolver is outstanding, engine polls still describe
+    /// the previous episode and must not mark that old frame as the new load.
+    private var pendingAdvanceResolutionGeneration: UInt64?
     private var autoPlayNextEnabled = false
     private var autoPlayNextCountdownSeconds = 10
     /// Fallback when IntroDB has no ending marker: show the Next Episode card
@@ -463,9 +468,11 @@ class PlayerViewModel: ObservableObject {
 
     init(
         sessionCoordinator suppliedCoordinator: PlaybackSessionCoordinator? = nil,
-        scrubThumbnailProvider: (any ScrubThumbnailProviding)? = nil
+        scrubThumbnailProvider: (any ScrubThumbnailProviding)? = nil,
+        pauseOverlayDelaySeconds: TimeInterval = 15
     ) {
         suppliedScrubThumbnailProvider = scrubThumbnailProvider
+        self.pauseOverlayDelaySeconds = max(0, pauseOverlayDelaySeconds)
         // A PiP restore creates this view model after the app has already
         // dismissed the original PlayerView. Adopt the retained coordinator
         // before SwiftUI mounts a surface so it never binds a fresh, empty
@@ -512,7 +519,11 @@ class PlayerViewModel: ObservableObject {
             Task { @MainActor [weak self, weak coordinator] in
                 guard let self, let coordinator,
                       self.sessionCoordinator === coordinator,
-                      coordinator.loadGeneration == generation else { return }
+                      coordinator.loadGeneration == generation,
+                      self.currentLoadPresentationIsConfirmed(
+                        engineKind: self.activeEngineKind,
+                        generation: generation
+                      ) else { return }
                 self.playbackDidSuspend(positionMs: positionMs, durationMs: durationMs)
             }
         }
@@ -520,7 +531,12 @@ class PlayerViewModel: ObservableObject {
             Task { @MainActor [weak self, weak coordinator] in
                 guard let self, let coordinator,
                       self.sessionCoordinator === coordinator,
-                      coordinator.loadGeneration == generation else { return }
+                      coordinator.loadGeneration == generation,
+                      self.pendingAdvanceResolutionGeneration == nil,
+                      self.currentLoadPresentationIsConfirmed(
+                        engineKind: self.activeEngineKind,
+                        generation: generation
+                      ) else { return }
                 if !self.hasRenderedFirstFrame {
                     self.hasRenderedFirstFrame = true
                     if let meta = self.activeMeta {
@@ -659,6 +675,9 @@ class PlayerViewModel: ObservableObject {
 
     func retryPlaybackStartup() {
         guard !didShutdown else { return }
+        cancelPendingAdvanceResolution()
+        cancelPauseOverlaySchedule()
+        showPauseOverlay = false
         playbackStartupError = nil
         let startupToken = beginStartupBenchmark(title: activeMeta?.name ?? "")
         sessionCoordinator.retryLastLoad(startupBenchmarkToken: startupToken)
@@ -1762,6 +1781,30 @@ class PlayerViewModel: ObservableObject {
         nextEpisodeAutoPlayDeadline = nil
     }
 
+    var canShowPauseOverlay: Bool {
+        status == .paused
+            && !isAwaitingStreamStart
+            && !isAdvancingEpisode
+            && pendingAdvanceResolutionGeneration == nil
+            && !isSwitchingSource
+            && !isReloadingStream
+            && !isFailingOver
+            && !didDetectReplacementStream
+            && !controlsAutoHideSuspended
+            && !showSettingsPanel
+            && !showScenePanel
+            && !isSceneDetailVisible
+            && !isScrubbing
+            && sidePanel == nil
+            && subtitle != PlaybackMarkers.trailerSubtitle
+            && !didShutdown
+    }
+
+    private var canSchedulePauseOverlay: Bool {
+        canShowPauseOverlay
+            && isTimelineFocused
+    }
+
     func dismissNextEpisodeCard(cancelAutoPlay: Bool = true) {
         if cancelAutoPlay {
             self.cancelAutoPlay()
@@ -1771,7 +1814,7 @@ class PlayerViewModel: ObservableObject {
         nextEpisodeAutoHideDeadline = nil
     }
 
-    private func advance() {
+    func advance() {
         guard !isAdvanceInFlight,
               let next = nextEpisode,
               currentEpisodeVideo?.id != next.id,
@@ -1782,8 +1825,13 @@ class PlayerViewModel: ObservableObject {
         advanceGeneration &+= 1
         let gen = advanceGeneration
         let startupToken = beginStartupBenchmark(title: activeMeta?.name ?? "")
+        pendingAdvanceResolutionGeneration = gen
         isAdvanceInFlight = true
         isAdvancingEpisode = true
+        isAwaitingStreamStart = true
+        status = .buffering
+        cancelPauseOverlaySchedule()
+        showPauseOverlay = false
         loadingStepMessage = L10n.string("player_searching_sources", fallback: "Searching sources…")
         nextEpisodeCountdown = nil
         nextEpisodeAutoHideDeadline = nil
@@ -1818,13 +1866,20 @@ class PlayerViewModel: ObservableObject {
                 return
             }
             guard self.advanceGeneration == gen else {
+                self.clearPendingAdvanceResolution(generation: gen)
                 self.cancelStartupBenchmark(token: startupToken)
                 return
             }
             let prepared = await resolver(next, startupToken)
             guard !Task.isCancelled,
                   self.advanceGeneration == gen,
+                  self.pendingAdvanceResolutionGeneration == gen,
                   PlaybackStartupTiming.isActive(token: startupToken) else {
+                if self.clearPendingAdvanceResolution(generation: gen) {
+                    self.isAdvanceInFlight = false
+                    self.isAdvancingEpisode = false
+                    self.isAwaitingStreamStart = false
+                }
                 self.cancelStartupBenchmark(token: startupToken)
                 return
             }
@@ -1832,15 +1887,33 @@ class PlayerViewModel: ObservableObject {
                 // Couldn't resolve a stream for the next episode: disarm so the
                 // ended handler doesn't retry, and fall back to the normal
                 // end-of-playback flow (which returns to the details screen).
+                self.clearPendingAdvanceResolution(generation: gen)
                 self.isAdvanceInFlight = false
                 self.isAdvancingEpisode = false
+                self.isAwaitingStreamStart = false
                 self.lastAdvancedEpisodeId = nil
                 self.cancelStartupBenchmark(token: startupToken)
                 self.status = .ended
                 return
             }
+            guard self.clearPendingAdvanceResolution(generation: gen) else { return }
             self.replaceStream(prepared: prepared, episode: next, resumeFrom: nil)
         }
+    }
+
+    @discardableResult
+    private func clearPendingAdvanceResolution(generation: UInt64) -> Bool {
+        guard pendingAdvanceResolutionGeneration == generation else { return false }
+        pendingAdvanceResolutionGeneration = nil
+        return true
+    }
+
+    private func cancelPendingAdvanceResolution() {
+        guard let generation = pendingAdvanceResolutionGeneration else { return }
+        _ = clearPendingAdvanceResolution(generation: generation)
+        if advanceGeneration == generation { advanceGeneration &+= 1 }
+        isAdvanceInFlight = false
+        isAdvancingEpisode = false
     }
 
     /// Swaps the currently playing stream in place — mpv `loadfile` replaces the
@@ -1869,6 +1942,7 @@ class PlayerViewModel: ObservableObject {
         // the previous file's cache namespace. Next-episode resolvers may supply
         // a new identity on the prepared stream.
         self.activeCacheFileIdentity = prepared.cacheFileIdentity
+        self.activeTrickplayURL = prepared.trickplayURL
         if let bg = prepared.bingeGroup, !bg.isEmpty {
             self.activeBingeGroup = bg
         }
@@ -2020,6 +2094,7 @@ class PlayerViewModel: ObservableObject {
     /// overlay only appears when every candidate is exhausted.
     private func attemptFailover(reason: String, toast: String?) {
         guard !isFailingOver, !didShutdown else { return }
+        cancelPendingAdvanceResolution()
         guard let reloadCurrentStream else {
             status = .error(reason)
             return
@@ -2056,6 +2131,8 @@ class PlayerViewModel: ObservableObject {
         isAwaitingStreamStart = true
         hasProducedMidFilePosition = false
         reloadAttempts += 1
+        cancelPauseOverlaySchedule()
+        showPauseOverlay = false
         showNextEpisodeCard = false
         nextEpisodeCountdown = nil
         autoHiddenNextEpisodeCard = false
@@ -2367,16 +2444,39 @@ class PlayerViewModel: ObservableObject {
         return false
     }
 
-    private func tick() {
+    func pollForTesting(using controller: PlaybackEngineControlling) {
+        tick(engineOverride: controller)
+    }
+
+    private func currentLoadPresentationIsConfirmed(
+        engineKind: PlayerEngineKind,
+        generation: UInt64
+    ) -> Bool {
+        guard pendingAdvanceResolutionGeneration == nil,
+              sessionCoordinator.hasDispatchedCurrentLoad(generation: generation) else { return false }
+        guard engineKind == .aether else { return true }
+        return sessionCoordinator.hasPresentedCurrentAetherLoad(generation: generation)
+    }
+
+    private func tick(engineOverride: PlaybackEngineControlling? = nil) {
         let sampledEngineKind = activeEngineKind
         let sampledLoadGeneration = sessionCoordinator.loadGeneration
-        let c = engine
+        let c = engineOverride ?? engine
         c.refreshPlaybackState()
         sessionCoordinator.refreshHandoffState()
         updateLoadingStepMessage()
         // A backend handoff may occur while state is refreshed. Discard a stale sample.
         guard activeEngineKind == sampledEngineKind,
               sessionCoordinator.loadGeneration == sampledLoadGeneration else { return }
+        if pendingAdvanceResolutionGeneration != nil {
+            if status != .buffering { status = .buffering }
+            return
+        }
+
+        let hasPresentedCurrentLoad = currentLoadPresentationIsConfirmed(
+            engineKind: sampledEngineKind,
+            generation: sampledLoadGeneration
+        )
 
         if let startupError = sessionCoordinator.lastLoadError {
             guard !isFailingOver, !isReloadingStream, !isSwitchingSource else { return }
@@ -2384,6 +2484,7 @@ class PlayerViewModel: ObservableObject {
                 && c.isPlayerPlaying
                 && !c.isPlayerLoading
                 && !c.isPlayerEnded
+                && hasPresentedCurrentLoad
             guard recoveredPlayback, c.currentErrorMessage.isEmpty else {
                 let isEngineUnavailable = startupError.contains("unavailable on this device") || startupError.contains("AetherEngine is unavailable")
                 if !isEngineUnavailable,
@@ -2602,10 +2703,14 @@ class PlayerViewModel: ObservableObject {
             }
         }
 
-        let isPresentingFrames = c.hasFirstFrameReadyForDisplay || (c.isPlayerPlaying && !c.isPlayerLoading && (c.videoFrameSize != .zero || c.durationMs > 0))
+        let isPresentingFrames = hasPresentedCurrentLoad
+            && (c.hasFirstFrameReadyForDisplay || (c.isPlayerPlaying && !c.isPlayerLoading && (c.videoFrameSize != .zero || c.durationMs > 0)))
         if isPresentingFrames {
             if !hasRenderedFirstFrame {
                 hasRenderedFirstFrame = true
+                if let meta = activeMeta {
+                    prewarmSceneIfNeeded(meta: meta, isTrailerPlayback: subtitle == PlaybackMarkers.trailerSubtitle)
+                }
             }
             isAwaitingStreamStart = false
             isAdvanceInFlight = false
@@ -2642,7 +2747,9 @@ class PlayerViewModel: ObservableObject {
         }
         // First real frames/audio — disarm the load watchdog. Keyed off the raw
         // engine status so the mapping below can't hide the start.
-        if engineStatus == .playing || (engineStatus == .paused && time.duration > 0 && !c.isPlayerLoading) {
+        let engineHasStarted = engineStatus == .playing
+            || (engineStatus == .paused && time.duration > 0 && !c.isPlayerLoading)
+        if hasPresentedCurrentLoad && engineHasStarted {
             isAwaitingStreamStart = false
             markLoadStarted()
         }
@@ -2651,7 +2758,18 @@ class PlayerViewModel: ObservableObject {
         // idle pipeline reads as paused. Keep reporting `.buffering` until it
         // really starts, so a source/episode switch shows the spinner over the
         // black frame instead of parked transport controls.
-        let latestStatus = (isAwaitingStreamStart && engineStatus == .paused) ? .buffering : engineStatus
+        let isAwaitingCurrentLoadDispatch = !sessionCoordinator.hasDispatchedCurrentLoad(
+            generation: sampledLoadGeneration
+        )
+        let isAwaitingAetherPresentation = sampledEngineKind == .aether && !hasPresentedCurrentLoad
+        let latestStatus = (isAwaitingStreamStart
+            && (engineStatus == .paused || isAwaitingCurrentLoadDispatch || isAwaitingAetherPresentation))
+            ? .buffering
+            : engineStatus
+        if latestStatus == .playing {
+            cancelPauseOverlaySchedule()
+            showPauseOverlay = false
+        }
         if status != latestStatus {
             status = latestStatus
             if latestStatus == .paused, previousStatus == .playing {
@@ -2893,23 +3011,22 @@ class PlayerViewModel: ObservableObject {
         }
     }
 
-    /// After 3s of still being paused, hide transport and show the metadata sheet.
+    /// After the pause delay, hide transport and show the metadata sheet.
     private func schedulePauseOverlay() {
-        pauseOverlayTask?.cancel()
+        guard canSchedulePauseOverlay else {
+            cancelPauseOverlaySchedule()
+            showPauseOverlay = false
+            return
+        }
+        cancelPauseOverlaySchedule()
+        let generation = pauseOverlayGeneration
+        let delayNanoseconds = UInt64(pauseOverlayDelaySeconds * 1_000_000_000)
         pauseOverlayTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.pauseOverlayDelaySeconds * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled, let self else { return }
-            guard self.status == .paused,
-                  !self.isAwaitingStreamStart,
-                  self.isTimelineFocused,
-                  !self.controlsAutoHideSuspended,
-                  !self.showSettingsPanel,
-                  !self.showScenePanel,
-                  !self.isSceneDetailVisible,
-                  !self.isScrubbing,
-                  self.sidePanel == nil,
-                  self.subtitle != PlaybackMarkers.trailerSubtitle
-            else { return }
+            guard self.pauseOverlayGeneration == generation,
+                  self.canSchedulePauseOverlay else { return }
+            self.pauseOverlayTask = nil
             screensaverDebugLog("[ScreensaverDebug][PlayerVM] schedulePauseOverlay fired: showing pause overlay")
             self.showControls = false
             self.showPauseOverlay = true
@@ -2918,6 +3035,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func cancelPauseOverlaySchedule() {
+        pauseOverlayGeneration &+= 1
         pauseOverlayTask?.cancel()
         pauseOverlayTask = nil
     }
@@ -2933,6 +3051,7 @@ class PlayerViewModel: ObservableObject {
             cancelPauseOverlaySchedule()
             return
         }
+        cancelPendingAdvanceResolution()
         didShutdown = true
         pollTimer?.invalidate()
         pollTimer = nil
@@ -4746,6 +4865,7 @@ class PlayerViewModel: ObservableObject {
     /// player into a labelled loading state that stays up until the new stream
     /// actually starts.
     private func beginSourceSwitch(message: String) -> UUID {
+        cancelPendingAdvanceResolution()
         let token = beginStartupBenchmark(title: activeMeta?.name ?? "")
         isSwitchingSource = true
         switchingSourceMessage = message
@@ -4953,6 +5073,280 @@ class PlayerViewModel: ObservableObject {
         }
     }
     
+    func buildScenePlaybackInfo() -> ScenePlaybackInfo {
+        let engineName: String
+        let engineVer: String
+        switch activeEngineKind {
+        case .aether:
+            engineName = "AetherEngine"
+            engineVer = AetherEngine.version
+        case .mpv:
+            engineName = "MPVKit"
+            engineVer = "—"
+        }
+
+        let aether: AetherPlaybackController?
+        let mpv: MPVPlayerViewController?
+        let debug: PlaybackDebugInfo?
+        switch activeEngineKind {
+        case .aether:
+            aether = aetherController
+            mpv = nil
+            debug = Self.selectedScenePlaybackDebugInfo(
+                activeEngineKind: .aether,
+                aether: aether?.playbackDebugInfo,
+                mpv: nil
+            )
+        case .mpv:
+            aether = nil
+            mpv = sessionCoordinator.mpvController
+            debug = Self.selectedScenePlaybackDebugInfo(
+                activeEngineKind: .mpv,
+                aether: nil,
+                mpv: mpv?.playbackDebugInfo
+            )
+        }
+        func reportedValue(_ candidates: [String?]) -> String? {
+            candidates.compactMap { candidate in
+                guard let candidate else { return nil }
+                let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty, value.caseInsensitiveCompare("Unknown") != .orderedSame else { return nil }
+                return value
+            }.first
+        }
+
+        // Video Codec
+        let rawCodec = reportedValue([debug?.videoCodec]) ?? "—"
+        let videoCodec: String
+        let codecUpper = rawCodec.uppercased()
+        if codecUpper.contains("HEVC") || codecUpper.contains("H265") || codecUpper.contains("H.265") {
+            videoCodec = "HEVC"
+        } else if codecUpper.contains("H264") || codecUpper.contains("AVC") || codecUpper.contains("H.264") {
+            videoCodec = "H.264"
+        } else if codecUpper.contains("AV1") {
+            videoCodec = "AV1"
+        } else if codecUpper.contains("VP9") {
+            videoCodec = "VP9"
+        } else if !rawCodec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && codecUpper != "UNKNOWN" {
+            videoCodec = rawCodec.uppercased()
+        } else {
+            videoCodec = "—"
+        }
+
+        // Resolution
+        let resRaw = reportedValue([debug?.resolution]) ?? ""
+        let resolution: String
+        if !resRaw.isEmpty {
+            resolution = resRaw.replacingOccurrences(of: "×", with: " × ")
+                               .replacingOccurrences(of: "x", with: " × ")
+                               .replacingOccurrences(of: "  ×  ", with: " × ")
+        } else if videoNaturalSize.width > 0 && videoNaturalSize.height > 0 {
+            resolution = "\(Int(videoNaturalSize.width)) × \(Int(videoNaturalSize.height))"
+        } else {
+            resolution = "—"
+        }
+
+        // Frame rate
+        let fpsRaw = reportedValue([debug?.frameRate]) ?? ""
+        let frameRate: String
+        if !fpsRaw.isEmpty {
+            frameRate = fpsRaw.contains("fps") ? fpsRaw : "\(fpsRaw) fps"
+        } else {
+            frameRate = "—"
+        }
+
+        // Dynamic Range & DV Profile
+        let hdrRaw = reportedValue([
+            debug?.hdr,
+            debug?.dynamicRange
+        ]) ?? ""
+        let dvRaw = reportedValue([debug?.dv]) ?? ""
+        let mpvDVProfile = mpv?.dolbyVisionProfile ?? 0
+        let isDV = aether?.engine.sourceDVProfile != nil
+            || (aether?.engine.sourceVideoFormat == .dolbyVision)
+            || mpvDVProfile > 0
+            || hdrRaw.localizedCaseInsensitiveContains("Dolby")
+            || (!dvRaw.isEmpty && dvRaw.caseInsensitiveCompare("None") != .orderedSame)
+
+        var dvProfile: String? = nil
+        if let p = aether?.engine.sourceDVProfile, p > 0 {
+            dvProfile = "\(p)"
+        } else if mpvDVProfile > 0 {
+            dvProfile = "\(mpvDVProfile)"
+        } else if !dvRaw.isEmpty, dvRaw.caseInsensitiveCompare("None") != .orderedSame {
+            let dvStr = dvRaw
+            if dvStr.contains("5") { dvProfile = "5" }
+            else if dvStr.contains("7") { dvProfile = "7" }
+            else if dvStr.contains("8") { dvProfile = "8" }
+            else if let firstDigit = dvStr.first(where: { $0.isNumber }) {
+                dvProfile = String(firstDigit)
+            }
+        }
+
+        let tvSupportsDV: Bool
+        let tvSupportsHDR: Bool
+        if #available(tvOS 11.0, *) {
+            tvSupportsDV = AVPlayer.availableHDRModes.contains(.dolbyVision)
+            tvSupportsHDR = AVPlayer.availableHDRModes.contains(.hdr10) || AVPlayer.availableHDRModes.contains(.hlg)
+        } else {
+            tvSupportsDV = false
+            tvSupportsHDR = false
+        }
+
+        let engineOutputFormat = aether?.engine.videoFormat
+        let dynamicRange: String
+        if isDV {
+            if engineOutputFormat == .hdr10 || (!tvSupportsDV && tvSupportsHDR) {
+                dynamicRange = "Dolby Vision → HDR10"
+            } else if engineOutputFormat == .sdr || (!tvSupportsDV && !tvSupportsHDR) {
+                dynamicRange = "Dolby Vision → SDR"
+            } else if debug?.dynamicRange.contains("→") == true {
+                dynamicRange = "Dolby Vision → HDR10"
+            } else if tvSupportsDV {
+                dynamicRange = "Dolby Vision"
+            } else {
+                dynamicRange = "Dolby Vision → HDR10"
+            }
+        } else if hdrRaw.localizedCaseInsensitiveContains("HLG") {
+            dynamicRange = "HLG"
+        } else if hdrRaw.localizedCaseInsensitiveContains("HDR") || engineOutputFormat == .hdr10 {
+            dynamicRange = "HDR10"
+        } else if hdrRaw.localizedCaseInsensitiveContains("SDR") {
+            dynamicRange = "SDR"
+        } else if engineOutputFormat == .sdr {
+            dynamicRange = "SDR"
+        } else {
+            dynamicRange = "—"
+        }
+
+        // Bitrate
+        let vBitrateRaw = reportedValue([debug?.vBitrate]) ?? ""
+        let videoBitrate: String
+        if let match = vBitrateRaw.components(separatedBy: " · ").first(where: {
+            ($0.contains("Mbit/s") || $0.contains("Mbps")) && !$0.contains("--")
+        }) {
+            let cleaned = match.replacingOccurrences(of: "avg mux ", with: "")
+                               .replacingOccurrences(of: "now ", with: "")
+                               .replacingOccurrences(of: "Mbit/s", with: "Mbps")
+                               .trimmingCharacters(in: .whitespaces)
+            videoBitrate = cleaned.isEmpty ? "—" : cleaned
+        } else {
+            videoBitrate = "—"
+        }
+
+        // Container
+        let ext = reportedValue([debug?.fileExtension]) ?? ""
+        let container: String
+        let extLower = ext.lowercased()
+        if extLower == "mkv" || extLower == "webm" {
+            container = "matroska,webm"
+        } else if extLower == "mp4" || extLower == "m4v" || extLower == "mov" {
+            container = "quicktime,mov,mp4,m4a,3gp,3g2,mj2"
+        } else if extLower == "m3u8" {
+            container = "hls,applehttp"
+        } else if !ext.isEmpty {
+            container = extLower
+        } else {
+            container = "—"
+        }
+
+        // Video Decoder
+        let decRaw = reportedValue([debug?.decoder]) ?? ""
+        let videoDecoder: String
+        if decRaw.localizedCaseInsensitiveContains("videotoolbox") {
+            videoDecoder = "VideoToolbox \(videoCodec) (HW)"
+        } else if !decRaw.isEmpty {
+            videoDecoder = decRaw
+        } else {
+            videoDecoder = "—"
+        }
+
+        // Audio stream info
+        let selectedAudio = audioTracks.first(where: { $0.isSelected }) ?? audioTracks.first
+        let audioDetail = reportedValue([selectedAudio?.detail, debug?.audio]) ?? ""
+        let detailUpper = audioDetail.uppercased()
+
+        // Audio Codec
+        let audioCodec: String
+        if detailUpper.contains("TRUEHD") {
+            audioCodec = "TRUEHD"
+        } else if detailUpper.contains("EAC3") || detailUpper.contains("E-AC-3") || detailUpper.contains("DDP") || detailUpper.contains("DOLBY DIGITAL PLUS") {
+            audioCodec = "E-AC-3"
+        } else if detailUpper.contains("AC3") || detailUpper.contains("AC-3") || detailUpper.contains("DOLBY DIGITAL") {
+            audioCodec = "AC-3"
+        } else if detailUpper.contains("DTS-HD") || detailUpper.contains("DTS:X") {
+            audioCodec = "DTS-HD MA"
+        } else if detailUpper.contains("DTS") {
+            audioCodec = "DTS"
+        } else if detailUpper.contains("AAC") {
+            audioCodec = "AAC"
+        } else if detailUpper.contains("FLAC") {
+            audioCodec = "FLAC"
+        } else {
+            audioCodec = "—"
+        }
+
+        // Channels
+        let audioChannels: String
+        if detailUpper.contains("8 CH") || detailUpper.contains("7.1") || detailUpper.contains("8CH") {
+            audioChannels = "Surround (7.1ch)"
+        } else if detailUpper.contains("6 CH") || detailUpper.contains("5.1") || detailUpper.contains("6CH") {
+            audioChannels = "Surround (5.1ch)"
+        } else if detailUpper.contains("2 CH") || detailUpper.contains("STEREO") || detailUpper.contains("2.0") {
+            audioChannels = "Stereo (2.0ch)"
+        } else {
+            audioChannels = "—"
+        }
+
+        // Language
+        let lang = reportedValue([selectedAudio?.language])?.uppercased() ?? ""
+        let audioLanguage = lang.isEmpty || lang == "UND" ? "—" : lang
+
+        // Audio Bitrate
+        let aBitRaw = reportedValue([debug?.aBitrate]) ?? ""
+        let audioBitrate: String
+        if !aBitRaw.isEmpty && aBitRaw != "--" {
+            let cleaned = aBitRaw.replacingOccurrences(of: "meas ", with: "")
+                                 .replacingOccurrences(of: "Mbit/s", with: "Mbps")
+                                 .trimmingCharacters(in: .whitespaces)
+            audioBitrate = cleaned.isEmpty ? "—" : cleaned
+        } else {
+            audioBitrate = "—"
+        }
+
+        // Decoder selection is not exposed as playback telemetry yet.
+        let audioDecoder = "—"
+
+        return ScenePlaybackInfo(
+            engine: engineName,
+            version: engineVer,
+            videoCodec: videoCodec,
+            resolution: resolution,
+            frameRate: frameRate,
+            dynamicRange: dynamicRange,
+            dolbyVisionProfile: dvProfile,
+            videoBitrate: videoBitrate,
+            container: container,
+            videoDecoder: videoDecoder,
+            audioCodec: audioCodec,
+            audioChannels: audioChannels,
+            audioLanguage: audioLanguage,
+            audioBitrate: audioBitrate,
+            audioDecoder: audioDecoder
+        )
+    }
+
+    static func selectedScenePlaybackDebugInfo(
+        activeEngineKind: PlayerEngineKind,
+        aether: PlaybackDebugInfo?,
+        mpv: PlaybackDebugInfo?
+    ) -> PlaybackDebugInfo? {
+        switch activeEngineKind {
+        case .aether: return aether
+        case .mpv: return mpv
+        }
+    }
+
     func openScene() {
         guard isSceneEnabled else { return }
         cancelMoveSeekTracking()
@@ -4969,12 +5363,14 @@ class PlayerViewModel: ObservableObject {
         if !availableExternalSubtitles.isEmpty {
             sceneCoordinator.updateAvailableSubtitles(availableExternalSubtitles)
         }
+        let playbackInfo = buildScenePlaybackInfo()
         sceneViewModel.setMetadata(
             title: title,
             year: activeMeta?.year,
             overview: activeMeta?.description,
             runtime: activeMeta?.runtime,
-            nextEpisode: nextEpisode
+            nextEpisode: nextEpisode,
+            playbackInfo: playbackInfo
         )
         sceneViewModel.open()
     }

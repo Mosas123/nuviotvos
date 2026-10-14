@@ -221,11 +221,14 @@ class DetailsViewModel: ObservableObject {
                     }
                 }
 
-                // 4. MDBList Ratings
+                // 4. External Ratings (MDBList & Add-ons)
                 group.addTask {
-                    let ratings = await MdbListDetailsService.fetchRatings(for: meta)
+                    async let mdbTask = MdbListDetailsService.fetchRatings(for: meta)
+                    async let addonTask = AddonRatingsService.fetchRatings(for: meta)
+                    let (mdbRatings, addonRatings) = await (mdbTask, addonTask)
+                    let combinedRatings = mdbRatings + addonRatings
                     await MainActor.run { [weak self] in
-                        self?.applyMdbRatings(ratings, for: meta.id, generation: generation)
+                        self?.applyMdbRatings(combinedRatings, for: meta.id, generation: generation)
                     }
                 }
 

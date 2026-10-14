@@ -2,12 +2,22 @@ import SwiftUI
 
 struct SceneSongCard: View {
     let song: SceneRecognizedSong
+    var isFocused: Bool = false
     let onSelect: () -> Void
     
-    @Environment(\.isFocused) private var isFocused: Bool
+    @Environment(\.isFocused) private var envFocused: Bool
     
-    init(song: SceneRecognizedSong, onSelect: @escaping () -> Void) {
+    private var isCardFocused: Bool {
+        isFocused || envFocused
+    }
+    
+    init(
+        song: SceneRecognizedSong,
+        isFocused: Bool = false,
+        onSelect: @escaping () -> Void
+    ) {
         self.song = song
+        self.isFocused = isFocused
         self.onSelect = onSelect
     }
     
@@ -16,9 +26,9 @@ struct SceneSongCard: View {
             HStack(spacing: 20) {
                 // Album artwork
                 ZStack {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.white.opacity(0.12))
-                        .frame(width: 140, height: 140)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(isCardFocused ? Color.black.opacity(0.08) : Color.white.opacity(0.12))
+                        .frame(width: 170, height: 170)
                     
                     if let url = song.artworkURL {
                         AsyncImage(url: url) { phase in
@@ -27,8 +37,8 @@ struct SceneSongCard: View {
                                 image
                                     .resizable()
                                     .scaledToFill()
-                                    .frame(width: 140, height: 140)
-                                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                    .frame(width: 170, height: 170)
+                                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                             case .failure, .empty:
                                 musicPlaceholder
                             @unknown default:
@@ -40,8 +50,8 @@ struct SceneSongCard: View {
                     }
                 }
                 .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(isFocused ? Color.white : Color.white.opacity(0.18), lineWidth: isFocused ? 2.5 : 1)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(isCardFocused ? Color.black.opacity(0.12) : Color.white.opacity(0.18), lineWidth: 1)
                 )
                 
                 // Song Title, Artist, & Shazam/Music info
@@ -49,48 +59,48 @@ struct SceneSongCard: View {
                     HStack(spacing: 8) {
                         Image(systemName: "music.note")
                             .font(.system(size: 15, weight: .bold))
-                            .foregroundColor(.blue)
+                            .foregroundColor(isCardFocused ? Color(red: 0.0, green: 0.45, blue: 0.85) : .blue)
                         Text("Music")
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.6))
+                            .foregroundColor(isCardFocused ? Color.black.opacity(0.6) : Color.white.opacity(0.6))
                             .textCase(.uppercase)
                     }
                     
                     Text(song.title)
                         .font(.system(size: 21, weight: .bold))
-                        .foregroundColor(isFocused ? .white : .white.opacity(0.95))
+                        .foregroundColor(isCardFocused ? .black : .white.opacity(0.95))
                         .lineLimit(2)
                     
                     Text(song.artist)
                         .font(.system(size: 17, weight: .medium))
-                        .foregroundColor(.white.opacity(0.75))
+                        .foregroundColor(isCardFocused ? Color.black.opacity(0.75) : Color.white.opacity(0.75))
                         .lineLimit(1)
                     
                     if let desc = song.sceneDescription, !desc.isEmpty {
                         Text(desc)
                             .font(.system(size: 13, weight: .regular))
-                            .foregroundColor(.white.opacity(0.65))
+                            .foregroundColor(isCardFocused ? Color.black.opacity(0.65) : Color.white.opacity(0.65))
                             .lineLimit(1)
                     } else if let genre = song.genres.first, !genre.isEmpty {
                         Text(genre)
                             .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.white.opacity(0.5))
+                            .foregroundColor(isCardFocused ? Color.black.opacity(0.55) : Color.white.opacity(0.5))
                             .lineLimit(1)
                     }
                 }
                 
                 Spacer()
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
-            .frame(width: 440, height: 188)
-            .modifier(TvCardGlassBackground(isFocused: isFocused, shape: RoundedRectangle(cornerRadius: 24, style: .continuous)))
-            .shadow(color: isFocused ? Color.white.opacity(0.25) : Color.black.opacity(0.3), radius: isFocused ? 14 : 6, y: 3)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .frame(width: 480, height: 236)
+            .modifier(TvDetailsGlassBackground(filled: isCardFocused, shape: RoundedRectangle(cornerRadius: 32, style: .continuous)))
+            .shadow(color: Color.black.opacity(isCardFocused ? 0.22 : 0.25), radius: isCardFocused ? 10 : 6, y: isCardFocused ? 5 : 3)
         }
         .buttonStyle(PosterCardButtonStyle())
         .focusEffectDisabledIfAvailable()
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.easeOut(duration: 0.14), value: isFocused)
+        .scaleEffect(isCardFocused ? 1.05 : 1.0)
+        .animation(.easeOut(duration: 0.14), value: isCardFocused)
         .accessibilityLabel("\(song.title), \(song.artist)")
     }
     
@@ -99,6 +109,6 @@ struct SceneSongCard: View {
             .resizable()
             .scaledToFit()
             .frame(width: 54, height: 54)
-            .foregroundColor(.white.opacity(0.4))
+            .foregroundColor(isCardFocused ? Color.black.opacity(0.35) : Color.white.opacity(0.4))
     }
 }

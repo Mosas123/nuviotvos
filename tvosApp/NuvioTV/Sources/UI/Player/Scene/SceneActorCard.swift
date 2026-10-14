@@ -3,24 +3,37 @@ import SwiftUI
 struct SceneActorCard: View {
     let actor: SceneRecognizedActor
     let isLiveRecognized: Bool
+    var isFocused: Bool = false
     let onSelect: () -> Void
     
-    @Environment(\.isFocused) private var isFocused: Bool
+    @Environment(\.isFocused) private var envFocused: Bool
     
-    init(actor: SceneRecognizedActor, isLiveRecognized: Bool = false, onSelect: @escaping () -> Void) {
+    private var isCardFocused: Bool {
+        isFocused || envFocused
+    }
+    
+    init(
+        actor: SceneRecognizedActor,
+        isLiveRecognized: Bool = false,
+        isFocused: Bool = false,
+        onSelect: @escaping () -> Void
+    ) {
         self.actor = actor
         self.isLiveRecognized = isLiveRecognized
+        self.isFocused = isFocused
         self.onSelect = onSelect
     }
     
     var body: some View {
         Button(action: onSelect) {
-            VStack(spacing: 12) {
+            VStack(spacing: 14) {
+                Spacer(minLength: 0)
+                
                 // Circular portrait with optional active glowing ring
                 ZStack {
                     Circle()
-                        .fill(Color.white.opacity(0.12))
-                        .frame(width: 76, height: 76)
+                        .fill(isCardFocused ? Color.black.opacity(0.08) : Color.white.opacity(0.12))
+                        .frame(width: 92, height: 92)
                     
                     if let url = actor.profileURL {
                         AsyncImage(url: url) { phase in
@@ -29,7 +42,7 @@ struct SceneActorCard: View {
                                 image
                                     .resizable()
                                     .scaledToFill()
-                                    .frame(width: 76, height: 76)
+                                    .frame(width: 92, height: 92)
                                     .clipShape(Circle())
                             case .failure, .empty:
                                 placeholderAvatar
@@ -44,23 +57,23 @@ struct SceneActorCard: View {
                 .overlay(
                     Circle()
                         .stroke(
-                            isFocused ? Color.white.opacity(0.9) : Color.white.opacity(0.18),
-                            lineWidth: isFocused ? 2 : 1
+                            isCardFocused ? Color.black.opacity(0.12) : Color.white.opacity(0.18),
+                            lineWidth: 1
                         )
                 )
                 
                 // Name & Character labels
-                VStack(spacing: 3) {
+                VStack(spacing: 4) {
                     Text(actor.name)
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(.white)
+                        .foregroundColor(isCardFocused ? .black : .white)
                         .lineLimit(1)
                         .multilineTextAlignment(.center)
                     
                     if let character = actor.character, !character.isEmpty {
                         Text(character)
                             .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(.white.opacity(0.72))
+                            .foregroundColor(isCardFocused ? Color.black.opacity(0.7) : Color.white.opacity(0.72))
                             .lineLimit(1)
                             .multilineTextAlignment(.center)
                     } else {
@@ -70,17 +83,19 @@ struct SceneActorCard: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
+                
+                Spacer(minLength: 0)
             }
-            .padding(.vertical, 14)
-            .padding(.horizontal, 10)
-            .frame(width: 174, height: 188)
-            .modifier(TvCardGlassBackground(isFocused: isFocused, shape: RoundedRectangle(cornerRadius: 24, style: .continuous)))
-            .shadow(color: isFocused ? Color.white.opacity(0.25) : Color.black.opacity(0.3), radius: isFocused ? 14 : 6, y: 3)
+            .padding(.vertical, 16)
+            .padding(.horizontal, 12)
+            .frame(width: 184, height: 236)
+            .modifier(TvDetailsGlassBackground(filled: isCardFocused, shape: RoundedRectangle(cornerRadius: 32, style: .continuous)))
+            .shadow(color: Color.black.opacity(isCardFocused ? 0.22 : 0.25), radius: isCardFocused ? 10 : 6, y: isCardFocused ? 5 : 3)
         }
         .buttonStyle(PosterCardButtonStyle())
         .focusEffectDisabledIfAvailable()
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.easeOut(duration: 0.14), value: isFocused)
+        .scaleEffect(isCardFocused ? 1.05 : 1.0)
+        .animation(.easeOut(duration: 0.14), value: isCardFocused)
         .accessibilityLabel("\(actor.name), \(actor.character ?? "")")
     }
     
@@ -88,7 +103,7 @@ struct SceneActorCard: View {
         Image(systemName: "person.fill")
             .resizable()
             .scaledToFit()
-            .frame(width: 38, height: 38)
-            .foregroundColor(.white.opacity(0.4))
+            .frame(width: 44, height: 44)
+            .foregroundColor(isCardFocused ? Color.black.opacity(0.35) : Color.white.opacity(0.4))
     }
 }

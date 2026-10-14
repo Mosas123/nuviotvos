@@ -12,6 +12,7 @@ final class TorrentEngineManager: ObservableObject {
 
     private var activeSession: TorrentSession?
     private var statsTimer: AnyCancellable?
+    private var startGeneration = 0
 
     private init() {}
 
@@ -23,8 +24,12 @@ final class TorrentEngineManager: ObservableObject {
         filename: String? = nil,
         timeout: TimeInterval = 40
     ) async throws -> URL {
-        // Stop any currently active stream
-        await stopActiveStream()
+        startGeneration &+= 1
+        let generation = startGeneration
+
+        // Stop any currently active stream without invalidating this start.
+        await stopCurrentSession()
+        guard generation == startGeneration, !Task.isCancelled else { throw CancellationError() }
 
         // Check and prune cache if exceeding configured limit
         pruneCacheIfNeeded()
@@ -41,6 +46,10 @@ final class TorrentEngineManager: ObservableObject {
                 timeout: timeout,
                 filename: filename
             )
+            guard generation == startGeneration, !Task.isCancelled else {
+                await session.stop()
+                throw CancellationError()
+            }
             self.activeSession = session
 
             // Start polling stats
@@ -48,24 +57,32 @@ final class TorrentEngineManager: ObservableObject {
 
             return streamURL
         } catch {
-            await stopActiveStream()
+            if generation == startGeneration {
+                await stopCurrentSession()
+            }
             throw error
         }
     }
 
     /// Stops the currently active torrent stream and tears down its engine.
     func stopActiveStream() async {
+        startGeneration &+= 1
+        await stopCurrentSession()
+    }
+
+    private func stopCurrentSession() async {
         statsTimer?.cancel()
         statsTimer = nil
 
-        if let session = activeSession {
-            activeSession = nil
-            await session.stop()
-        }
-
+        let session = activeSession
+        activeSession = nil
         isStreaming = false
         currentInfoHash = nil
         activeStats = SwarmStats()
+
+        if let session {
+            await session.stop()
+        }
     }
 
     private func startStatsPolling(for session: TorrentSession) {
@@ -76,6 +93,7 @@ final class TorrentEngineManager: ObservableObject {
                 Task {
                     let stats = await session.currentStats()
                     await MainActor.run {
+                        guard self.activeSession === session else { return }
                         self.activeStats = stats
                     }
                 }

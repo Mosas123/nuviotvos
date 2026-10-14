@@ -20,10 +20,11 @@ private enum NetflixSearchMetrics {
     static let pageInset: CGFloat = 49
     static let posterWidth: CGFloat = 210
     static let posterHeight: CGFloat = 315
-    static let posterGap: CGFloat = 24
+    static let posterGap: CGFloat = 28
     static let gridColumnCount = 5
-    static let gridContentWidth = posterWidth * CGFloat(gridColumnCount)
-        + posterGap * CGFloat(gridColumnCount - 1) + 24
+    static let gridCardRowWidth = posterWidth * CGFloat(gridColumnCount)
+        + posterGap * CGFloat(gridColumnCount - 1)
+    static let gridContentWidth = gridCardRowWidth + 24
     static let listWidth: CGFloat = 440
     static let columnGap: CGFloat = 32
 }
@@ -63,6 +64,8 @@ struct NetflixSearchView: View {
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
     @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
 
+    @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
+
     init(
         viewModel: NetflixSearchViewModel,
         showDiscover: Bool = true,
@@ -83,7 +86,15 @@ struct NetflixSearchView: View {
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
 
-            linearBody
+            TVOSKeyboardLayoutDetector(layoutMode: $detectedKeyboardMode)
+                .frame(width: 0, height: 0)
+                .opacity(0)
+
+            if detectedKeyboardMode == .grid {
+                gridSearchBody
+            } else {
+                linearBody
+            }
         }
         .onAppear {
             viewModel.reloadRecent()
@@ -92,8 +103,10 @@ struct NetflixSearchView: View {
         .onChange(of: focusedItemID) { _, newValue in
             resultFocusGeneration &+= 1
             if let newValue {
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    searchPresented = false
+                if detectedKeyboardMode == .linear {
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        searchPresented = false
+                    }
                 }
                 lastFocusedItemID = newValue
                 shouldRestoreFocus = false
@@ -141,7 +154,10 @@ struct NetflixSearchView: View {
                 prompt: L10n.string("search_placeholder", fallback: "Search movies & series"),
                 isPresented: $searchPresented,
                 isDisabled: overlayRestoreItemID != nil || discoverOverlayTransitionActive,
-                topPadding: 56
+                topPadding: 56,
+                onSubmit: {
+                    viewModel.performSearch(query: viewModel.searchText)
+                }
             )
 
             VStack(alignment: .leading, spacing: 20) {
@@ -193,6 +209,90 @@ struct NetflixSearchView: View {
             .padding(.top, 16)
             .ignoresSafeArea(.container, edges: .bottom)
         }
+    }
+
+    // MARK: - Grid Layout (Side-by-Side: Keyboard on Left, Results on Right)
+
+    private var gridSearchBody: some View {
+        gridNavigationBody
+            .padding(.top, 56)
+            .safeAreaPadding(.horizontal, TVLayout.rowLeading)
+    }
+
+    private var gridNavigationBody: some View {
+        NavigationStack {
+            gridBody
+                .searchable(
+                    text: $viewModel.searchText,
+                    prompt: L10n.string("search_placeholder", fallback: "Search movies & series")
+                )
+                .onSubmit(of: .search) {
+                    viewModel.performSearch(query: viewModel.searchText)
+                }
+                .autocorrectionDisabled()
+                #if os(tvOS)
+                .toolbar(.hidden, for: .navigationBar)
+                .toolbar(.hidden, for: .tabBar)
+                #endif
+        }
+    }
+
+    private var gridBody: some View {
+        HStack(alignment: .top, spacing: NetflixSearchMetrics.columnGap) {
+            VStack(alignment: .leading, spacing: 20) {
+                if viewModel.hasQuery {
+                    typeFilterRow
+                        .padding(.horizontal, 12)
+                        .disabled(overlayRestoreItemID != nil)
+                        .zIndex(1)
+                    gridResultsBody
+                        .zIndex(0)
+                } else {
+                    if !viewModel.recentSearches.isEmpty {
+                        recentRow
+                            .disabled(discoverOverlayTransitionActive)
+                    }
+                    if showDiscover {
+                        DiscoverSection(
+                            onContentClick: onContentClick,
+                            isBesideKeyboard: true,
+                            columnCount: 5,
+                            onLongPress: onLongPress,
+                            onFocusExit: {
+                                transferFocusToGridKeyboard()
+                            },
+                            parentTransitionActive: $discoverOverlayTransitionActive
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    } else {
+                        centeredState {
+                            messageState(
+                                icon: "rectangle.grid.2x2",
+                                title: L10n.string(
+                                    "search_start_subtitle_no_discover",
+                                    fallback: "Discover is disabled. Enter at least 2 characters"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            .frame(width: NetflixSearchMetrics.gridContentWidth, alignment: .leading)
+            .padding(.top, 24)
+            .ignoresSafeArea(.container, edges: .bottom)
+        }
+        .padding(.trailing, NetflixSearchMetrics.pageInset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func transferFocusToGridKeyboard() {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            searchPresented = true
+        }
+        focusedItemID = nil
+        focusedTypeFilterID = nil
+        focusedRecentSearchID = nil
+        clearRecentFocused = false
     }
 
     private func scheduleRestoreArm() {
@@ -344,6 +444,44 @@ struct NetflixSearchView: View {
         }
     }
 
+    private func transferFilterFocusToGridResults() {
+        guard detectedKeyboardMode == .grid,
+              viewModel.hasQuery,
+              isEnabled,
+              !isFullScreenOverlayPresented,
+              overlayRestoreItemID == nil,
+              !overlayFocusRestorationActive,
+              !discoverOverlayTransitionActive,
+              !viewModel.isLoading,
+              viewModel.error == nil,
+              let firstResultID = visibleResults.first?.id else { return }
+
+        resultFocusGeneration &+= 1
+        let generation = resultFocusGeneration
+        restoreArmTask?.cancel()
+        shouldRestoreFocus = false
+        resultsScrollTopGeneration &+= 1
+
+        focusedTypeFilterID = nil
+        focusedItemID = "grid:\(firstResultID)"
+
+        DispatchQueue.main.async {
+            guard resultFocusGeneration == generation,
+                  detectedKeyboardMode == .grid,
+                  viewModel.hasQuery,
+                  isEnabled,
+                  !isFullScreenOverlayPresented,
+                  overlayRestoreItemID == nil,
+                  !overlayFocusRestorationActive,
+                  !discoverOverlayTransitionActive,
+                  !viewModel.isLoading,
+                  viewModel.error == nil,
+                  visibleResults.first?.id == firstResultID else { return }
+            focusedTypeFilterID = nil
+            focusedItemID = "grid:\(firstResultID)"
+        }
+    }
+
     private func transferRecentRowFocusToKeyboard() {
         resultFocusGeneration &+= 1
         let generation = resultFocusGeneration
@@ -382,8 +520,19 @@ struct NetflixSearchView: View {
             }
         }
         .onMoveCommand { direction in
-            guard direction == .up, focusedTypeFilterID != nil else { return }
-            transferTypeFilterFocusToKeyboard()
+            if detectedKeyboardMode == .grid {
+                if direction == .down, focusedTypeFilterID != nil {
+                    transferFilterFocusToGridResults()
+                } else if direction == .left {
+                    let firstFilterID = SearchContentType.allCases.first.map { "type:\($0.rawValue)" }
+                    if focusedTypeFilterID == nil || focusedTypeFilterID == firstFilterID {
+                        transferFocusToGridKeyboard()
+                    }
+                }
+            } else {
+                guard direction == .up, focusedTypeFilterID != nil else { return }
+                transferTypeFilterFocusToKeyboard()
+            }
         }
     }
 
@@ -400,6 +549,35 @@ struct NetflixSearchView: View {
             return L10n.format("tvos_search_result_count_one", fallback: "%d result", count)
         }
         return L10n.format("tvos_search_result_count_other", fallback: "%d results", count)
+    }
+
+    @ViewBuilder
+    private var gridResultsBody: some View {
+        if viewModel.isLoading {
+            centeredState {
+                ProgressView()
+                    .scaleEffect(1.6)
+                    .tint(.white)
+            }
+        } else if let error = viewModel.error {
+            centeredState {
+                messageState(icon: "wifi.exclamationmark", title: error)
+            }
+        } else if visibleResults.isEmpty {
+            centeredState {
+                messageState(
+                    icon: "magnifyingglass",
+                    title: L10n.string("search_no_results_title", fallback: "No Results"),
+                    subtitle: L10n.format(
+                        "tvos_search_no_results_for",
+                        fallback: "No results for “%@”",
+                        viewModel.searchText
+                    )
+                )
+            }
+        } else {
+            resultsGrid
+        }
     }
 
     @ViewBuilder
@@ -500,6 +678,7 @@ struct NetflixSearchView: View {
                 LazyVGrid(columns: gridColumns, alignment: .leading, spacing: NetflixSearchMetrics.posterGap) {
                     ForEach(Array(visibleResults.enumerated()), id: \.element.id) { index, item in
                         let focusID = "grid:\(item.id)"
+                        let colCount = detectedKeyboardMode == .grid ? NetflixSearchMetrics.gridColumnCount : gridColumns.count
                         PosterGridCard(
                             meta: item,
                             width: NetflixSearchMetrics.posterWidth,
@@ -509,10 +688,17 @@ struct NetflixSearchView: View {
                             retainFocusAppearance: overlayRestoreItemID == focusID,
                             onLongPress: onLongPress.map { cb in { cb(item) } },
                             forceShowLabels: true,
-                            onMove: index < gridColumns.count ? { direction in
-                                guard direction == .up else { return }
-                                transferFirstRowFocusToAllFilter()
-                            } : nil
+                            onMove: { direction in
+                                if detectedKeyboardMode == .grid {
+                                    if index % colCount == 0, direction == .left {
+                                        transferFocusToGridKeyboard()
+                                    }
+                                } else if index < colCount {
+                                    if direction == .up {
+                                        transferFirstRowFocusToAllFilter()
+                                    }
+                                }
+                            }
                         ) {
                             overlayRestoreGeneration &+= 1
                             overlayFocusRestoreStartedGeneration = nil
@@ -563,13 +749,14 @@ struct NetflixSearchView: View {
 
     /// Keep grid-mode posters within the content column beside the keyboard.
     private var gridColumns: [GridItem] {
-        Array(
+        let count = detectedKeyboardMode == .grid ? NetflixSearchMetrics.gridColumnCount : 6
+        return Array(
             repeating: GridItem(
                 .fixed(NetflixSearchMetrics.posterWidth),
                 spacing: NetflixSearchMetrics.posterGap,
                 alignment: .top
             ),
-            count: 6
+            count: count
         )
     }
 
@@ -620,8 +807,17 @@ struct NetflixSearchView: View {
             .scrollClipDisabledIfAvailable()
         }
         .onMoveCommand { direction in
-            guard direction == .up else { return }
-            transferRecentRowFocusToKeyboard()
+            if detectedKeyboardMode == .grid {
+                if direction == .left {
+                    let firstRecentID = viewModel.recentSearches.first.map { "recent:\($0)" }
+                    if focusedRecentSearchID == nil || focusedRecentSearchID == firstRecentID {
+                        transferFocusToGridKeyboard()
+                    }
+                }
+            } else {
+                guard direction == .up else { return }
+                transferRecentRowFocusToKeyboard()
+            }
         }
     }
 

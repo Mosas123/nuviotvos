@@ -2150,7 +2150,7 @@ struct ContentView: View {
                 includeDebrid: includeDebridOrTorrent,
                 cachedOnly: cachedOnly,
                 preserveAddonStreams: preserveAddonOrder
-            )
+            ).filter { !$0.isNotPlayable }
             let sortedPlayable = StreamPickerListBuilder.sorted(playable, by: sortOption, preserveAddonStreams: preserveAddonOrder)
             // Prioritize preferred binge group or release fingerprint before taking top result
             if (preferBingeGroup || reuseBingeGroup), let preferredTags, preferredTags.bingeGroup != nil || preferredTags.releaseFingerprint != nil {
@@ -2251,7 +2251,8 @@ struct ContentView: View {
                     videoSize: candidate.videoSize,
                     videoHash: candidate.videoHash,
                     provider: providerName,
-                    bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate)
+                    bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate),
+                    trickplayURL: candidate.trickplayURL
                 )
             }
 
@@ -2280,7 +2281,8 @@ struct ContentView: View {
                 videoSize: candidate.videoSize,
                 videoHash: candidate.videoHash,
                 provider: "Direct",
-                bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate)
+                bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate),
+                trickplayURL: candidate.trickplayURL
             )
         }
         return nil
@@ -2417,7 +2419,8 @@ struct ContentView: View {
                 videoSize: stream.videoSize,
                 videoHash: stream.videoHash,
                 provider: providerName,
-                bingeGroup: bingeGroup
+                bingeGroup: bingeGroup,
+                trickplayURL: stream.trickplayURL
             )
         }
 
@@ -2445,7 +2448,8 @@ struct ContentView: View {
             videoSize: stream.videoSize,
             videoHash: stream.videoHash,
             provider: "Direct",
-            bingeGroup: bingeGroup
+            bingeGroup: bingeGroup,
+            trickplayURL: stream.trickplayURL
         )
     }
 
@@ -2796,17 +2800,26 @@ private struct CrossfadingBackdrop: View {
     @State private var imageOpacity = 1.0
 
     var body: some View {
-        GeometryReader { proxy in
+        // Read the displayed state outside the GeometryReader so the body
+        // depends on it. Reads that only happen inside the reader's content
+        // closure did not re-render when a load finished, so the new image
+        // only appeared on the next focus change (one title late).
+        let currentImage = image
+        let currentOutgoingImage = outgoingImage
+        let currentImageOpacity = imageOpacity
+        let currentOutgoingOpacity = outgoingOpacity
+        let currentLoadedURL = loadedURL
+        return GeometryReader { proxy in
             ZStack {
                 placeholder
-                if let outgoingImage {
-                    backdropImage(outgoingImage, size: proxy.size)
-                        .opacity(outgoingOpacity)
+                if let currentOutgoingImage {
+                    backdropImage(currentOutgoingImage, size: proxy.size)
+                        .opacity(currentOutgoingOpacity)
                 }
-                if let image {
-                    backdropImage(image, size: proxy.size)
-                        .opacity(imageOpacity)
-                        .id(loadedURL)
+                if let currentImage {
+                    backdropImage(currentImage, size: proxy.size)
+                        .opacity(currentImageOpacity)
+                        .id(currentLoadedURL)
                 }
             }
             // Portrait poster fallbacks must be cropped inside the screen, not
@@ -3072,6 +3085,7 @@ private struct TVMainTabView: View {
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
     @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
     @AppStorage(SettingsKey.searchStyle) private var searchStyle = "Netflix"
+    @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
     @StateObject private var profileTabAvatar = ProfileTabAvatarRenderer()
     @State private var showingReauthSheet = false
@@ -3107,21 +3121,21 @@ private struct TVMainTabView: View {
                 onContentClick: onNavigateToDetails,
                 onLongPress: onLongPressCard
             )
-        } else if searchStyle == "Native" {
-            NativeSearchView(
-                viewModel: searchViewModel,
-                showDiscover: discoverLocation == "Search",
-                forcedLayoutMode: .linear,
-                isFullScreenOverlayPresented: isFullScreenOverlayPresented,
-                detailsDidDisappearGeneration: detailsDidDisappearGeneration,
-                onContentClick: onNavigateToDetails,
-                onLongPress: onLongPressCard
-            )
         } else if searchStyle == "Grid" {
             NativeSearchView(
                 viewModel: searchViewModel,
                 showDiscover: discoverLocation == "Search",
                 forcedLayoutMode: .grid,
+                isFullScreenOverlayPresented: isFullScreenOverlayPresented,
+                detailsDidDisappearGeneration: detailsDidDisappearGeneration,
+                onContentClick: onNavigateToDetails,
+                onLongPress: onLongPressCard
+            )
+        } else if searchStyle == "Native" {
+            NativeSearchView(
+                viewModel: searchViewModel,
+                showDiscover: discoverLocation == "Search",
+                forcedLayoutMode: detectedKeyboardMode == .grid ? .grid : .linear,
                 isFullScreenOverlayPresented: isFullScreenOverlayPresented,
                 detailsDidDisappearGeneration: detailsDidDisappearGeneration,
                 onContentClick: onNavigateToDetails,

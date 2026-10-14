@@ -110,6 +110,9 @@ final class PlaybackSessionCoordinator: ObservableObject {
 
     /// Generation token for the in-flight load. Completions for older gens are ignored.
     private(set) var loadGeneration: UInt64 = 0
+    /// Generation whose request has reached its selected backend dispatcher.
+    /// Old frames cannot start a new load while cache preparation is pending.
+    private(set) var dispatchedLoadGeneration: UInt64?
     private var allowAutomaticFallback = true
     private var didFallbackForCurrentURL = false
     private var currentURLString: String?
@@ -270,6 +273,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         currentURLString = request.videoURL.absoluteString
         statusToast = nil
         loadGeneration &+= 1
+        dispatchedLoadGeneration = nil
         bindAetherCallbacks()
 
         let storedEngine = engineSettingProvider()
@@ -353,6 +357,18 @@ final class PlaybackSessionCoordinator: ObservableObject {
         return true
     }
 
+    func hasPresentedCurrentAetherLoad(generation: UInt64) -> Bool {
+        guard loadGeneration == generation,
+              dispatchedLoadGeneration == generation,
+              activeBackend == .aether,
+              let aetherController else { return false }
+        return aetherController.hasPresentedCurrentLoad(generation: generation)
+    }
+
+    func hasDispatchedCurrentLoad(generation: UInt64) -> Bool {
+        loadGeneration == generation && dispatchedLoadGeneration == generation
+    }
+
     /// Explicit Aether → MPV handoff (audio delay / amplification / terminal error).
     func handoffToMPV(reason: String, resumeSeconds: Double?) {
         guard !userStopped else { return }
@@ -393,6 +409,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         }
 
         loadGeneration += 1
+        dispatchedLoadGeneration = nil
         let generation = loadGeneration
         selectBackend(.mpv, toast: "Compatibility player enabled", pauseOutgoing: false)
         onHandoffToast?("Compatibility player enabled")
@@ -437,6 +454,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
     func stopAll() {
         userStopped = true
         loadGeneration += 1
+        dispatchedLoadGeneration = nil
         isProgressSaveSuspended = false
         isHandoffInProgress = false
         handoffTargetSeconds = nil
@@ -508,6 +526,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
     private func startLoad(_ request: PlaybackLoadRequest, on backend: PlayerBackendKind, generation: UInt64) {
         guard !userStopped, loadGeneration == generation else { return }
         if let loadDispatcher {
+            dispatchedLoadGeneration = generation
             loadDispatcher(request, backend, generation)
             return
         }
@@ -562,15 +581,18 @@ final class PlaybackSessionCoordinator: ObservableObject {
     }
 
     private func dispatchToEngine(_ request: PlaybackLoadRequest, on backend: PlayerBackendKind, generation: UInt64) {
+        guard !userStopped, loadGeneration == generation else { return }
         switch backend {
         case .aether:
             guard let aetherController else {
                 lastLoadError = "AetherEngine is unavailable on this device."
                 return
             }
+            dispatchedLoadGeneration = generation
             aetherController.load(request, generation: generation)
         case .mpv:
             _ = mpvController.view
+            dispatchedLoadGeneration = generation
             mpvController.load(request)
             mpvController.setAspectMode(request.aspectMode)
         }

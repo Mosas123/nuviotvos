@@ -238,6 +238,18 @@ actor StremioManifestDataCache {
 
     private var cachedData: [URL: Data] = [:]
     private var inFlight: [URL: Task<Data?, Never>] = [:]
+    private var session: URLSession
+
+    private init() {
+        session = Self.manifestSession
+    }
+
+    func setSessionForTesting(_ session: URLSession?) {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        cachedData.removeAll()
+        self.session = session ?? Self.manifestSession
+    }
 
     func data(for url: URL) async -> Data? {
         if let data = cachedData[url] { return data }
@@ -247,7 +259,7 @@ actor StremioManifestDataCache {
             do {
                 var request = URLRequest(url: url)
                 request.timeoutInterval = 8
-                let (data, response) = try await Self.manifestSession.data(for: request)
+                let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse,
                       200..<300 ~= http.statusCode else { return nil }
                 return data
@@ -392,6 +404,15 @@ final class CinemetaCatalogRepository: CatalogRepository {
         config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
+    private static var networkSessionOverrideForTesting: URLSession?
+
+    static func setNetworkSessionForTesting(_ session: URLSession?) {
+        networkSessionOverrideForTesting = session
+    }
+
+    private static var sessionForRequests: URLSession {
+        networkSessionOverrideForTesting ?? networkSession
+    }
 
     func cacheCatalogMetadata(_ meta: NuvioMeta) {
         Self.cacheCatalogMetadata(meta)
@@ -1498,6 +1519,31 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
     }
 
+    private func loadSearchManifestsWithinDeadline(urls: [URL], seconds: TimeInterval) async -> [URL: AddonManifest] {
+        guard !urls.isEmpty, !Task.isCancelled else { return [:] }
+        let collector = SearchManifestLoadCollector(expectedCount: urls.count)
+        let loads = urls.map { url in
+            Task {
+                let manifest = await self.manifest(for: url)
+                collector.record(manifest, for: url)
+            }
+        }
+        let timeout = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            collector.finish()
+        }
+        let manifests = await withTaskCancellationHandler {
+            await collector.wait()
+        } onCancel: {
+            loads.forEach { $0.cancel() }
+            collector.finish()
+        }
+        timeout.cancel()
+        loads.forEach { $0.cancel() }
+        return manifests
+    }
+
     /// Enabled installed add-ons whose manifest advertises the Stremio `subtitles` resource.
     func configuredSubtitleAddons(id: String, type: String,
                                   manifestURLs: [URL]? = nil) async -> [StremioSubtitleAddon] {
@@ -1579,22 +1625,6 @@ final class CinemetaCatalogRepository: CatalogRepository {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        var manifestSources: [(name: String, manifestURL: URL, isAddon: Bool)] = []
-        if Self.isCinemetaEnabled {
-            manifestSources.append((
-                name: "Cinemeta",
-                manifestURL: baseURL.appendingPathComponent("manifest.json"),
-                isAddon: false
-            ))
-        }
-        for manifestURL in Self.configuredStreamAddonManifestURLs {
-            manifestSources.append((
-                name: Self.streamAddonName(for: manifestURL),
-                manifestURL: manifestURL,
-                isAddon: true
-            ))
-        }
-
         struct SearchTarget {
             let addonName: String
             let baseURL: URL
@@ -1602,26 +1632,58 @@ final class CinemetaCatalogRepository: CatalogRepository {
             let catalogId: String
             let isAddon: Bool
         }
+
         var targets: [SearchTarget] = []
-        for source in manifestSources {
-            guard let manifest = await manifest(for: source.manifestURL) else { continue }
-            let isCinemeta = source.name == "Cinemeta"
-                || manifest.id.caseInsensitiveCompare(Self.cinemetaAddonId) == .orderedSame
-                || source.manifestURL.host?.contains("cinemeta") == true
-            let isAddon = source.isAddon && !isCinemeta
-            let sourceBaseURL = source.manifestURL.lastPathComponent.lowercased() == "manifest.json"
-                ? source.manifestURL.deletingLastPathComponent()
-                : source.manifestURL
-            for catalog in manifest.catalogs ?? [] where catalog.supportsSearch {
-                targets.append(
-                    SearchTarget(
-                        addonName: manifest.displayName ?? source.name,
-                        baseURL: sourceBaseURL,
-                        type: catalog.type,
-                        catalogId: catalog.id,
-                        isAddon: isAddon
-                    )
+
+        // 1. Cinemeta default targets (always available immediately when enabled)
+        if Self.isCinemetaEnabled {
+            targets.append(
+                SearchTarget(
+                    addonName: "Cinemeta",
+                    baseURL: baseURL,
+                    type: "movie",
+                    catalogId: "top",
+                    isAddon: false
                 )
+            )
+            targets.append(
+                SearchTarget(
+                    addonName: "Cinemeta",
+                    baseURL: baseURL,
+                    type: "series",
+                    catalogId: "top",
+                    isAddon: false
+                )
+            )
+        }
+
+        // 2. Discover search-capable targets from configured add-ons in parallel
+        // with a short deadline (2.5s) so slow/offline add-on hosts never stall search.
+        let candidateURLs = Self.configuredStreamAddonManifestURLs
+        if !candidateURLs.isEmpty {
+            let manifests = await loadSearchManifestsWithinDeadline(urls: candidateURLs, seconds: 2.5)
+
+            for manifestURL in candidateURLs {
+                guard let manifest = manifests[manifestURL] else { continue }
+                let isCinemeta = manifest.id.caseInsensitiveCompare(Self.cinemetaAddonId) == .orderedSame
+                    || manifestURL.host?.contains("cinemeta") == true
+                guard !isCinemeta else { continue }
+
+                let sourceBaseURL = manifestURL.lastPathComponent.lowercased() == "manifest.json"
+                    ? manifestURL.deletingLastPathComponent()
+                    : manifestURL
+
+                for catalog in manifest.catalogs ?? [] where catalog.supportsSearch {
+                    targets.append(
+                        SearchTarget(
+                            addonName: manifest.displayName ?? Self.streamAddonName(for: manifestURL),
+                            baseURL: sourceBaseURL,
+                            type: catalog.type,
+                            catalogId: catalog.id,
+                            isAddon: true
+                        )
+                    )
+                }
             }
         }
 
@@ -1632,18 +1694,34 @@ final class CinemetaCatalogRepository: CatalogRepository {
             ]
         }
 
+        guard !Task.isCancelled else { return [] }
+
+        // 3. Query all targets concurrently with bounded timeout per target (5s)
         let rawResults = await withTaskGroup(of: (Int, [NuvioMeta]).self, returning: [NuvioMeta].self) { group in
             for (index, target) in targets.enumerated() {
                 group.addTask {
+                    guard !Task.isCancelled else { return (index, []) }
                     do {
-                        let items = try await self.fetchCatalog(
-                            sourceBaseURL: target.baseURL,
-                            type: target.type,
-                            catalogId: target.catalogId,
-                            skip: nil,
-                            search: trimmed,
-                            genre: nil
-                        )
+                        let items: [NuvioMeta] = try await withThrowingTaskGroup(of: [NuvioMeta].self) { fetchGroup in
+                            fetchGroup.addTask {
+                                try await self.fetchCatalog(
+                                    sourceBaseURL: target.baseURL,
+                                    type: target.type,
+                                    catalogId: target.catalogId,
+                                    skip: nil,
+                                    search: trimmed,
+                                    genre: nil
+                                )
+                            }
+                            fetchGroup.addTask {
+                                try await Task.sleep(nanoseconds: 5_000_000_000)
+                                try Task.checkCancellation()
+                                throw URLError(.timedOut)
+                            }
+                            guard let first = try await fetchGroup.next() else { return [] }
+                            fetchGroup.cancelAll()
+                            return first
+                        }
                         let tagged = target.isAddon ? items.map { $0.withIsFromAddon(true) } : items
                         return (index, tagged)
                     } catch {
@@ -1664,8 +1742,12 @@ final class CinemetaCatalogRepository: CatalogRepository {
             return merged
         }
 
-        let localized = await TmdbDetailsService.localizedMetadata(for: rawResults)
-        let deduplicated = Self.deduplicatedSearchResults(localized)
+        guard !Task.isCancelled else { return [] }
+
+        // Return fast, deduplicated search results immediately.
+        // Background enrichment (SearchResultEnrichment) handles artwork & TMDB localization
+        // asynchronously for visible cards without blocking the search spinner.
+        let deduplicated = Self.deduplicatedSearchResults(rawResults)
         cacheMetadata(deduplicated)
         return deduplicated
     }
@@ -2412,7 +2494,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
         request.setValue("Mozilla/5.0 (AppleTV; tvOS 18.0) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await Self.networkSession.data(for: request)
+        let (data, response) = try await Self.sessionForRequests.data(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw URLError(.badServerResponse)
         }
@@ -2437,6 +2519,7 @@ private struct AddonManifest: Decodable {
     let idPrefixes: [String]?
     let resources: [AddonManifestResource]?
     let catalogs: [AddonManifestCatalog]?
+    let ratingSources: [AddonRatingSource]?
 
     var displayName: String? {
         name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -2456,6 +2539,63 @@ private struct AddonManifest: Decodable {
             }
         }
         return false
+    }
+}
+
+private final class SearchManifestLoadCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+    private var manifests: [URL: AddonManifest] = [:]
+    private var continuation: CheckedContinuation<[URL: AddonManifest], Never>?
+    private var finished = false
+
+    init(expectedCount: Int) {
+        remaining = expectedCount
+    }
+
+    func wait() async -> [URL: AddonManifest] {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if finished {
+                let snapshot = manifests
+                lock.unlock()
+                continuation.resume(returning: snapshot)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func record(_ manifest: AddonManifest?, for url: URL) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        if let manifest { manifests[url] = manifest }
+        remaining -= 1
+        let completed = remaining == 0
+        if completed { finished = true }
+        let pendingContinuation = completed ? continuation : nil
+        if completed { continuation = nil }
+        let snapshot = manifests
+        lock.unlock()
+        pendingContinuation?.resume(returning: snapshot)
+    }
+
+    func finish() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let pendingContinuation = continuation
+        continuation = nil
+        let snapshot = manifests
+        lock.unlock()
+        pendingContinuation?.resume(returning: snapshot)
     }
 }
 

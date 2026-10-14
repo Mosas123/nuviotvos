@@ -854,9 +854,11 @@ struct StreamAddonStreamDTO: Decodable {
     let fileIdx: Int?
     let sources: [String]?
     let clientResolve: StreamAddonClientResolveDTO?
+    let notPlayable: Bool?
+    let action: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case url, externalUrl, name, title, description, subtitles, behaviorHints, infoHash, fileIdx, sources, clientResolve
+        case url, externalUrl, name, title, description, subtitles, behaviorHints, infoHash, fileIdx, sources, clientResolve, notPlayable, action
     }
 
     init(
@@ -870,7 +872,9 @@ struct StreamAddonStreamDTO: Decodable {
         infoHash: String? = nil,
         fileIdx: Int? = nil,
         sources: [String]? = nil,
-        clientResolve: StreamAddonClientResolveDTO? = nil
+        clientResolve: StreamAddonClientResolveDTO? = nil,
+        notPlayable: Bool? = nil,
+        action: Bool? = nil
     ) {
         self.url = url
         self.externalUrl = externalUrl
@@ -883,6 +887,8 @@ struct StreamAddonStreamDTO: Decodable {
         self.fileIdx = fileIdx
         self.sources = sources
         self.clientResolve = clientResolve
+        self.notPlayable = notPlayable
+        self.action = action
     }
 
     init(from decoder: Decoder) throws {
@@ -908,6 +914,26 @@ struct StreamAddonStreamDTO: Decodable {
         }
         self.sources = (try? container.decodeIfPresent([String?].self, forKey: .sources))?.compactMap { $0 }
         self.clientResolve = try? container.decodeIfPresent(StreamAddonClientResolveDTO.self, forKey: .clientResolve)
+
+        if let b = try? container.decodeIfPresent(Bool.self, forKey: .notPlayable) {
+            self.notPlayable = b
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .notPlayable) {
+            self.notPlayable = (i != 0)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: .notPlayable) {
+            self.notPlayable = (s.lowercased() == "true" || s == "1")
+        } else {
+            self.notPlayable = nil
+        }
+
+        if let b = try? container.decodeIfPresent(Bool.self, forKey: .action) {
+            self.action = b
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .action) {
+            self.action = (i != 0)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: .action) {
+            self.action = (s.lowercased() == "true" || s == "1")
+        } else {
+            self.action = nil
+        }
     }
 
     func toNuvioStream(addonName: String) -> NuvioStream? {
@@ -930,6 +956,10 @@ struct StreamAddonStreamDTO: Decodable {
             detailLines.append("Size \(Self.sizeFormatter.string(fromByteCount: size))")
         }
 
+        let isNotPlayable = (behaviorHints?.isNotPlayable == true)
+            || (notPlayable == true)
+            || (action == true)
+
         return NuvioStream(
             url: parsed.directURL,
             name: displayName,
@@ -947,7 +977,8 @@ struct StreamAddonStreamDTO: Decodable {
             httpHeaders: behaviorHints?.proxyHeaders?.request,
             trickplayURL: (cleaned(behaviorHints?.trickplayUrl)
                 ?? cleaned(behaviorHints?.storyboard)
-                ?? cleaned(behaviorHints?.trickplay)).flatMap(URL.init(string:))
+                ?? cleaned(behaviorHints?.trickplay)).flatMap(URL.init(string:)),
+            notPlayable: isNotPlayable ? true : nil
         )
     }
 
@@ -1077,9 +1108,15 @@ struct StreamAddonBehaviorHints: Decodable {
     let trickplay: String?
     let trickplayUrl: String?
     let storyboard: String?
+    let notPlayable: Bool?
+    let action: Bool?
+
+    var isNotPlayable: Bool {
+        notPlayable == true || action == true
+    }
 
     enum CodingKeys: String, CodingKey {
-        case videoSize, filename, videoHash, bingeGroup, cached, isCached, proxyHeaders, trickplay, trickplayUrl, storyboard
+        case videoSize, filename, videoHash, bingeGroup, cached, isCached, proxyHeaders, trickplay, trickplayUrl, storyboard, notPlayable, action
     }
 
     init(
@@ -1092,7 +1129,9 @@ struct StreamAddonBehaviorHints: Decodable {
         proxyHeaders: StreamAddonProxyHeaders? = nil,
         trickplay: String? = nil,
         trickplayUrl: String? = nil,
-        storyboard: String? = nil
+        storyboard: String? = nil,
+        notPlayable: Bool? = nil,
+        action: Bool? = nil
     ) {
         self.videoSize = videoSize
         self.filename = filename
@@ -1104,6 +1143,8 @@ struct StreamAddonBehaviorHints: Decodable {
         self.trickplay = trickplay
         self.trickplayUrl = trickplayUrl
         self.storyboard = storyboard
+        self.notPlayable = notPlayable
+        self.action = action
     }
 
     init(from decoder: Decoder) throws {
@@ -1152,6 +1193,26 @@ struct StreamAddonBehaviorHints: Decodable {
             self.storyboard = url
         } else {
             self.storyboard = nil
+        }
+
+        if let b = try? container.decodeIfPresent(Bool.self, forKey: .notPlayable) {
+            self.notPlayable = b
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .notPlayable) {
+            self.notPlayable = (i != 0)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: .notPlayable) {
+            self.notPlayable = (s.lowercased() == "true" || s == "1")
+        } else {
+            self.notPlayable = nil
+        }
+
+        if let b = try? container.decodeIfPresent(Bool.self, forKey: .action) {
+            self.action = b
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .action) {
+            self.action = (i != 0)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: .action) {
+            self.action = (s.lowercased() == "true" || s == "1")
+        } else {
+            self.action = nil
         }
     }
 }

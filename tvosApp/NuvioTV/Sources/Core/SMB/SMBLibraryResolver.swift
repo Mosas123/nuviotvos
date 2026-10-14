@@ -124,7 +124,7 @@ enum SMBLibraryResolver {
             .flatMap { $0.score >= minimumScore ? $0.meta : nil }
     }
 
-    /// Title equality/prefix dominates; type match and year proximity refine
+    /// Exact normalized title dominates; type match and year proximity refine
     /// among same-title candidates (a search can return both a movie and a
     /// series with the same name).
     static func score(meta: NuvioMeta, query: QueryKey) -> Int {
@@ -134,8 +134,6 @@ enum SMBLibraryResolver {
         var score: Int
         if metaTitle == queryTitle {
             score = 60
-        } else if metaTitle.hasPrefix(queryTitle) || queryTitle.hasPrefix(metaTitle) {
-            score = 35
         } else {
             return 0
         }

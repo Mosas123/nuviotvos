@@ -377,11 +377,23 @@ enum SimklSyncCache {
     private static let itemCacheKey = "nuvio.tv.simkl.sync.items.v2"
     private static let itemActivityKey = "nuvio.tv.simkl.sync.items.activities.v2"
     private static let historyCacheKey = "nuvio.tv.simkl.sync.history.v2"
-    private static let historyWatermarkKey = "nuvio.tv.simkl.sync.history.watermark"
-    private static let historyActivityKey = "nuvio.tv.simkl.sync.history.activities"
+    private static let historySnapshotKey = "nuvio.tv.simkl.sync.history.snapshot.v3"
     private static let playbackCacheKey = "nuvio.tv.simkl.sync.playback"
-    private static let playbackWatermarkKey = "nuvio.tv.simkl.sync.playback.watermark"
+    private static let playbackSnapshotKey = "nuvio.tv.simkl.sync.playback.snapshot.v3"
+    private static let playbackInvalidatedKey = "nuvio.tv.simkl.sync.playback.invalidated.v3"
     private static let storageDirectoryName = "SimklSyncCache"
+
+    // Split v2 payloads cannot prove that their activity watermark belongs to
+    // the same item list. Start a fresh namespace and bootstrap once.
+    private static let itemSnapshotKey = "nuvio.tv.simkl.sync.items.snapshot.v3"
+    struct ItemSnapshot: Codable {
+        let items: SimklAllItemsResponse
+        let activities: SimklActivitiesResponse?
+    }
+
+    static func itemSnapshot(in store: UserDefaults) -> ItemSnapshot? {
+        decode(ItemSnapshot.self, key: itemSnapshotKey, store: store)
+    }
 
     /// Removes cache blobs earlier builds wrote into preferences.
     ///
@@ -411,7 +423,7 @@ enum SimklSyncCache {
     }
 
     static func items(in store: UserDefaults) -> SimklAllItemsResponse? {
-        decode(SimklAllItemsResponse.self, key: itemCacheKey, store: store)
+        itemSnapshot(in: store)?.items
     }
 
     static func saveItems(
@@ -419,12 +431,12 @@ enum SimklSyncCache {
         activities: SimklActivitiesResponse,
         store: UserDefaults
     ) {
-        encode(items, key: itemCacheKey, store: store)
-        encode(activities, key: itemActivityKey, store: store)
+        encode(ItemSnapshot(items: items, activities: activities), key: itemSnapshotKey, store: store)
     }
 
     static func addLibraryItems(_ libraryItems: [LibraryStoreItem], store: UserDefaults) {
-        var items = items(in: store) ?? SimklAllItemsResponse()
+        let snapshot = itemSnapshot(in: store)
+        var items = snapshot?.items ?? SimklAllItemsResponse()
         let addedAt = iso8601(Date())
         var additions = SimklAllItemsResponse()
 
@@ -447,23 +459,42 @@ enum SimklSyncCache {
         }
 
         items.merge(additions)
-        encode(items, key: itemCacheKey, store: store)
+        encode(ItemSnapshot(items: items, activities: snapshot?.activities), key: itemSnapshotKey, store: store)
     }
 
     static func itemActivities(in store: UserDefaults) -> SimklActivitiesResponse? {
-        decode(SimklActivitiesResponse.self, key: itemActivityKey, store: store)
+        itemSnapshot(in: store)?.activities
+    }
+
+    struct HistorySnapshot: Codable {
+        let records: [SimklHistoryRecord]
+        let watermark: String?
+        let activities: SimklActivitiesResponse?
+    }
+
+    static func historySnapshot(in store: UserDefaults) -> HistorySnapshot? {
+        if let snapshot = decode(HistorySnapshot.self, key: historySnapshotKey, store: store) {
+            return snapshot
+        }
+        // Keep legacy records for watched-state reconciliation, but do not trust
+        // separately saved watermarks or activities. A nil watermark forces a
+        // full reload before the cache can be used for incremental history sync.
+        guard let records = decode([SimklHistoryRecord].self, key: historyCacheKey, store: store) else {
+            return nil
+        }
+        return HistorySnapshot(records: records, watermark: nil, activities: nil)
     }
 
     static func history(in store: UserDefaults) -> [SimklHistoryRecord] {
-        decode([SimklHistoryRecord].self, key: historyCacheKey, store: store) ?? []
+        historySnapshot(in: store)?.records ?? []
     }
 
     static func historyWatermark(in store: UserDefaults) -> String? {
-        store.string(forKey: historyWatermarkKey)
+        historySnapshot(in: store)?.watermark
     }
 
     static func historyActivities(in store: UserDefaults) -> SimklActivitiesResponse? {
-        decode(SimklActivitiesResponse.self, key: historyActivityKey, store: store)
+        historySnapshot(in: store)?.activities
     }
 
     static func saveHistory(
@@ -472,11 +503,8 @@ enum SimklSyncCache {
         activities: SimklActivitiesResponse?,
         store: UserDefaults
     ) {
-        encode(records, key: historyCacheKey, store: store)
-        store.set(watermark, forKey: historyWatermarkKey)
-        if let activities {
-            encode(activities, key: historyActivityKey, store: store)
-        }
+        let snapshot = HistorySnapshot(records: records, watermark: watermark, activities: activities)
+        encode(snapshot, key: historySnapshotKey, store: store)
     }
 
     /// Seasons Simkl currently holds watched episodes in for a title. Used to
@@ -506,12 +534,34 @@ enum SimklSyncCache {
         return false
     }
 
+    struct PlaybackSnapshot: Codable {
+        let playbacks: [SimklPlaybackDTO]
+        let watermark: String?
+    }
+
+    static func playbackSnapshot(in store: UserDefaults) -> PlaybackSnapshot? {
+        if let snapshot = decode(PlaybackSnapshot.self, key: playbackSnapshotKey, store: store) {
+            // Invalidation only makes a snapshot less reusable. Keep it separate
+            // so a failed payload replacement cannot undo a successful scrobble.
+            return PlaybackSnapshot(
+                playbacks: snapshot.playbacks,
+                watermark: store.bool(forKey: playbackInvalidatedKey) ? nil : snapshot.watermark
+            )
+        }
+        guard let playbacks = decode([SimklPlaybackDTO].self, key: playbackCacheKey, store: store) else {
+            return nil
+        }
+        // Legacy records remain available to removePlayback, but the separate
+        // legacy watermark cannot establish that they are a consistent pair.
+        return PlaybackSnapshot(playbacks: playbacks, watermark: nil)
+    }
+
     static func playbacks(in store: UserDefaults) -> [SimklPlaybackDTO]? {
-        decode([SimklPlaybackDTO].self, key: playbackCacheKey, store: store)
+        playbackSnapshot(in: store)?.playbacks
     }
 
     static func playbackWatermark(in store: UserDefaults) -> String? {
-        store.string(forKey: playbackWatermarkKey)
+        playbackSnapshot(in: store)?.watermark
     }
 
     static func savePlaybacks(
@@ -519,8 +569,10 @@ enum SimklSyncCache {
         watermark: String,
         store: UserDefaults
     ) {
-        encode(playbacks, key: playbackCacheKey, store: store)
-        store.set(watermark, forKey: playbackWatermarkKey)
+        let snapshot = PlaybackSnapshot(playbacks: playbacks, watermark: watermark)
+        if encode(snapshot, key: playbackSnapshotKey, store: store) {
+            store.removeObject(forKey: playbackInvalidatedKey)
+        }
     }
 
     /// Forces the next Continue Watching read to re-fetch `sync/playback`.
@@ -532,7 +584,7 @@ enum SimklSyncCache {
     /// session, and the title vanishes as soon as the optimistic local
     /// checkpoint stops masking it.
     static func invalidatePlaybacks(in store: UserDefaults) {
-        store.removeObject(forKey: playbackWatermarkKey)
+        store.set(true, forKey: playbackInvalidatedKey)
     }
 
     static func addPlayback(
@@ -564,11 +616,16 @@ enum SimklSyncCache {
             anime: nil
         )
 
-        var cached = playbacks(in: store) ?? []
+        let snapshot = playbackSnapshot(in: store)
+        var cached = snapshot?.playbacks ?? []
         let newIdentity = playbackIdentity(playback)
         cached.removeAll { playbackIdentity($0) == newIdentity }
         cached.append(playback)
-        encode(cached, key: playbackCacheKey, store: store)
+        encode(
+            PlaybackSnapshot(playbacks: cached, watermark: snapshot?.watermark),
+            key: playbackSnapshotKey,
+            store: store
+        )
     }
 
     private static func playbackIdentity(_ playback: SimklPlaybackDTO) -> String {
@@ -599,28 +656,35 @@ enum SimklSyncCache {
     /// `WatchedStore` moved to files for exactly this reason; this is the same
     /// treatment. Small scalars (watermarks, activity timestamps) stay in
     /// `UserDefaults`, which is what it is for.
-    private static func encode<T: Encodable>(_ value: T, key: String, store: UserDefaults) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
+    @discardableResult
+    private static func encode<T: Encodable>(_ value: T, key: String, store: UserDefaults) -> Bool {
+        guard let data = try? JSONEncoder().encode(value) else { return false }
         guard LargePayloadStore.write(
             data,
-            key: scopedKey(key),
+            key: scopedKey(key, store: store),
             directory: storageDirectoryName
         ) else {
             // Deliberately no preferences fallback. Losing the cache costs one
             // full re-pull on the next sync; writing a payload this size to
             // preferences is the abort this whole path exists to avoid.
-            return
+            return false
         }
         // An older build's copy would otherwise keep counting against the
         // preferences budget forever.
         store.removeObject(forKey: key)
+        return true
     }
 
     /// Profile-scoped: the `UserDefaults` key is shared across profiles and only
-    /// the suite differed, so the filename has to carry the scope instead. Uses
-    /// the same scope Simkl's session helpers already key on.
-    private static func scopedKey(_ key: String) -> String {
-        "\(key).\(SimklRuntimeSession.profileScope())"
+    /// the suite differed, so the filename has to carry the scope instead.
+    /// Use the captured store's identity, not whichever profile is active when
+    /// a suspended request resumes. Unmarked stores use the stable legacy
+    /// default namespace rather than borrowing another profile's identity.
+    private static func scopedKey(_ key: String, store: UserDefaults) -> String {
+        let storeProfileID = store.string(forKey: "nuvio.tv.profile.settings.profileID")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let scope = storeProfileID.flatMap { $0.isEmpty ? nil : $0 } ?? "default"
+        return "\(key).\(scope)"
     }
 
     private static func decode<T: Decodable>(
@@ -629,7 +693,7 @@ enum SimklSyncCache {
         store: UserDefaults
     ) -> T? {
         if let data = LargePayloadStore.read(
-            key: scopedKey(key),
+            key: scopedKey(key, store: store),
             directory: storageDirectoryName
         ) {
             return try? JSONDecoder().decode(type, from: data)
@@ -641,11 +705,61 @@ enum SimklSyncCache {
     }
 }
 
-private struct SimklAuthorizedClient {
+/// Copies of one client share only tokens adopted by that client's refreshes.
+/// All mutable state is accessed through synchronous lock helpers.
+final class SimklAuthorizationOwner: @unchecked Sendable {
+    private let lock = NSLock()
+    private var accessToken: String
+    private var pendingRefresh: (id: UUID, token: String, task: Task<String?, Never>)?
+
+    init(token: String) { accessToken = token }
+
+    var token: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return accessToken
+    }
+
+    @discardableResult
+    func adopt(_ token: String, replacing previous: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard accessToken == previous else { return false }
+        accessToken = token
+        return true
+    }
+
+    func refresh(using operation: @escaping () async -> String?) async -> String? {
+        let (id, task) = refreshTask(using: operation)
+        let value = await task.value
+        finishRefresh(id)
+        return value
+    }
+
+    private func refreshTask(using operation: @escaping () async -> String?) -> (UUID, Task<String?, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let pendingRefresh, pendingRefresh.token == accessToken {
+            return (pendingRefresh.id, pendingRefresh.task)
+        }
+        let id = UUID()
+        let task = Task { await operation() }
+        pendingRefresh = (id, accessToken, task)
+        return (id, task)
+    }
+
+    private func finishRefresh(_ id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        if pendingRefresh?.id == id { pendingRefresh = nil }
+    }
+}
+
+struct SimklAuthorizedClient {
     let client: SimklAPIClient
     let store: UserDefaults
     let clientID: String
-    let token: String
+    private let owner: SimklAuthorizationOwner
     let tokenStorage: SimklTokenStorage
     let profileScope: String
 
@@ -665,24 +779,32 @@ private struct SimklAuthorizedClient {
         self.client = client
         self.store = store
         self.clientID = SimklConfig.clientID(in: store)
-        self.token = token
+        self.owner = SimklAuthorizationOwner(token: token)
         self.tokenStorage = tokenStorage
         self.profileScope = resolvedProfileScope
     }
 
-    private func tryRefreshToken() async -> String? {
-        let authService = SimklAuthService(
-            client: client,
-            store: store,
-            profileScope: profileScope,
-            tokenStorage: tokenStorage
-        )
-        guard await authService.refreshTokenIfNeeded(force: true) else { return nil }
-        return SimklRuntimeSession.authenticatedState(
-            store: store,
-            tokenStorage: tokenStorage,
-            profileScope: profileScope
-        )?.accessToken
+    private func tryRefreshToken(rejectedToken: String) async -> String? {
+        guard isCurrentAuthorization() else { return nil }
+        if owner.token != rejectedToken { return owner.token }
+        let refreshed = await owner.refresh {
+            guard self.isCurrentAuthorization() else { return nil }
+            let previous = self.owner.token
+            if previous != rejectedToken { return previous }
+            let authService = SimklAuthService(
+                client: self.client, store: self.store,
+                profileScope: self.profileScope, tokenStorage: self.tokenStorage
+            )
+            let succeeded = await authService.refreshTokenIfNeeded(
+                force: true,
+                shouldCommit: { self.owner.token == previous && self.isCurrentAuthorization() },
+                didRefreshToken: { _ = self.owner.adopt($0, replacing: previous) }
+            )
+            guard succeeded, self.isCurrentAuthorization() else { return nil }
+            return self.owner.token
+        }
+        guard isCurrentAuthorization() else { return nil }
+        return refreshed
     }
 
     func get<T: Decodable>(
@@ -690,14 +812,17 @@ private struct SimklAuthorizedClient {
         path: String,
         query: [URLQueryItem] = []
     ) async throws -> T {
+        let requestToken = owner.token
+        var rejectedToken = requestToken
         let result: SimklHTTPResult<T> = try await client.get(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query
         )
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                rejectedToken = refreshedToken
                 let retry: SimklHTTPResult<T> = try await client.get(
                     path: path,
                     clientID: clientID,
@@ -708,7 +833,7 @@ private struct SimklAuthorizedClient {
                     return try retry.valueOrThrow()
                 }
             }
-            clearAuthIfCurrent()
+            clearAuthIfCurrent(rejectedToken: rejectedToken)
         }
         return try result.valueOrThrow()
     }
@@ -718,24 +843,27 @@ private struct SimklAuthorizedClient {
         path: String,
         query: [URLQueryItem] = []
     ) async -> T? {
+        let requestToken = owner.token
         guard let result: SimklHTTPResult<T> = try? await client.get(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query
         ) else { return nil }
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
-                if let retry: SimklHTTPResult<T> = try? await client.get(
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                guard let retry: SimklHTTPResult<T> = try? await client.get(
                     path: path,
                     clientID: clientID,
                     accessToken: refreshedToken,
                     queryItems: query
-                ), (200..<300).contains(retry.statusCode) {
-                    return retry.value
+                ) else { return nil }
+                if retry.statusCode == 401 {
+                    clearAuthIfCurrent(rejectedToken: refreshedToken)
                 }
+                return (200..<300).contains(retry.statusCode) ? retry.value : nil
             }
-            clearAuthIfCurrent()
+            clearAuthIfCurrent(rejectedToken: requestToken)
         }
         guard (200..<300).contains(result.statusCode) else { return nil }
         return result.value
@@ -750,14 +878,17 @@ private struct SimklAuthorizedClient {
     }
 
     func delete(path: String, query: [URLQueryItem] = []) async throws -> Int {
+        let requestToken = owner.token
+        var rejectedToken = requestToken
         let result = try await client.delete(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query
         )
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                rejectedToken = refreshedToken
                 let retry = try await client.delete(
                     path: path,
                     clientID: clientID,
@@ -768,7 +899,7 @@ private struct SimklAuthorizedClient {
                     return retry.statusCode
                 }
             }
-            clearAuthIfCurrent()
+            clearAuthIfCurrent(rejectedToken: rejectedToken)
         }
         return result.statusCode
     }
@@ -781,15 +912,18 @@ private struct SimklAuthorizedClient {
         query: [URLQueryItem] = [],
         body: B
     ) async throws -> (status: Int, data: Data) {
+        let requestToken = owner.token
+        var rejectedToken = requestToken
         let result = try await client.post(
             path: path,
             clientID: clientID,
-            accessToken: token,
+            accessToken: requestToken,
             queryItems: query,
             body: body
         )
         if result.statusCode == 401 {
-            if let refreshedToken = await tryRefreshToken() {
+            if let refreshedToken = await tryRefreshToken(rejectedToken: requestToken) {
+                rejectedToken = refreshedToken
                 let retry = try await client.post(
                     path: path,
                     clientID: clientID,
@@ -801,7 +935,7 @@ private struct SimklAuthorizedClient {
                     return (retry.statusCode, retry.rawData)
                 }
             }
-            clearAuthIfCurrent()
+            clearAuthIfCurrent(rejectedToken: rejectedToken)
         }
         return (result.statusCode, result.rawData)
     }
@@ -811,11 +945,11 @@ private struct SimklAuthorizedClient {
               let state = SimklRuntimeSession.authenticatedState(
                   store: store, tokenStorage: tokenStorage, profileScope: profileScope
               ) else { return false }
-        return state.accessToken == token && state.credentialClientID == clientID
+        return state.accessToken == owner.token && state.credentialClientID == clientID
     }
 
-    private func clearAuthIfCurrent() {
-        guard isCurrentAuthorization() else { return }
+    private func clearAuthIfCurrent(rejectedToken: String) {
+        guard owner.token == rejectedToken, isCurrentAuthorization() else { return }
         SimklAuthStore.clearAuth(
             profileScope: profileScope, store: store, tokenStorage: tokenStorage
         )
@@ -848,13 +982,14 @@ private enum SimklSyncLoader {
         guard service.isCurrentAuthorization(),
               TraktSettingsStore.librarySourceMode(in: store) == sourceAtStart else { return nil }
 
-        let cached = SimklSyncCache.items(in: store)
-        let previousActivities = SimklSyncCache.itemActivities(in: store)
+        let snapshot = SimklSyncCache.itemSnapshot(in: store)
+        let cached = snapshot?.items
+        let previousActivities = snapshot?.activities
         if !force, cached != nil, previousActivities?.all == activities.all {
             return cached
         }
 
-        let shouldBootstrap = cached == nil || activities.removalsChanged(comparedWith: previousActivities)
+        let shouldBootstrap = cached == nil || previousActivities == nil || activities.removalsChanged(comparedWith: previousActivities)
         var result = cached ?? SimklAllItemsResponse()
 
         if shouldBootstrap {
@@ -917,9 +1052,10 @@ struct SimklHistoryService {
         guard service.isCurrentAuthorization(),
               TraktSettingsStore.watchProgressSource(in: store) == sourceAtStart else { return false }
 
-        let previousRecords = SimklSyncCache.history(in: store)
-        let oldWatermark = SimklSyncCache.historyWatermark(in: store)
-        let previousActivities = SimklSyncCache.historyActivities(in: store)
+        let previousSnapshot = SimklSyncCache.historySnapshot(in: store)
+        let previousRecords = previousSnapshot?.records ?? []
+        let oldWatermark = previousSnapshot?.watermark
+        let previousActivities = previousSnapshot?.activities
         if !force, !previousRecords.isEmpty, oldWatermark == activities.all {
             return true
         }
@@ -2010,10 +2146,11 @@ struct SimklProgressService {
 
         let watermark = activities.playbackWatermark
         let playbacks: [SimklPlaybackDTO]
+        let playbackSnapshot = SimklSyncCache.playbackSnapshot(in: store)
         if !watermark.isEmpty,
-           SimklSyncCache.playbackWatermark(in: store) == watermark,
-           let cached = SimklSyncCache.playbacks(in: store) {
-            playbacks = cached
+           let playbackSnapshot,
+           playbackSnapshot.watermark == watermark {
+            playbacks = playbackSnapshot.playbacks
         } else {
             let fetched = await service.getOptional(
                 [SimklPlaybackDTO].self,
@@ -2027,8 +2164,9 @@ struct SimklProgressService {
         // display-only suggestions Nuvio Sync builds from the provider's
         // watched episode history. Refresh that history before reading the
         // cache so a first Home load is not one refresh behind.
-        if SimklSyncCache.historyWatermark(in: store) != activities.all
-            || SimklSyncCache.history(in: store).isEmpty {
+        let historySnapshot = SimklSyncCache.historySnapshot(in: store)
+        if historySnapshot?.watermark != activities.all
+            || (historySnapshot?.records.isEmpty ?? true) {
             _ = await SimklHistoryService.syncWatchedHistory(
                 store: store,
                 client: client,

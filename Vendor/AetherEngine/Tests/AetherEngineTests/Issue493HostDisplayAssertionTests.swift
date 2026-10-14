@@ -204,13 +204,8 @@ struct Issue493HostDisplayAssertionTests {
         + "p7convert=\(r.convertP7ToProfile81) variant=\(r.dvVariant)"
     }
 
-    /// 6.72.0 gave the non-DV branch its `dvcC` back and 6.73.0 its `SUPPLEMENTAL-CODECS`, which left the
-    /// three grades a Dolby Vision display used to be served differently identical on both branches. So
-    /// the assertion no longer decides a byte of the served stream for them, only the published
-    /// `videoFormat`, the tvOS criteria request, and the HDR readiness that rides along. Measured the
-    /// same day against the matched Dolby P5 / P8.1 / P8.4 grades on macOS: master, media playlist,
-    /// init.mp4 and seg0.mp4 came back md5-identical with and without the claim.
-    /// P5 is pure Dolby Vision (no HDR10 base layer), so its packaging is identical on both branches.
+    /// P5 has the same packaging regardless of the display claim. P7 converts to P8.1 on both paths,
+    /// while the established non-DV supplemental-codecs guard remains display-dependent.
     @Test("AE#493: the assertion does not move the packaging of P5",
           arguments: [(UInt8(5), UInt8(0))])
     func assertionLeavesTheHEVCPackagingAlone(grade: (profile: UInt8, compat: UInt8)) throws {
@@ -220,18 +215,19 @@ struct Issue493HostDisplayAssertionTests {
         #expect(Self.packaging(asserted) == Self.packaging(control))
     }
 
-    /// The grades where it does, so non-DV displays (HDR10/HLG only) are not sent Dolby Vision supplemental
-    /// codecs that cause AVPlayer master-manifest rejection (-11868):
-    /// - P7 needs the per-packet RPU conversion to 8.1 and its supplemental.
-    /// - P8.1 and P8.4 gate their SUPPLEMENTAL-CODECS on dvDisplay (avoiding -11868 on HDR10-only displays).
-    /// - AV1 DV record is read only on a display that takes it.
-    @Test("AE#493: P7, P8.1, P8.4 and AV1 Dolby Vision are packaged conditionally by the claim")
+    /// P7 converts on both routes, but its supplemental entry and those of P8.1/P8.4 remain
+    /// gated on a Dolby Vision display. AV1 also publishes its supplemental only on that display.
+    @Test("AE#493: converted P7 and other Dolby Vision supplemental entries remain display-gated")
     func assertionStillMovesTheGatedGrades() throws {
         let p7Asserted = try Self.route(profile: 7, compat: 0, dvDisplay: true)
         let p7Control = try Self.route(profile: 7, compat: 0, dvDisplay: false)
         #expect(Self.packaging(p7Asserted) != Self.packaging(p7Control))
         #expect(p7Asserted.convertP7ToProfile81)
-        #expect(p7Control.convertP7ToProfile81 == false)
+        #expect(p7Control.convertP7ToProfile81)
+        #expect(p7Asserted.doviConfig == .rewriteToProfile81)
+        #expect(p7Control.doviConfig == .rewriteToProfile81)
+        #expect(p7Asserted.supplementalCodecs == "dvh1.08.06/db1p")
+        #expect(p7Control.supplementalCodecs == nil)
 
         let p81Asserted = try Self.route(profile: 8, compat: 1, trc: AVCOL_TRC_SMPTE2084, dvDisplay: true)
         let p81Control = try Self.route(profile: 8, compat: 1, trc: AVCOL_TRC_SMPTE2084, dvDisplay: false)
