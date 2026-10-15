@@ -2025,7 +2025,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         // names (ST 2084 / ARIB B-67) for the same transfer functions.
         let isHLG = gamma.contains("hlg") || gamma.contains("b67") || gamma.contains("arib")
         let isPQ = gamma.contains("pq") || gamma.contains("2084")
-        let isHDR = isDolbyVision || isPQ || isHLG || primaries.contains("2020")
+        // BT.2020 describes gamut, not HDR transfer. Require PQ, HLG or DV
+        // evidence before requesting HDR output for wide-gamut SDR content.
+        let isHDR = isDolbyVision || isPQ || isHLG
         let frameRateMode = ProfileSettings.current.string(forKey: SettingsKey.frameRateMatching) ?? "Always"
         let shouldMatchFrameRate = frameRateMode.caseInsensitiveCompare("Off") != .orderedSame
         guard isHDR || shouldMatchFrameRate else {
