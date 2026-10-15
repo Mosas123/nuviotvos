@@ -812,7 +812,7 @@ final class TraktAuthService {
     }
 
     func pollDeviceToken() async -> TraktPollResult {
-        guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else {
+        guard !Task.isCancelled, ProfileSettings.isActiveStore(store), hasRequiredCredentials() else {
             return .failed("Enter your Trakt Client ID first.")
         }
         let state = currentState()
@@ -830,50 +830,56 @@ final class TraktAuthService {
                 path: "oauth/device/token",
                 body: TraktDeviceTokenRequest(
                     code: deviceCode,
-                    clientID: clientID,
+                    clientID: capturedClientID,
                     clientSecret: clientSecretOrNil
                 ),
                 authorized: false
             )
-            if let token = response.value, (200..<300).contains(response.statusCode) {
-                guard ProfileSettings.isActiveStore(store),
+            // Cancel is handled on the main actor. Keep the ownership check and
+            // every response mutation together so it cannot interleave here.
+            let result: TraktPollResult = await MainActor.run {
+                guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
                       ProfileSettings.activeProfileID == capturedProfileID,
                       currentState().deviceCode == capturedDeviceCode,
                       clientID == capturedClientID else {
                     return .failed("The active profile or Trakt account changed during login.")
                 }
-                TraktAuthStore.saveToken(
-                    token,
-                    clientID: capturedClientID,
-                    store: store,
-                    isNewLogin: true
-                )
-                TraktAuthStore.clearDeviceFlow(store: store)
-                // Same reasoning as the Simkl connect path: point watch progress
-                // at the tracker the user just linked, unless they have already
-                // chosen a source by hand.
-                TraktSettingsStore.selectWatchProgressSourceOnConnect(.trakt, in: store)
+                if let token = response.value, (200..<300).contains(response.statusCode) {
+                    TraktAuthStore.saveToken(
+                        token,
+                        clientID: capturedClientID,
+                        store: store,
+                        isNewLogin: true
+                    )
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    // Preserve the selected-source policy on a valid login.
+                    TraktSettingsStore.selectWatchProgressSourceOnConnect(.trakt, in: store)
+                    return .approved(nil)
+                }
+                switch response.statusCode {
+                case 400: return .pending
+                case 409:
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    return .alreadyUsed
+                case 410:
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    return .expired
+                case 418:
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    return .denied
+                case 429:
+                    let next = min((currentState().pollInterval ?? 5) + 5, 60)
+                    TraktAuthStore.updatePollInterval(next, store: store)
+                    return .slowDown(next)
+                default:
+                    return .failed("Trakt token polling failed (\(response.statusCode)).")
+                }
+            }
+            if case .approved = result {
                 let username = await fetchUserSettings()
                 return .approved(username)
             }
-            switch response.statusCode {
-            case 400: return .pending
-            case 409:
-                TraktAuthStore.clearDeviceFlow(store: store)
-                return .alreadyUsed
-            case 410:
-                TraktAuthStore.clearDeviceFlow(store: store)
-                return .expired
-            case 418:
-                TraktAuthStore.clearDeviceFlow(store: store)
-                return .denied
-            case 429:
-                let next = min((currentState().pollInterval ?? 5) + 5, 60)
-                TraktAuthStore.updatePollInterval(next, store: store)
-                return .slowDown(next)
-            default:
-                return .failed("Trakt token polling failed (\(response.statusCode)).")
-            }
+            return result
         } catch {
             return .failed("Network error. Retrying is safe.")
         }
@@ -4116,7 +4122,9 @@ final class TraktSettingsViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
                 if Task.isCancelled { return }
 
-                switch await self.service.pollDeviceToken() {
+                let result = await self.service.pollDeviceToken()
+                guard !Task.isCancelled, ProfileSettings.isActiveStore(self.store) else { return }
+                switch result {
                 case .pending:
                     self.statusMessage = "Waiting for Trakt approval..."
                 case .alreadyUsed:
