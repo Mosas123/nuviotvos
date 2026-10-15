@@ -964,6 +964,7 @@ struct DetailsScreen: View {
 actor YouTubeTrailerResolver {
     static let shared = YouTubeTrailerResolver()
     private var trailerIdCache: [String: String] = [:]
+    private var trailerIdFailureDates: [String: Date] = [:]
     private var trailerioCache: [String: TrailerPlaybackSource] = [:]
 
     private struct TrailerioResponse: Decodable {
@@ -1101,7 +1102,13 @@ actor YouTubeTrailerResolver {
     func preferredTrailerYouTubeId(for meta: NuvioMeta) async -> String? {
         let cacheKey = "\(meta.id)|\(meta.tmdbId ?? 0)"
         if let cached = trailerIdCache[cacheKey] {
-            return cached.isEmpty ? nil : cached
+            if !cached.isEmpty { return cached }
+            if let failedAt = trailerIdFailureDates[cacheKey],
+               Date().timeIntervalSince(failedAt) < 300 {
+                return nil
+            }
+            trailerIdCache.removeValue(forKey: cacheKey)
+            trailerIdFailureDates.removeValue(forKey: cacheKey)
         }
 
         var resolvedId: String? = nil
@@ -1122,7 +1129,17 @@ actor YouTubeTrailerResolver {
             resolvedId = ytId
         }
 
+        guard !Task.isCancelled else { return nil }
+        // An older failed lookup must not replace a concurrent success.
+        if resolvedId == nil, let cached = trailerIdCache[cacheKey], !cached.isEmpty {
+            return cached
+        }
         trailerIdCache[cacheKey] = resolvedId ?? ""
+        if resolvedId == nil {
+            trailerIdFailureDates[cacheKey] = Date()
+        } else {
+            trailerIdFailureDates.removeValue(forKey: cacheKey)
+        }
         return resolvedId
     }
     private struct Client {
