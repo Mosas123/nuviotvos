@@ -614,6 +614,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         mpv = mpv_create()
         guard mpv != nil else {
             print("[MPV] Failed to create mpv instance")
+            isPlayerLoading = false
+            setPlaybackError("MPV could not create a playback instance.")
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
             memoryWatchdog.record(event: "mpv_create_failed")
 #endif
@@ -717,7 +719,23 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         checkError(mpv_set_option_string(mpv, "target-prim", "auto"))
         checkError(mpv_set_option_string(mpv, "target-trc", "auto"))
 
-        checkError(mpv_initialize(mpv))
+        let initializeStatus = mpv_initialize(mpv)
+        guard initializeStatus >= 0 else {
+            let message = String(cString: mpv_error_string(initializeStatus))
+            print("[MPV] initialize failed: \(message)")
+            let failedContext = mpv
+            mpv = nil
+            if let failedContext {
+                // No observers or wakeup callback have been registered yet.
+                eventQueue.async { mpv_destroy(failedContext) }
+            }
+            isPlayerLoading = false
+            setPlaybackError("MPV could not start: \(message)")
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+            memoryWatchdog.record(event: "mpv_initialize_failed")
+#endif
+            return
+        }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryWatchdog.record(event: "mpv_initialized")
 #endif
