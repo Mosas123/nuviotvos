@@ -102,6 +102,7 @@ final class NuvioSyncManager: ObservableObject {
     private var pushTask: Task<Void, Never>?
     private var pushTaskDeadline: Date?
     private var homeCatalogPushTask: Task<Void, Never>?
+    private var profileEditSyncEpoch: UInt = 0
     private var profileSelectionRefreshTask: Task<Void, Never>?
     var completedInitialPullKeys: Set<String> = []
     /// When each account+profile last finished a pull, so a screen re-entry can
@@ -363,6 +364,7 @@ final class NuvioSyncManager: ObservableObject {
             // starts the missing pull without cancelling any valid same-user work.
             schedulePull(force: !isSameAccount)
         case .signedOut:
+            profileEditSyncEpoch &+= 1
             Self.accountSyncDiagnostic = "signed out"
             ContinueWatchingBuilder.cancelScheduledRebuild()
             pullGeneration &+= 1
@@ -571,16 +573,24 @@ final class NuvioSyncManager: ObservableObject {
             return
         }
 
+        let editEpoch = profileEditSyncEpoch
         Task { @MainActor [weak self] in
             guard let self,
                   let authManager = self.authManager,
                   let session = await authManager.validSessionForSync(),
-                  authManager.isAuthenticated else { return }
+                  authManager.isAuthenticated,
+                  self.profileEditSyncEpoch == editEpoch,
+                  self.currentSyncKey() == syncKey else { return }
             do {
-                try self.ensureStillSyncing()
+                try self.ensureStillSyncing(accountId: session.userId)
                 try await self.client.pushProfiles(session: session, profiles: profiles)
-                try self.ensureStillSyncing()
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
+                try self.ensureStillSyncing(accountId: session.userId)
                 let remoteProfiles = try await self.client.pullProfiles(session: session)
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
+                try self.ensureStillSyncing(accountId: session.userId)
                 guard !remoteProfiles.isEmpty else {
                     throw AuthError(message: "The server did not return the saved profiles.")
                 }
@@ -608,9 +618,13 @@ final class NuvioSyncManager: ObservableObject {
                 self.profileSyncError = nil
                 print("Nuvio sync saved and confirmed \(remoteProfiles.count) profile(s).")
             } catch is CancellationError {
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
                 self.isApplyingRemoteProfiles = false
                 self.isApplyingRemote = false
             } catch {
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
                 self.isApplyingRemoteProfiles = false
                 self.isApplyingRemote = false
                 self.profileSyncError = "Couldn't save profiles: \(error.localizedDescription)"
