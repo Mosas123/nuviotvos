@@ -35,6 +35,7 @@ class DetailsViewModel: ObservableObject {
     /// This is intentionally separate from the content id: the same title can
     /// be refreshed while its previous request is still in flight.
     private var detailsRequestGeneration: UInt64 = 0
+    private var watchlistMutationGeneration: UInt64 = 0
     private var observedRequestKey: String?
     private var lastAppliedStreamsRequestKey: String?
     private var lastAppliedStreamsRevision: UInt64?
@@ -567,6 +568,7 @@ class DetailsViewModel: ObservableObject {
     func toggleWatchlist() {
         guard let meta = uiState.meta else { return }
         if TraktSettingsStore.librarySourceMode == .local {
+            watchlistMutationGeneration &+= 1
             uiState.isInWatchlist = LibraryStore.toggle(meta: meta)
             return
         }
@@ -578,14 +580,21 @@ class DetailsViewModel: ObservableObject {
         // Keep Details responsive, then let LibraryViewModel refresh the
         // Trakt-backed list from the notification posted after the mutation.
         let desiredMembership = !uiState.isInWatchlist
+        watchlistMutationGeneration &+= 1
+        let mutationGeneration = watchlistMutationGeneration
+        let requestGeneration = detailsRequestGeneration
         uiState.isInWatchlist = desiredMembership
         Task {
             let succeeded = await SelectedLibraryService.setWatchlist(
                 meta,
                 isInWatchlist: desiredMembership
             )
-            guard !Task.isCancelled, uiState.meta?.id == meta.id else { return }
-            if !succeeded {
+            guard !Task.isCancelled,
+                  watchlistMutationGeneration == mutationGeneration,
+                  detailsRequestGeneration == requestGeneration,
+                  uiState.meta?.id == meta.id,
+                  uiState.meta?.type == meta.type else { return }
+            if !succeeded, uiState.isInWatchlist == desiredMembership {
                 uiState.isInWatchlist = !desiredMembership
             }
         }
