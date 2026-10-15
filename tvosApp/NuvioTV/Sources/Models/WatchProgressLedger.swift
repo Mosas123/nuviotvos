@@ -460,8 +460,34 @@ enum WatchProgressLedger {
         return byKey
     }
 
+    /// Acknowledge only the exact snapshots sent by a completed upload. Compare
+    /// and persist under the same lock so a concurrent save stays pending.
+    static func markPushed(records pushedRecords: [WatchProgressRecord], profileId: String? = nil) {
+        guard !pushedRecords.isEmpty else { return }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let pushedByKey = Dictionary(
+            pushedRecords.map { ($0.progressKey, $0) },
+            uniquingKeysWith: { _, last in last }
+        )
+        var changed = false
+        let updated = recordsLocked(profileId: profileId).map { current -> WatchProgressRecord in
+            guard current.isPendingPush,
+                  let pushed = pushedByKey[current.progressKey],
+                  current == pushed else { return current }
+            changed = true
+            var copy = current
+            copy.isPendingPush = false
+            return copy
+        }
+        guard changed else { return }
+        _ = persistLocked(updated, profileId: profileId)
+    }
+
     /// Clears the pending flag after a push confirms those rows reached the
     /// server, so a later pull is allowed to update them again.
+    /// Legacy key-only helper: network acknowledgements must use the records
+    /// overload so edits made during an upload cannot be acknowledged by key.
     static func markPushed(keys: [String], profileId: String? = nil) {
         guard !keys.isEmpty else { return }
         cacheLock.lock()

@@ -3591,6 +3591,9 @@ fileprivate final class NuvioAPIClient {
     /// now happen only where the user actually removed something, via
     /// `deleteWatchProgress`.
     func pushWatchProgress(session: AuthSession, remoteProfileId: Int, profileId: String? = nil) async throws {
+        // Resolve the default scope before awaiting the upload. An empty ID
+        // explicitly selects the unscoped ledger even if a profile loads later.
+        let targetProfileId = profileId ?? WatchProgressLedger.activeProfileId ?? ""
         // Episode entries must use the phone's row conventions — video_id
         // "id:s:e" and progress_key "id_s{s}e{e}" — or each platform upserts
         // its own parallel row for the same episode and they fight over
@@ -3598,7 +3601,7 @@ fileprivate final class NuvioAPIClient {
         // Only rows this device changed. Everything else came from the server,
         // which already has it — echoing the whole ledger back would put a
         // few hundred kilobytes on the wire every sync for no benefit.
-        let records = WatchProgressLedger.records(profileId: profileId).filter(\.isPendingPush)
+        let records = WatchProgressLedger.records(profileId: targetProfileId).filter(\.isPendingPush)
         let payload = records.map { record -> [String: Any] in
             var entry: [String: Any] = [
                 "content_id": record.contentId,
@@ -3629,7 +3632,7 @@ fileprivate final class NuvioAPIClient {
             ]
         )
         print("[NuvioSync] pushWatchProgress: successfully pushed \(payload.count) records")
-        WatchProgressLedger.markPushed(keys: records.map(\.progressKey), profileId: profileId)
+        WatchProgressLedger.markPushed(records: records, profileId: targetProfileId)
     }
 
     /// Retires specific rows the user removed on this device.
