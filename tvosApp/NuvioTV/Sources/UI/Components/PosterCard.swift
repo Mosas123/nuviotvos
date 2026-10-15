@@ -361,9 +361,9 @@ struct PosterCard: View {
                 maximumWidth: artworkDecodeWidth,
                 preloadMaximumWidth: landscapeArtworkDecodeWidth,
                 minimumSwapDelay: 0,
-                onPreloadFinished: {
+                onPreloadFinished: { succeeded in
                     #if os(tvOS)
-                    landscapeArtworkPrepared = true
+                    landscapeArtworkPrepared = succeeded
                     #endif
                 }
             ) {
@@ -1357,7 +1357,7 @@ struct PosterGridCard: View {
                 height: height,
                 maximumWidth: width,
                 minimumSwapDelay: 0,
-                onPreloadFinished: {}
+                onPreloadFinished: { _ in }
             ) {
                 placeholder
             }
@@ -1730,7 +1730,7 @@ struct CachedPosterArtwork<Placeholder: View>: View {
     var maximumWidth: CGFloat? = nil
     var preloadMaximumWidth: CGFloat? = nil
     var minimumSwapDelay: TimeInterval = 0
-    var onPreloadFinished: () -> Void = {}
+    var onPreloadFinished: (Bool) -> Void = { _ in }
     @ViewBuilder let placeholder: Placeholder
 
     init(
@@ -1741,7 +1741,7 @@ struct CachedPosterArtwork<Placeholder: View>: View {
         maximumWidth: CGFloat? = nil,
         preloadMaximumWidth: CGFloat? = nil,
         minimumSwapDelay: TimeInterval = 0,
-        onPreloadFinished: @escaping () -> Void = {},
+        onPreloadFinished: @escaping (Bool) -> Void = { _ in },
         @ViewBuilder placeholder: () -> Placeholder
     ) {
         self.urlString = urlString
@@ -1886,7 +1886,8 @@ struct CachedPosterArtwork<Placeholder: View>: View {
 
     @MainActor
     private func preload() async {
-        guard let preloadURLString,
+        guard !Task.isCancelled,
+              let preloadURLString,
               let url = URL(string: preloadURLString) else {
             return
         }
@@ -1899,14 +1900,14 @@ struct CachedPosterArtwork<Placeholder: View>: View {
         if state.loadedKey == key, let image = state.image {
             state.preloadedImage = image
             state.preloadedKey = key
-            onPreloadFinished()
+            onPreloadFinished(true)
             TVHomeDebugTrace.log(
                 "art.preload.end source=loaded ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
             )
             return
         }
-        if state.preloadedKey == key {
-            onPreloadFinished()
+        if state.preloadedKey == key, state.preloadedImage != nil {
+            onPreloadFinished(true)
             TVHomeDebugTrace.log(
                 "art.preload.end source=preloaded ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
             )
@@ -1917,12 +1918,12 @@ struct CachedPosterArtwork<Placeholder: View>: View {
             for: url,
             maxPixelSize: preloadMaxPixelSize
         )
+        guard !Task.isCancelled, key == preloadCacheKey else { return }
         if let cached {
-            guard !Task.isCancelled, key == preloadCacheKey else { return }
             state.preloadedImage = cached
             state.preloadedKey = key
         }
-        onPreloadFinished()
+        onPreloadFinished(cached != nil)
         TVHomeDebugTrace.log(
             "art.preload.end source=cache hit=\(cached != nil) "
                 + "ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
