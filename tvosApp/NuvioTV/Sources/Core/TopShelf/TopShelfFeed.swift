@@ -126,6 +126,9 @@ public enum TopShelfFeedStore {
             #if canImport(UIKit)
             await cacheArtwork(for: decoratedEntries)
             #endif
+            if let container = feedFileURL?.deletingLastPathComponent() {
+                TopShelfArtworkPruner.prune(in: container)
+            }
             notifyTopShelfContentChanged()
         }
     }
@@ -145,7 +148,9 @@ public enum TopShelfFeedStore {
         guard let url = feedFileURL else { return }
         let feed = TopShelfFeed(entries: entries)
         guard let data = try? JSONEncoder().encode(feed) else { return }
-        try? data.write(to: url, options: .atomic)
+        TopShelfArtworkPruner.withFeedLock {
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     private static func artworkFileName(for entry: TopShelfEntry) -> String {
@@ -277,5 +282,44 @@ public enum TopShelfFeedStore {
             return nil
         }
         return feed
+    }
+}
+
+/// Removes unreferenced generated artwork, preserving the persisted feed.
+enum TopShelfArtworkPruner {
+    private static let feedLock = NSLock()
+
+    // Feed replacement and cleanup must agree on the referenced filenames.
+    static func withFeedLock(_ operation: () -> Void) {
+        feedLock.lock()
+        defer { feedLock.unlock() }
+        operation()
+    }
+
+    static func prune(in container: URL) {
+        withFeedLock {
+            let feedURL = container.appendingPathComponent("feed.json")
+            guard let data = try? Data(contentsOf: feedURL),
+                  let feed = try? JSONDecoder().decode(TopShelfFeed.self, from: data) else { return }
+            let keep = Set(feed.entries.compactMap(\.artworkFileName))
+            guard let files = try? FileManager.default.contentsOfDirectory(
+                at: container,
+                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+            ) else { return }
+            for file in files {
+                let name = file.lastPathComponent
+                guard isGeneratedArtworkName(name), !keep.contains(name),
+                      let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                      values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+    }
+
+    private static func isGeneratedArtworkName(_ name: String) -> Bool {
+        guard name.hasPrefix("top-shelf-"), name.hasSuffix(".jpg") else { return false }
+        let hash = name.dropFirst("top-shelf-".count).dropLast(".jpg".count)
+        return (1...16).contains(hash.count)
+            && hash.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
 }
