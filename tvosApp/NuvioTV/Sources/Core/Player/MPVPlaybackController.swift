@@ -2047,8 +2047,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard width > 0, height > 0 else { return .retry }
 
         var fps = getDouble("container-fps")
-        if fps <= 0 { fps = getDouble("estimated-vf-fps") }
-        if fps <= 0 { fps = 23.976 }
+        if !fps.isFinite || fps <= 0 { fps = getDouble("estimated-vf-fps") }
+        // FPS may arrive after the first video parameters. Keep the criteria
+        // unapplied so the existing probe can retry with a real cadence.
+        guard fps.isFinite, fps > 0 else { return .retry }
 
         // `video-format` is the decoded pixel format, not the encoded stream
         // codec. Use the selected track so AV1 HDR is not described as HEVC.
