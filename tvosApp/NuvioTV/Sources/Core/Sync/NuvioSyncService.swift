@@ -260,7 +260,10 @@ final class NuvioSyncManager: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             let raw = notification.object as? [[String: Any]] ?? []
-            Task { @MainActor in self?.pushCollectionsEdit(raw) }
+            guard let profileId = notification.userInfo?[CollectionsStore.editedProfileIdUserInfoKey] as? String else { return }
+            Task { @MainActor in
+                self?.pushCollectionsEdit(raw, originatingProfileId: profileId)
+            }
         })
 
         // `AuthManager` restores its persisted session synchronously in init.
@@ -1664,11 +1667,15 @@ final class NuvioSyncManager: ObservableObject {
     /// wipe collections that only exist on Android (created after the last
     /// full pull, or never decoded locally). Intentional deletes of ids that
     /// were present in the last pull still go through.
-    private func pushCollectionsEdit(_ raw: [[String: Any]]) {
+    private func pushCollectionsEdit(_ raw: [[String: Any]], originatingProfileId: String) {
         guard AuthConfig.isConfigured else { return }
         guard let authManager, authManager.isAuthenticated else { return }
         guard let profileViewModel,
               let activeProfile = profileViewModel.activeProfile ?? profileViewModel.profiles.first else { return }
+
+        guard activeProfile.id == originatingProfileId,
+              CollectionsStore.activeProfileId == originatingProfileId,
+              let editSyncKey = currentSyncKey() else { return }
 
         let remoteProfileId = ProfileSyncIndexStore.remoteId(
             for: activeProfile,
@@ -1679,12 +1686,16 @@ final class NuvioSyncManager: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self, let session = await authManager.validSessionForSync() else { return }
             do {
+                guard self.currentSyncKey() == editSyncKey else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 var payload = raw
                 if let remoteBlob = try await self.client.pullCollections(
                     session: session,
                     remoteProfileId: remoteProfileId
                 ),
                    let remoteRows = Self.collectionsArray(from: remoteBlob) {
+                    guard self.currentSyncKey() == editSyncKey else { return }
+                    try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                     payload = CollectionsStore.mergeLocalEdit(
                         local: raw,
                         remote: remoteRows,
@@ -1692,11 +1703,15 @@ final class NuvioSyncManager: ObservableObject {
                     )
                 }
 
+                guard self.currentSyncKey() == editSyncKey else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 try await self.client.pushCollections(
                     session: session,
                     remoteProfileId: remoteProfileId,
                     rawCollections: payload
                 )
+                guard self.currentSyncKey() == editSyncKey else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 // Keep local cache aligned with what we uploaded (includes
                 // remote-only rows we preserved).
                 if let data = try? JSONSerialization.data(withJSONObject: payload) {

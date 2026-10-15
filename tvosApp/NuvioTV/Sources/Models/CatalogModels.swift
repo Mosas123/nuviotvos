@@ -4718,8 +4718,10 @@ enum CollectionsStore {
 
     /// Posted after a local edit (create/pin/delete/add-source) so the sync
     /// manager pushes the new blob to the account; object is the raw
-    /// `[[String: Any]]` collections array.
+    /// `[[String: Any]]` collections array. User info carries the profile that
+    /// owned the edit so delayed delivery cannot adopt a newly active profile.
     static let locallyEditedNotification = Notification.Name("nuvio.tv.collections.locallyEdited")
+    static let editedProfileIdUserInfoKey = "profileId"
 
     /// The stored blob as untyped JSON dictionaries. Local edits mutate these
     /// dicts instead of the typed models so fields only the Android app knows
@@ -5261,13 +5263,20 @@ enum CollectionsStore {
         _ = writeData(data, forKey: key)
         cachedRaw[key] = raw
         cachedCollections[key] = decoded
+        let editedProfileId = activeProfileId ?? ""
         cacheLock.unlock()
         postChangedNotification()
         if Thread.isMainThread {
-            NotificationCenter.default.post(name: locallyEditedNotification, object: raw)
+            NotificationCenter.default.post(
+                name: locallyEditedNotification, object: raw,
+                userInfo: [editedProfileIdUserInfoKey: editedProfileId]
+            )
         } else {
             DispatchQueue.main.async {
-                NotificationCenter.default.post(name: locallyEditedNotification, object: raw)
+                NotificationCenter.default.post(
+                    name: locallyEditedNotification, object: raw,
+                    userInfo: [editedProfileIdUserInfoKey: editedProfileId]
+                )
             }
         }
     }
