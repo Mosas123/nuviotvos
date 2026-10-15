@@ -274,7 +274,17 @@ public class LibraryViewModel: ObservableObject {
     /// The Android TV library updates its Trakt snapshot immediately after a
     /// validated watchlist mutation. Do the same here so navigation into
     /// Library never waits on a second network pull to reveal the title.
-    private func applyTraktMutation(_ mutation: TraktLibraryMutation) {
+    func applyTraktMutation(_ mutation: TraktLibraryMutation) {
+        // The observer queues a MainActor task. Ownership may have changed
+        // since the service posted this notification, so check again here.
+        if let context = mutation.context {
+            guard context.isCurrent, displayedSource == .trakt else { return }
+        } else {
+            // These providers share the historical Trakt notification payload.
+            // Unscoped events must never be applied to the Trakt library.
+            let source = TraktSettingsStore.librarySourceMode
+            guard source == .simkl || source == .wetrakr else { return }
+        }
         applyLibraryMutation(meta: mutation.meta, isInWatchlist: mutation.isInWatchlist)
     }
 

@@ -3606,30 +3606,37 @@ struct TraktLibraryService {
     /// Trakt as the library source, add/remove the title from Trakt's watchlist
     /// instead of writing only to the hidden local library.
     static func setWatchlist(_ meta: NuvioMeta, isInWatchlist: Bool) async -> Bool {
-        guard TraktSettingsStore.librarySourceMode == .trakt,
-              TraktAuthStore.isAuthenticated,
-              let body = watchlistMutation(for: meta) else {
+        guard let body = watchlistMutation(for: meta),
+              let context = await MainActor.run(body: { TraktLibraryMutationContext() }) else {
             return false
         }
 
         do {
-            let response: TraktWatchlistMutationResponse = try await TraktAuthService().authorizedPost(
+            let response: TraktWatchlistMutationResponse = try await TraktAuthService(store: context.store).authorizedPost(
                 path: isInWatchlist ? "sync/watchlist" : "sync/watchlist/remove",
                 body: body
             )
             guard response.applied(isInWatchlist: isInWatchlist) else { return false }
-            NotificationCenter.default.post(
-                name: mutationNotification,
-                object: TraktLibraryMutation(meta: meta, isInWatchlist: isInWatchlist)
-            )
-            NotificationCenter.default.post(
-                name: TraktSettingsStore.libraryChangedNotification,
-                object: nil
-            )
+            await MainActor.run {
+                publishMutation(TraktLibraryMutation(
+                    meta: meta,
+                    isInWatchlist: isInWatchlist,
+                    context: context
+                ))
+            }
+            // A successful remote write must not be reported as a failure just
+            // because its local notification no longer belongs to this session.
             return true
         } catch {
             return false
         }
+    }
+
+    @MainActor
+    static func publishMutation(_ mutation: TraktLibraryMutation) {
+        guard !Task.isCancelled, mutation.context?.isCurrent == true else { return }
+        NotificationCenter.default.post(name: mutationNotification, object: mutation)
+        NotificationCenter.default.post(name: TraktSettingsStore.libraryChangedNotification, object: nil)
     }
 
     static func fetchLibrary(
@@ -3831,9 +3838,60 @@ private struct TraktWatchlistIDs: Encodable {
     let tmdb: Int?
 }
 
+/// Identifies the profile and Trakt account that started a watchlist write.
+/// Refresh rotation preserves accountBindingID; a new login replaces it.
+struct TraktLibraryMutationContext {
+    let store: UserDefaults
+    private let profileID: String?
+    private let settingsProfileID: String?
+    private let clientID: String
+    private let bindingID: String?
+    private let accessToken: String?
+    private let refreshToken: String?
+
+    @MainActor
+    init?() {
+        let store = ProfileSettings.current
+        guard TraktSettingsStore.librarySourceMode == .trakt,
+              TraktAuthStore.isAuthenticated(in: store) else { return nil }
+        self.store = store
+        profileID = LibraryStore.activeProfileId
+        settingsProfileID = ProfileSettings.activeProfileID
+        clientID = TraktConfig.clientID(in: store)
+        bindingID = TraktAuthStore.accountBindingID(in: store)
+        let state = TraktAuthStore.state(in: store)
+        accessToken = state.accessToken
+        refreshToken = state.refreshToken
+    }
+
+    @MainActor
+    var isCurrent: Bool {
+        guard profileID == LibraryStore.activeProfileId,
+              settingsProfileID == ProfileSettings.activeProfileID,
+              ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.librarySourceMode == .trakt,
+              TraktAuthStore.isAuthenticated(in: store),
+              TraktConfig.clientID(in: store) == clientID else { return false }
+        if let bindingID {
+            return TraktAuthStore.accountBindingID(in: store) == bindingID
+        }
+        let state = TraktAuthStore.state(in: store)
+        return state.accessToken == accessToken && state.refreshToken == refreshToken
+    }
+}
+
 struct TraktLibraryMutation {
     let meta: NuvioMeta
     let isInWatchlist: Bool
+    // Simkl and WeTrakr also use this legacy notification payload.
+    // Trakt always supplies its captured context; their call sites stay intact.
+    let context: TraktLibraryMutationContext?
+
+    init(meta: NuvioMeta, isInWatchlist: Bool, context: TraktLibraryMutationContext? = nil) {
+        self.meta = meta
+        self.isInWatchlist = isInWatchlist
+        self.context = context
+    }
 }
 
 private struct TraktWatchlistMutationResponse: Decodable {
