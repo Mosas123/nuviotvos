@@ -90,6 +90,7 @@ enum CommunityAddonCatalog {
     /// Installs (or re-enables) a community add-on and notifies account sync.
     @discardableResult
     static func install(manifestURL raw: String) -> Bool {
+        let editedProfileId = ProfileSettings.activeProfileID ?? ""
         guard let url = CinemetaCatalogRepository.normalizedManifestURL(from: raw) else {
             return false
         }
@@ -102,7 +103,8 @@ enum CommunityAddonCatalog {
         CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences)
         NotificationCenter.default.post(
             name: NuvioSyncManager.addonOrderChangedNotification,
-            object: preferences
+            object: preferences,
+            userInfo: [NuvioSyncManager.addonEditedProfileIdUserInfoKey: editedProfileId]
         )
         return true
     }

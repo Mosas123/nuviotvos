@@ -32,8 +32,9 @@ enum NuvioDeviceRegistrationCapability {
 final class NuvioSyncManager: ObservableObject {
     /// Posted by the Settings add-on list after an order/enabled-state change.
     /// The object is `[StreamAddonPreference]`, with `[String]` accepted for the
-    /// old reorder-only path.
+    /// old reorder-only path. Producers must include the profile that was edited.
     nonisolated static let addonOrderChangedNotification = Notification.Name("nuvio.tv.addons.orderChanged")
+    nonisolated static let addonEditedProfileIdUserInfoKey = "profileId"
     /// Posted after an account pull has applied every profile-scoped Home input.
     /// Revision counters publish individual changes, while this completion
     /// signal guarantees one final catalog rebuild on slower physical devices.
@@ -231,6 +232,7 @@ final class NuvioSyncManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            guard let profileId = notification.userInfo?[Self.addonEditedProfileIdUserInfoKey] as? String else { return }
             let preferences: [StreamAddonPreference]
             if let postedPreferences = notification.object as? [StreamAddonPreference] {
                 preferences = postedPreferences
@@ -239,9 +241,11 @@ final class NuvioSyncManager: ObservableObject {
                 preferences = urls.map { StreamAddonPreference(url: $0, enabled: true) }
             }
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self,
+                      self.profileViewModel?.activeProfile?.id == profileId,
+                      ProfileSettings.activeProfileID == profileId else { return }
                 self.homeCatalogRevision &+= 1
-                self.pushAddonPreferences(preferences)
+                self.pushAddonPreferences(preferences, originatingProfileId: profileId)
             }
         })
         observers.append(center.addObserver(
@@ -1809,12 +1813,15 @@ final class NuvioSyncManager: ObservableObject {
     /// Pushes the complete local add-on list to the account. The public RPC is
     /// full-replace, so omitted rows (including an entirely empty list) must be
     /// allowed to delete their remote counterparts.
-    private func pushAddonPreferences(_ preferences: [StreamAddonPreference]) {
+    private func pushAddonPreferences(_ preferences: [StreamAddonPreference], originatingProfileId: String) {
         let normalizedPreferences = Self.normalizedAddonPreferences(preferences)
         guard AuthConfig.isConfigured else { return }
         guard let authManager, authManager.isAuthenticated else { return }
         guard let profileViewModel,
               let activeProfile = profileViewModel.activeProfile ?? profileViewModel.profiles.first else { return }
+        guard activeProfile.id == originatingProfileId,
+              ProfileSettings.activeProfileID == originatingProfileId,
+              let editSyncKey = currentSyncKey() else { return }
 
         let remoteProfileId = ProfileSyncIndexStore.remoteId(
             for: activeProfile,
@@ -1844,6 +1851,9 @@ final class NuvioSyncManager: ObservableObject {
             }
 
             do {
+                guard self.currentSyncKey() == editSyncKey,
+                      ProfileSettings.activeProfileID == originatingProfileId else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 try await self.client.pushAddons(
                     session: session,
                     remoteProfileId: remoteProfileId,
