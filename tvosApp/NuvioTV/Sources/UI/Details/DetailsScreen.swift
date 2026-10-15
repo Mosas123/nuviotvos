@@ -1241,7 +1241,9 @@ actor YouTubeTrailerResolver {
     private var cachedConfig: WatchConfig?
     private var previewCache: [String: (source: TrailerPlaybackSource, date: Date)] = [:]
     private var probeResults: [String: Bool] = [:]
-    private var attemptStartedAt: Date?
+    private enum AttemptContext {
+        @TaskLocal static var startedAt: Date?
+    }
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 20
@@ -1344,9 +1346,22 @@ actor YouTubeTrailerResolver {
         forceRefreshConfig: Bool,
         preferIntegratedStream: Bool = false
     ) async -> TrailerPlaybackSource? {
+        await AttemptContext.$startedAt.withValue(Date()) {
+            await resolveInnertubeAttempt(
+                videoId: videoId,
+                forceRefreshConfig: forceRefreshConfig,
+                preferIntegratedStream: preferIntegratedStream
+            )
+        }
+    }
+
+    private func resolveInnertubeAttempt(
+        videoId: String,
+        forceRefreshConfig: Bool,
+        preferIntegratedStream: Bool
+    ) async -> TrailerPlaybackSource? {
         guard !Task.isCancelled else { return nil }
         probeResults.removeAll(keepingCapacity: true)
-        attemptStartedAt = Date()
         guard let config = try? await watchConfig(forceRefresh: forceRefreshConfig),
               canContinueAttempt else { return nil }
         var hlsCandidates: [HlsCandidate] = []
@@ -1958,7 +1973,7 @@ actor YouTubeTrailerResolver {
     }
 
     private var attemptBudgetExceeded: Bool {
-        guard let attemptStartedAt else { return false }
+        guard let attemptStartedAt = AttemptContext.startedAt else { return false }
         return Date().timeIntervalSince(attemptStartedAt) >= Self.attemptBudget
     }
 
@@ -1968,7 +1983,7 @@ actor YouTubeTrailerResolver {
 
     private func requestTimeout(cap: TimeInterval) -> TimeInterval? {
         guard canContinueAttempt else { return nil }
-        guard let attemptStartedAt else { return cap }
+        guard let attemptStartedAt = AttemptContext.startedAt else { return cap }
         let remaining = Self.attemptBudget - Date().timeIntervalSince(attemptStartedAt)
         guard remaining > 0 else { return nil }
         return min(cap, remaining)
