@@ -89,12 +89,36 @@ public struct TopShelfFeed: Codable, Equatable {
     }
 }
 
+/// Orders writes independently of detached-task scheduling. All mutable state
+/// and the synchronous commit are protected by the same lock.
+final class TopShelfWriteCoordinator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+
+    func beginWrite() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        generation &+= 1
+        return generation
+    }
+
+    @discardableResult
+    func commitIfCurrent(_ expected: UInt64, commit: () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard generation == expected else { return false }
+        commit()
+        return true
+    }
+}
+
 /// Reads/writes the feed in the shared App Group. All calls are no-ops when the
 /// group container isn't available (e.g. entitlement not provisioned), so the
 /// app never crashes or blocks on it.
 public enum TopShelfFeedStore {
     private static let feedFileName = "feed.json"
     private static let artworkRenderVersion = 2
+    private static let writeCoordinator = TopShelfWriteCoordinator()
 
     /// True when the shared App Group directory actually exists on this device.
     /// Accessing `UserDefaults(suiteName:)` on an unprovisioned App Group causes
@@ -116,12 +140,15 @@ public enum TopShelfFeedStore {
     /// Called by the app whenever Continue Watching changes.
     public static func write(_ entries: [TopShelfEntry]) {
         guard isAvailable else { return }
+        let generation = writeCoordinator.beginWrite()
         Task.detached(priority: .utility) {
             let decoratedEntries = entries.map { entry in
                 guard entry.imageURL != nil, entry.subtitle != nil else { return entry }
                 return entry.withArtworkFileName(artworkFileName(for: entry))
             }
-            writeFeed(decoratedEntries)
+            guard writeCoordinator.commitIfCurrent(generation, commit: {
+                writeFeed(decoratedEntries)
+            }) else { return }
 
             #if canImport(UIKit)
             await cacheArtwork(for: decoratedEntries)
