@@ -31,6 +31,7 @@ class DetailsViewModel: ObservableObject {
     private var streamObserveTask: Task<Void, Never>?
     private var enrichmentTask: Task<Void, Never>?
     private var deferredLoadTask: Task<Void, Never>?
+    private var watchlistMutationTask: Task<Void, Never>?
     /// Invalidates every asynchronous completion from an older details load.
     /// This is intentionally separate from the content id: the same title can
     /// be refreshed while its previous request is still in flight.
@@ -575,11 +576,21 @@ class DetailsViewModel: ObservableObject {
         // Sync. Without a live Trakt session, leave the state unchanged.
         guard SelectedLibraryService.isSelectedAndAuthenticated else { return }
 
+        let store = ProfileSettings.current
+        let librarySource = TraktSettingsStore.librarySourceMode
         // Keep Details responsive, then let LibraryViewModel refresh the
         // Trakt-backed list from the notification posted after the mutation.
         let desiredMembership = !uiState.isInWatchlist
         uiState.isInWatchlist = desiredMembership
-        Task {
+        let previousMutation = watchlistMutationTask
+        watchlistMutationTask = Task { @MainActor in
+            if let previousMutation {
+                await previousMutation.value
+            }
+            guard !Task.isCancelled,
+                  ProfileSettings.isActiveStore(store),
+                  TraktSettingsStore.librarySourceMode == librarySource else { return }
+
             let succeeded = await SelectedLibraryService.setWatchlist(
                 meta,
                 isInWatchlist: desiredMembership
