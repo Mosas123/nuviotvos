@@ -1196,7 +1196,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let width = getInt("video-params/w")
         let height = getInt("video-params/h")
         var fps = getDouble("container-fps")
-        if fps <= 0 { fps = getDouble("estimated-vf-fps") }
+        if !fps.isFinite || fps <= 0 { fps = getDouble("estimated-vf-fps") }
 
         let videoCodec = getString("current-tracks/video/codec") ?? ""
         let gamma = (getString("video-params/gamma") ?? "").lowercased()
@@ -1261,7 +1261,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         }
 
         let isDV = dvProfile > 0
-        let fpsStr = fps > 0 ? String(format: "%.3f fps", fps) : "23.976 fps"
+        let fpsStr = fps.isFinite && fps > 0 ? String(format: "%.3f fps", fps) : "--"
         let videoCodecLabel = Self.videoCodecLabel(videoCodec)
         let videoStr = width > 0 && height > 0
             ? "\(width)×\(height) · \(fpsStr) · \(isDV ? "dolby-vision" : videoCodecLabel.lowercased())"
@@ -1269,13 +1269,12 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
         let vBit = getDouble("video-bitrate")
         let vBitrateStr = vBit > 0
-            ? String(format: "avg mux %.1f Mbit/s · now %.1f Mbit/s", vBit / 1_000_000.0, vBit / 1_000_000.0)
-            : "avg mux 72.9 Mbit/s · now 82.0 Mbit/s"
+            ? String(format: "%.1f Mbit/s", vBit / 1_000_000.0)
+            : "--"
 
-        let dvStr = dvProfile > 0 ? "P\(dvProfile) libdovi · FEL" : "None"
-        let dvHdrStr = dvProfile > 0
-            ? "MaxCLL 617 · MaxFALL 496 · MDL peak ~1001 nits"
-            : (dynamicRange.contains("HDR") ? "BT.2020 · PQ Transfer" : "BT.709 · Standard Dynamic Range")
+        let dvStr = dvProfile > 0 ? "P\(dvProfile)" : "None"
+        // No mastering metadata or enhancement-layer telemetry is collected here.
+        let dvHdrStr = "--"
 
         let decoderStr = hwdec.isEmpty || hwdec == "no"
             ? "MPVKit.software (cpu)"
@@ -1284,14 +1283,16 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let droppedCount = getInt("drop-frame-count")
         let droppedStr = "\(droppedCount) frames"
 
-        let displayStr = PlaybackSystemMonitor.displayRefreshRate(nominalFps: fps > 0 ? fps : nil)
+        // Source FPS and the screen maximum do not measure the active HDMI mode.
+        let displayStr = "--"
 
         let aBit = getDouble("audio-bitrate")
         let aBitrateStr = aBit > 0
             ? String(format: "meas %.2f Mbit/s", aBit / 1_000_000.0)
-            : "meas 5.14 Mbit/s"
+            : "--"
 
         let routeStr = PlaybackSystemMonitor.audioRouteInfo()
+            .replacingOccurrences(of: " · 0 changes", with: "")
 
         let cacheDur = getDouble("demuxer-cache-duration")
         let bufferSec = cacheDur > 0 ? cacheDur : 0.0
@@ -1302,7 +1303,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let cacheSpeed = getDouble("cache-speed")
         let speedStr = cacheSpeed > 0
             ? String(format: "est %.1f Mbit/s", (cacheSpeed * 8) / 1_000_000.0)
-            : "est 199.0 Mbit/s"
+            : "--"
 
         let cacheBytes = Int64(getInt("demuxer-cache-state/bytes"))
         let loadedStr = cacheBytes > 0
@@ -1310,16 +1311,18 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             : "--"
 
         let cpuPercent = PlaybackSystemMonitor.cpuUsage()
-        let appCpuStr = String(format: "%.0f %%", cpuPercent > 0 ? cpuPercent : 27.0)
+        let appCpuStr = cpuPercent > 0 ? String(format: "%.0f %%", cpuPercent) : "--"
 
         let mem = PlaybackSystemMonitor.memoryUsage()
-        let memStr = mem.residentMB > 0
-            ? String(format: "heap %.0f/%.0f MB · native %.0f MB", mem.residentMB, mem.availableMB > 0 ? mem.availableMB : 384.0, mem.virtualMB > 0 ? mem.virtualMB : 841.0)
-            : "heap 57/384 MB · native 841 MB"
+        let resident = mem.residentMB > 0 ? String(format: "%.0f MB", mem.residentMB) : "--"
+        let available = mem.availableMB > 0 ? String(format: "%.0f MB", mem.availableMB) : "--"
+        let footprint = mem.virtualMB > 0 ? String(format: "%.0f MB", mem.virtualMB) : "--"
+        let memStr = "resident \(resident) · available \(available) · footprint \(footprint)"
 
         let thermal = PlaybackSystemMonitor.thermalInfo()
-        let socTempStr = thermal.tempString
-        let cpuClockStr = PlaybackSystemMonitor.cpuInfo()
+        // The monitor estimates temperature from thermal state; it is not a sensor.
+        let socTempStr = "--"
+        let cpuClockStr = "--"
 
         return PlaybackDebugInfo(
             player: "MPVKit",
@@ -1340,19 +1343,19 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             decoder: decoderStr,
             dropped: droppedStr,
             droppedCount: droppedCount,
-            frameLead: "+44.9 ms",
+            frameLead: "--",
             display: displayStr,
             aBitrate: aBitrateStr,
-            underruns: "0 · native 0",
+            underruns: "--",
             underrunsCount: 0,
             route: routeStr,
-            aJitter: "drift avg 32 ms/s · max 343 · 13 ev",
+            aJitter: "--",
             buffer: bufferStr,
             bufferSeconds: bufferSec,
             speed: speedStr,
-            ping: "7 ms",
+            ping: "--",
             loaded: loadedStr,
-            stalls: "0",
+            stalls: "--",
             stallsCount: 0,
             appCpu: appCpuStr,
             appCpuPercent: cpuPercent,

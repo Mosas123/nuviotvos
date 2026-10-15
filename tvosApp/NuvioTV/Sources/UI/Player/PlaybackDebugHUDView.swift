@@ -274,7 +274,7 @@ struct PlaybackDebugHUDView: View {
         dotColor: Color = .green
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
-            if hasDot {
+            if hasDot && value != "--" {
                 statusDot(dotColor)
             } else {
                 statusDotSpacer
