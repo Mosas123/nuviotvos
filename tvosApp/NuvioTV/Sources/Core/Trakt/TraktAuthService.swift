@@ -1411,63 +1411,105 @@ struct TraktProgressService {
         }
     }
 
+    /// Ownership captured before provider I/O. A source override used for a
+    /// transfer may differ from Home's selected source when no snapshot is written.
+    struct ContinueWatchingFetchContext {
+        let profileId: String?
+        let settingsProfileId: String?
+        let store: UserDefaults
+        let profileScope: String
+        let source: TraktWatchProgressSource
+        let updateDisplayedSnapshot: Bool
+
+        @MainActor
+        init(source: TraktWatchProgressSource, updateDisplayedSnapshot: Bool) {
+            profileId = ContinueWatchingStore.activeProfileId
+            settingsProfileId = ProfileSettings.activeProfileID
+            store = ProfileSettings.current
+            profileScope = ProfileSettings.activeProfileScope
+            self.source = source
+            self.updateDisplayedSnapshot = updateDisplayedSnapshot
+        }
+    }
+
+    /// Revalidate before merging: reconciliation itself may remove checkpoints.
+    /// Keep the guard, merge and snapshot write together with no suspension so a
+    /// UI profile/source switch cannot interleave between those operations.
+    @MainActor
+    static func finalizeContinueWatchingFetch(
+        _ items: [ContinueWatchingItem],
+        context: ContinueWatchingFetchContext
+    ) -> [ContinueWatchingItem]? {
+        guard !Task.isCancelled,
+              context.profileId == ContinueWatchingStore.activeProfileId,
+              context.settingsProfileId == ProfileSettings.activeProfileID,
+              ProfileSettings.isActiveStore(context.store) else { return nil }
+        guard context.updateDisplayedSnapshot else { return items }
+        guard context.source == TraktSettingsStore.watchProgressSource else { return nil }
+
+        let resolvedItems = mergingLocalPlaybackCheckpoints(
+            into: items,
+            source: context.source,
+            profileId: context.profileId
+        )
+        replaceContinueWatchingSnapshot(
+            resolvedItems,
+            source: context.source,
+            profileId: context.profileId
+        )
+        return resolvedItems
+    }
+
     static func fetchContinueWatching(
         repository: CatalogRepository,
         source sourceOverride: TraktWatchProgressSource? = nil,
         updateDisplayedSnapshot: Bool = true
     ) async -> [ContinueWatchingItem]? {
-        let source = sourceOverride ?? TraktSettingsStore.watchProgressSource
+        let context = await MainActor.run {
+            ContinueWatchingFetchContext(
+                source: sourceOverride ?? TraktSettingsStore.watchProgressSource,
+                updateDisplayedSnapshot: updateDisplayedSnapshot
+            )
+        }
+        let source = context.source
         #if DEBUG
         print("[ContinueWatching] Provider fetch started source=\(source.rawValue)")
         #endif
         if source == .simkl {
-            guard SimklRuntimeSession.authenticatedState() != nil else { return [] }
+            guard SimklRuntimeSession.authenticatedState(store: context.store, profileScope: context.profileScope) != nil else { return [] }
             guard let items = await SimklProgressService.fetchContinueWatching(
-                repository: repository
+                repository: repository,
+                store: context.store,
+                profileScope: context.profileScope
             ) else { return nil }
-            let resolvedItems = updateDisplayedSnapshot
-                ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-                : items
-            if updateDisplayedSnapshot {
-                replaceContinueWatchingSnapshot(resolvedItems, source: source)
-            }
-            return resolvedItems
+            return await finalizeContinueWatchingFetch(items, context: context)
         }
 
         if source == .mdblist {
-            guard MdbListRuntimeSession.isAuthenticated() else { return [] }
+            guard MdbListRuntimeSession.isAuthenticated(in: context.store, profileScope: context.profileScope) else { return [] }
             guard let items = await MdbListProgressService.fetchContinueWatching(
-                repository: repository
+                repository: repository,
+                store: context.store,
+                profileScope: context.profileScope
             ) else { return nil }
-            let resolvedItems = updateDisplayedSnapshot
-                ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-                : items
-            if updateDisplayedSnapshot {
-                replaceContinueWatchingSnapshot(resolvedItems, source: source)
-            }
-            return resolvedItems
+            return await finalizeContinueWatchingFetch(items, context: context)
         }
 
         if source == .wetrakr {
-            guard WeTrakrRuntimeSession.authenticatedState() != nil else { return [] }
+            guard WeTrakrRuntimeSession.authenticatedState(store: context.store) != nil else { return [] }
             guard let items = await WeTrakrProgressService.fetchContinueWatching(
-                repository: repository
+                repository: repository,
+                store: context.store
             ) else { return nil }
-            let resolvedItems = updateDisplayedSnapshot
-                ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-                : items
-            if updateDisplayedSnapshot {
-                replaceContinueWatchingSnapshot(resolvedItems, source: source)
-            }
-            return resolvedItems
+            return await finalizeContinueWatchingFetch(items, context: context)
         }
 
         guard source == .trakt,
-              TraktAuthStore.isAuthenticated else {
+              TraktAuthStore.isAuthenticated(in: context.store) else {
             return []
         }
 
-        let service = TraktAuthService()
+        let service = TraktAuthService(store: context.store)
         guard await service.refreshTokenIfNeeded() else {
             #if DEBUG
             print("[ContinueWatching] Trakt token refresh failed")
@@ -1598,11 +1640,8 @@ struct TraktProgressService {
             }
         }
         let items = indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
-        let resolvedItems = updateDisplayedSnapshot
-            ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-            : items
-        if updateDisplayedSnapshot {
-            replaceContinueWatchingSnapshot(resolvedItems, source: source)
+        guard let resolvedItems = await finalizeContinueWatchingFetch(items, context: context) else {
+            return nil
         }
         #if DEBUG
         print("[ContinueWatching] Trakt provider returning \(resolvedItems.count) items")
@@ -1639,11 +1678,10 @@ struct TraktProgressService {
 
     static func mergingLocalPlaybackCheckpoints(
         into remoteItems: [ContinueWatchingItem],
-        source: TraktWatchProgressSource
+        source: TraktWatchProgressSource,
+        profileId: String? = ContinueWatchingStore.activeProfileId
     ) -> [ContinueWatchingItem] {
         pruneExpiredLocalCheckpoints()
-
-        let profileId = ContinueWatchingStore.activeProfileId
         let checkpoints = localPlaybackCheckpoints.filter {
             $0.profileId == profileId && $0.source == source
         }
@@ -1738,9 +1776,9 @@ struct TraktProgressService {
 
     private static func replaceContinueWatchingSnapshot(
         _ items: [ContinueWatchingItem],
-        source: TraktWatchProgressSource
+        source: TraktWatchProgressSource,
+        profileId: String?
     ) {
-        let profileId = ContinueWatchingStore.activeProfileId
         continueWatchingSnapshots.removeAll {
             $0.profileId == profileId && $0.source == source
         }
