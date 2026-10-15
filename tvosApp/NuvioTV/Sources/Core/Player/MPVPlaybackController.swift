@@ -935,6 +935,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     private func attemptStartPendingLoad() {
         guard let url = pendingURL, mpv != nil else { return }
+        // The active display wait will start the latest queued load once safe.
+        guard !isDisplaySwitchInFlight else { return }
         guard isViewLoaded, view.bounds.width > 1, view.bounds.height > 1 else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryDiagnosticSessionID = UUID().uuidString
@@ -2173,6 +2175,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         }
         isDisplaySwitchInFlight = false
         setStringProperty("vid", "auto")
+        if pendingURL != nil {
+            attemptStartPendingLoad()
+            return
+        }
         // Let the reattached video output configure and present its paused
         // landing frame before transport starts. HDMI is already settled here.
         finishStartupDisplayGate(after: 0.2)
