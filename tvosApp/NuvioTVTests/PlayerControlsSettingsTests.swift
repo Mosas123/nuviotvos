@@ -1426,6 +1426,113 @@ extension PlayerControlsSettingsTests {
     }
 
     @MainActor
+    func testCurrentSourceUsesOriginalIDAfterPlaybackURLResolution() {
+        let originalSource = NuvioStream(
+            url: "https://provider.example/original.mkv",
+            name: "Original source",
+            description: nil,
+            addonName: "Fixture"
+        )
+        let resolvedURL = URL(string: "https://playback.example/resolved.mkv")!
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+        }
+
+        model.load(
+            url: resolvedURL,
+            meta: NuvioMeta(id: "source-identity-title", name: "Fixture title", type: "movie"),
+            subtitle: "",
+            resumeFrom: nil,
+            sourceID: originalSource.id
+        )
+
+        XCTAssertNotEqual(originalSource.id, resolvedURL.absoluteString)
+        XCTAssertTrue(model.isCurrentSource(originalSource))
+    }
+
+    @MainActor
+    func testCurrentSourceRejectsResolvedURLRowWhenOriginalIDIsExplicit() {
+        let originalSource = NuvioStream(
+            url: "https://provider.example/original.mkv",
+            name: "Original source",
+            description: nil,
+            addonName: "Fixture"
+        )
+        let resolvedURL = URL(string: "https://playback.example/resolved.mkv")!
+        let resolvedURLRow = NuvioStream(
+            url: resolvedURL.absoluteString,
+            name: "Resolved URL row",
+            description: nil,
+            addonName: "Fixture"
+        )
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+        }
+
+        model.load(
+            url: resolvedURL,
+            meta: NuvioMeta(id: "source-identity-title", name: "Fixture title", type: "movie"),
+            subtitle: "",
+            resumeFrom: nil,
+            sourceID: originalSource.id
+        )
+
+        XCTAssertEqual(resolvedURLRow.id, resolvedURL.absoluteString)
+        XCTAssertFalse(model.isCurrentSource(resolvedURLRow))
+    }
+
+    @MainActor
+    func testCurrentSourceFallsBackToURLWhenSourceIDIsMissing() {
+        let originalSource = NuvioStream(
+            url: "https://provider.example/original.mkv",
+            name: "Original source",
+            description: nil,
+            addonName: "Fixture"
+        )
+        let resolvedURL = URL(string: "https://playback.example/resolved.mkv")!
+        let resolvedURLRow = NuvioStream(
+            url: resolvedURL.absoluteString,
+            name: "Resolved URL row",
+            description: nil,
+            addonName: "Fixture"
+        )
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: { nil },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+        }
+
+        model.load(
+            url: resolvedURL,
+            meta: NuvioMeta(id: "source-identity-title", name: "Fixture title", type: "movie"),
+            subtitle: "",
+            resumeFrom: nil
+        )
+
+        XCTAssertTrue(model.isCurrentSource(resolvedURLRow))
+        XCTAssertFalse(model.isCurrentSource(originalSource))
+    }
+
+    @MainActor
     func testStartupBenchmarkOwnerIsForwardedAndReplacedOnCoordinatorRetry() {
         let firstOwner = UUID()
         let retryOwner = UUID()
