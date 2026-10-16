@@ -34,6 +34,7 @@ struct PlayerView: View {
     var videoSize: Int64? = nil
     var videoHash: String? = nil
     var cacheFileIdentity: PlaybackCacheFileIdentity? = nil
+    var sourceID: String? = nil
     var trickplayURL: URL? = nil
     /// Episode context for the in-player Next Episode card. Empty for movies/trailers.
     var episodes: [NuvioVideo] = []

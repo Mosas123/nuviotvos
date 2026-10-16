@@ -280,6 +280,7 @@ class PlayerViewModel: ObservableObject {
     private var isTrailerPlaybackSession = false
     var activeMeta: NuvioMeta?
     private var activeStreamURL: String?
+    private var activeSourceID: String?
     private var activeHTTPHeaders: [String: String] = [:]
     private var activePlaybackOrigin: PlaybackOrigin = .main
     private(set) var activeBingeGroup: String?
@@ -765,6 +766,7 @@ class PlayerViewModel: ObservableObject {
         videoHash: String? = nil,
         cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         trickplayURL: URL? = nil,
+        sourceID: String? = nil,
         currentEpisode: NuvioVideo? = nil
     ) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
@@ -781,6 +783,7 @@ class PlayerViewModel: ObservableObject {
         activeVideoHash = videoHash
         activeCacheFileIdentity = cacheFileIdentity
         activeTrickplayURL = trickplayURL
+        activeSourceID = sourceID
         if !hasLoaded { sessionTrackSelection = nil }
 
         // Adopt active Picture in Picture session if already playing this content
@@ -793,6 +796,7 @@ class PlayerViewModel: ObservableObject {
             if cacheFileIdentity == nil {
                 activeCacheFileIdentity = pipManager.activeContext?.cacheFileIdentity
             }
+            if activeSourceID == nil { activeSourceID = pipManager.activeContext?.sourceID }
             self.sessionCoordinator = activeCoord
             bindSessionCoordinatorCallbacks()
             self.activeEngineKind = activeCoord.activeBackend
@@ -916,6 +920,7 @@ class PlayerViewModel: ObservableObject {
                 subtitle: subtitle,
                 httpHeaders: httpHeaders,
                 cacheFileIdentity: activeCacheFileIdentity,
+                sourceID: activeSourceID,
                 externalSubtitles: externalSubtitles,
                 resumeFrom: resumeFrom,
                 episodes: seriesEpisodes,
@@ -1465,6 +1470,7 @@ class PlayerViewModel: ObservableObject {
                 subtitle: subtitle,
                 httpHeaders: activeHTTPHeaders,
                 cacheFileIdentity: activeCacheFileIdentity,
+                sourceID: activeSourceID,
                 externalSubtitles: pendingExternalSubtitles,
                 resumeFrom: pendingResumeSeconds,
                 episodes: episodes,
@@ -1943,6 +1949,7 @@ class PlayerViewModel: ObservableObject {
         // a new identity on the prepared stream.
         self.activeCacheFileIdentity = prepared.cacheFileIdentity
         self.activeTrickplayURL = prepared.trickplayURL
+        self.activeSourceID = prepared.sourceID
         if let bg = prepared.bingeGroup, !bg.isEmpty {
             self.activeBingeGroup = bg
         }
@@ -4856,6 +4863,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     func isCurrentSource(_ stream: NuvioStream) -> Bool {
+        if let activeSourceID, !activeSourceID.isEmpty { return stream.id == activeSourceID }
         guard let active = activeStreamURL else { return false }
         if let url = stream.directURL, !url.isEmpty {
             return url == active
@@ -4919,6 +4927,7 @@ class PlayerViewModel: ObservableObject {
                     fileIndex: stream.effectiveFileIdx
                 )
                 : nil
+            prepared.sourceID = stream.id
             self.failedStreamURLs.removeAll()
             let group = stream.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: stream)
             if let group, !group.isEmpty {

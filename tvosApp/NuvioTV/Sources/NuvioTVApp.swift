@@ -344,6 +344,7 @@ struct ContentView: View {
     @State private var playbackCurrentEpisode: NuvioVideo?
     @State private var playbackOrigin: PlaybackOrigin = .main
     @State private var playbackFilename: String?
+    @State private var playbackSourceID: String?
     @State private var playbackVideoSize: Int64?
     @State private var playbackVideoHash: String?
     @State private var playbackCacheFileIdentity: PlaybackCacheFileIdentity?
@@ -1337,7 +1338,8 @@ struct ContentView: View {
                     filename: prepared.filename,
                     videoSize: prepared.videoSize,
                     videoHash: prepared.videoHash,
-                    startupBenchmarkToken: startupToken
+                    startupBenchmarkToken: startupToken,
+                    sourceID: prepared.sourceID
                 )
                 if continueWatchingStartupBenchmarkToken == startupToken {
                     continueWatchingStartupBenchmarkToken = nil
@@ -1450,7 +1452,8 @@ struct ContentView: View {
         filename: String? = nil,
         videoSize: Int64? = nil,
         videoHash: String? = nil,
-        startupBenchmarkToken: UUID? = nil
+        startupBenchmarkToken: UUID? = nil,
+        sourceID: String? = nil
     ) {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
@@ -1545,7 +1548,8 @@ struct ContentView: View {
             filename: filename,
             videoSize: videoSize,
             videoHash: videoHash,
-            startupBenchmarkToken: startupBenchmarkToken
+            startupBenchmarkToken: startupBenchmarkToken,
+            sourceID: sourceID
         )
     }
 
@@ -1561,7 +1565,8 @@ struct ContentView: View {
         filename: String? = nil,
         videoSize: Int64? = nil,
         videoHash: String? = nil,
-        startupBenchmarkToken: UUID? = nil
+        startupBenchmarkToken: UUID? = nil,
+        sourceID: String? = nil
     ) {
         if PictureInPictureManager.shared.isPictureInPictureActive,
            PictureInPictureManager.shared.activeContext?.url != url {
@@ -1569,6 +1574,7 @@ struct ContentView: View {
         }
         playbackOrigin = origin
         playbackFilename = filename
+        playbackSourceID = sourceID
         playbackVideoSize = videoSize
         playbackVideoHash = videoHash
         playbackCacheFileIdentity = cacheFileIdentity
@@ -1591,6 +1597,7 @@ struct ContentView: View {
             withAnimation(.easeInOut(duration: 0.24)) {
                 self.playbackOrigin = context.playbackOrigin
                 self.playbackFilename = context.filename
+                self.playbackSourceID = context.sourceID
                 self.playbackVideoSize = context.videoSize
                 self.playbackVideoHash = context.videoHash
                 self.playbackCacheFileIdentity = context.cacheFileIdentity
@@ -2001,7 +2008,7 @@ struct ContentView: View {
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
             },
-            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity, filename, videoSize, videoHash, resumeFrom, startupToken in
+            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity, filename, videoSize, videoHash, resumeFrom, startupToken, sourceID in
                 if let url = URL(string: streamUrlString) {
                     let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
                     reopenStreamPickerOnDetails = false
@@ -2021,7 +2028,8 @@ struct ContentView: View {
                         filename: filename,
                         videoSize: videoSize,
                         videoHash: videoHash,
-                        startupBenchmarkToken: startupToken
+                        startupBenchmarkToken: startupToken,
+                        sourceID: sourceID
                     )
                 } else {
                     PlaybackStartupTiming.cancel(token: startupToken)
@@ -2252,7 +2260,8 @@ struct ContentView: View {
                     videoHash: candidate.videoHash,
                     provider: providerName,
                     bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate),
-                    trickplayURL: candidate.trickplayURL
+                    trickplayURL: candidate.trickplayURL,
+                    sourceID: candidate.id
                 )
             }
 
@@ -2282,7 +2291,8 @@ struct ContentView: View {
                 videoHash: candidate.videoHash,
                 provider: "Direct",
                 bingeGroup: candidate.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: candidate),
-                trickplayURL: candidate.trickplayURL
+                trickplayURL: candidate.trickplayURL,
+                sourceID: candidate.id
             )
         }
         return nil
@@ -2420,7 +2430,8 @@ struct ContentView: View {
                 videoHash: stream.videoHash,
                 provider: providerName,
                 bingeGroup: bingeGroup,
-                trickplayURL: stream.trickplayURL
+                trickplayURL: stream.trickplayURL,
+                sourceID: stream.id
             )
         }
 
@@ -2449,7 +2460,8 @@ struct ContentView: View {
             videoHash: stream.videoHash,
             provider: "Direct",
             bingeGroup: bingeGroup,
-            trickplayURL: stream.trickplayURL
+            trickplayURL: stream.trickplayURL,
+            sourceID: stream.id
         )
     }
 
@@ -2542,6 +2554,7 @@ struct ContentView: View {
             videoSize: isTrailer ? nil : playbackVideoSize,
             videoHash: isTrailer ? nil : playbackVideoHash,
             cacheFileIdentity: isTrailer ? nil : playbackCacheFileIdentity,
+            sourceID: isTrailer ? nil : playbackSourceID,
             episodes: isTrailer ? [] : playbackEpisodes,
             currentEpisode: isTrailer ? nil : playbackCurrentEpisode,
             initialStartupBenchmarkToken: startupBenchmarkToken,

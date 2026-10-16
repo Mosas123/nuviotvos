@@ -36,7 +36,8 @@ struct DetailsScreen: View {
         _ videoSize: Int64?,
         _ videoHash: String?,
         _ resumeFrom: Double?,
-        _ startupBenchmarkToken: UUID?
+        _ startupBenchmarkToken: UUID?,
+        _ sourceID: String?
     ) -> Void
     let onBack: () -> Void
     /// Open another title (More Like This / production catalog).
@@ -124,7 +125,8 @@ struct DetailsScreen: View {
             _ videoSize: Int64?,
             _ videoHash: String?,
             _ resumeFrom: Double?,
-            _ startupBenchmarkToken: UUID?
+            _ startupBenchmarkToken: UUID?,
+            _ sourceID: String?
         ) -> Void,
         onBack: @escaping () -> Void,
         onOpenTitle: ((String, String) -> Void)? = nil,
@@ -251,7 +253,7 @@ struct DetailsScreen: View {
                     onPlayClick: {
                         if let url = viewModel.uiState.streams.first?.url,
                            let meta = viewModel.uiState.meta {
-                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil, nil)
+                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil, nil, nil)
                         }
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
@@ -796,7 +798,8 @@ struct DetailsScreen: View {
                 stream.videoSize,
                 stream.videoHash,
                 nil,
-                startupToken
+                startupToken,
+                stream.id
             )
             return
         }
@@ -867,7 +870,8 @@ struct DetailsScreen: View {
                         debridVideoSize ?? stream.videoSize,
                         stream.videoHash,
                         nil,
-                        startupToken
+                        startupToken,
+                        stream.id
                     )
                 } else {
                     cancelStartupRequest(token: startupToken)
@@ -945,12 +949,12 @@ struct DetailsScreen: View {
         Task {
             if let source = await YouTubeTrailerResolver.shared.resolve(for: meta) {
                 await MainActor.run {
-                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil)
+                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil)
                 }
             } else if let ytId = await preferredTrailerYouTubeId(for: meta) {
                 let youtubeUrl = "https://www.youtube.com/watch?v=\(ytId)"
                 await MainActor.run {
-                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil)
+                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil)
                 }
             }
         }
