@@ -27,13 +27,18 @@ final class DetailsScreenUITests: XCTestCase {
 
         // Tap first content item
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
                 firstImage.tap()
                 sleep(1)
             }
         }
+        XCTAssertTrue(
+            app.buttons["Play"].waitForExistence(timeout: 5) ||
+                app.buttons["Watchlist"].waitForExistence(timeout: 2),
+            "Poster selection must reach Details before checking its contents"
+        )
     }
 
     // MARK: - Details Screen Layout Tests
@@ -84,17 +89,17 @@ final class DetailsScreenUITests: XCTestCase {
     func testWatchlistButtonToggle() throws {
         navigateToDetailsScreen()
 
-        if app.buttons["Watchlist"].exists {
+        if requireUICondition(app.buttons["Watchlist"].exists) {
             // Tap to add to watchlist
             app.buttons["Watchlist"].tap()
-            sleep(0.5)
+            Thread.sleep(forTimeInterval: 0.5)
 
             // Button should update (text might change or remain same)
             XCTAssertTrue(app.buttons["Watchlist"].exists, "Watchlist button should remain")
 
             // Tap again to remove from watchlist
             app.buttons["Watchlist"].tap()
-            sleep(0.5)
+            Thread.sleep(forTimeInterval: 0.5)
 
             XCTAssertTrue(app.buttons["Watchlist"].exists, "Watchlist button should toggle state")
         }
@@ -104,15 +109,13 @@ final class DetailsScreenUITests: XCTestCase {
         navigateToDetailsScreen()
 
         // Share button should be present
-        if app.buttons["Share"].exists {
-            XCTAssertTrue(true, "Share button exists")
-        }
+        XCTAssertTrue(app.buttons["Share"].waitForExistence(timeout: 5), "Share button must exist")
     }
 
     func testShareButtonOpensShareSheet() throws {
         navigateToDetailsScreen()
 
-        if app.buttons["Share"].exists {
+        if requireUICondition(app.buttons["Share"].exists) {
             app.buttons["Share"].tap()
             sleep(1)
 
@@ -128,14 +131,19 @@ final class DetailsScreenUITests: XCTestCase {
         navigateToDetailsScreen()
 
         // tvOS details uses an icon-only watched button (no star/rating UI).
-        if app.buttons["Watched"].exists || app.buttons["Unwatched"].exists || app.buttons["Rate"].exists {
-            XCTAssertTrue(true, "Watched control exists")
-        }
+        XCTAssertTrue(
+            app.buttons["Watched"].exists || app.buttons["Unwatched"].exists || app.buttons["Rate"].exists,
+            "A watched control must exist"
+        )
     }
 
     func testWatchedToggleInteraction() throws {
         navigateToDetailsScreen()
 
+        XCTAssertTrue(
+            app.buttons["Watched"].exists || app.buttons["Unwatched"].exists,
+            "A watched-state button is required to exercise the toggle"
+        )
         if app.buttons["Watched"].exists {
             app.buttons["Watched"].tap()
             sleep(1)
@@ -188,14 +196,14 @@ final class DetailsScreenUITests: XCTestCase {
         navigateToDetailsScreen()
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             // Scroll down to see more content
             scrollView.swipeUp()
-            sleep(0.5)
+            Thread.sleep(forTimeInterval: 0.5)
 
             // Scroll back up
             scrollView.swipeDown()
-            sleep(0.5)
+            Thread.sleep(forTimeInterval: 0.5)
 
             XCTAssertTrue(scrollView.exists, "Details screen should be scrollable")
         }
@@ -247,9 +255,9 @@ final class DetailsScreenUITests: XCTestCase {
         sleep(2)
 
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
                 firstImage.tap()
 
                 // Loading indicator might appear briefly
@@ -287,10 +295,10 @@ final class DetailsScreenUITests: XCTestCase {
         navigateToDetailsScreen()
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             measure {
                 scrollView.swipeUp()
-                sleep(0.5)
+                Thread.sleep(forTimeInterval: 0.5)
             }
         }
     }
@@ -302,10 +310,10 @@ final class DetailsScreenUITests: XCTestCase {
 
         // Navigate to first item
         let images = app.images
-        if images.count > 1 {
+        if requireUICondition(images.count > 1) {
             // First item
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
                 firstImage.tap()
                 sleep(1)
 
@@ -315,15 +323,15 @@ final class DetailsScreenUITests: XCTestCase {
                             "First details screen should load")
 
                 // Navigate back
-                if app.navigationBars.buttons.firstMatch.exists {
+                if requireUICondition(app.navigationBars.buttons.firstMatch.exists) {
                     app.navigationBars.buttons.firstMatch.tap()
                     sleep(1)
                 }
 
                 // Navigate to second item
-                if images.count > 1 {
+                if requireUICondition(images.count > 1) {
                     let secondImage = images.element(boundBy: 1)
-                    if secondImage.exists && secondImage.isHittable {
+                    if requireUICondition(secondImage.exists && secondImage.isHittable) {
                         secondImage.tap()
                         sleep(1)
 

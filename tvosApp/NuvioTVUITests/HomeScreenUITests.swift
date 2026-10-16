@@ -69,7 +69,7 @@ final class HomeScreenUITests: XCTestCase {
 
         // Hero should display featured content
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             XCTAssertTrue(images.firstMatch.exists, "Hero carousel should display featured content")
         }
     }
@@ -79,7 +79,7 @@ final class HomeScreenUITests: XCTestCase {
 
         // Try swiping the hero carousel
         let firstImage = app.images.firstMatch
-        if firstImage.exists {
+        if requireUICondition(firstImage.exists) {
             firstImage.swipeLeft()
             sleep(1)
 
@@ -106,11 +106,11 @@ final class HomeScreenUITests: XCTestCase {
 
         // Category rows should be horizontally scrollable
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.firstMatch
-            if firstImage.exists {
+            if requireUICondition(firstImage.exists) {
                 firstImage.swipeLeft()
-                sleep(0.5)
+                Thread.sleep(forTimeInterval: 0.5)
 
                 XCTAssertTrue(app.exists, "Category rows should support horizontal scrolling")
             }
@@ -122,9 +122,9 @@ final class HomeScreenUITests: XCTestCase {
 
         // Tap a content item in a category row
         let images = app.images
-        if images.count > 1 {
+        if requireUICondition(images.count > 1) {
             let item = images.element(boundBy: 1)
-            if item.exists && item.isHittable {
+            if requireUICondition(item.exists && item.isHittable) {
                 item.tap()
                 sleep(1)
 
@@ -143,15 +143,16 @@ final class HomeScreenUITests: XCTestCase {
         sleep(2)
 
         // Continue watching section might be present
-        if app.staticTexts["Continue Watching"].exists {
-            XCTAssertTrue(true, "Continue watching section exists")
-        }
+        XCTAssertTrue(
+            app.staticTexts["Continue Watching"].waitForExistence(timeout: 5),
+            "The Continue Watching fixture must display its section"
+        )
     }
 
     func testContinueWatchingItems() throws {
         sleep(2)
 
-        if app.staticTexts["Continue Watching"].exists {
+        if requireUICondition(app.staticTexts["Continue Watching"].exists) {
             // Should have continue watching items
             let images = app.images
             XCTAssertGreaterThan(images.count, 0, "Continue watching should display items")
@@ -164,15 +165,17 @@ final class HomeScreenUITests: XCTestCase {
         sleep(2)
 
         // Watchlist section might be present
-        if app.staticTexts["My Watchlist"].exists || app.staticTexts["Watchlist"].exists {
-            XCTAssertTrue(true, "Watchlist section exists")
-        }
+        XCTAssertTrue(
+            app.staticTexts["My Watchlist"].waitForExistence(timeout: 5) ||
+                app.staticTexts["Watchlist"].waitForExistence(timeout: 2),
+            "The watchlist fixture must display its section"
+        )
     }
 
     func testWatchlistItems() throws {
         sleep(2)
 
-        if app.staticTexts["My Watchlist"].exists || app.staticTexts["Watchlist"].exists {
+        if requireUICondition(app.staticTexts["My Watchlist"].exists || app.staticTexts["Watchlist"].exists) {
             // Should have watchlist items
             let images = app.images
             XCTAssertGreaterThan(images.count, 0, "Watchlist should display items")
@@ -185,18 +188,18 @@ final class HomeScreenUITests: XCTestCase {
         sleep(2)
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             // Scroll down
             scrollView.swipeUp()
-            sleep(0.5)
+            Thread.sleep(forTimeInterval: 0.5)
 
             // Scroll down more
             scrollView.swipeUp()
-            sleep(0.5)
+            Thread.sleep(forTimeInterval: 0.5)
 
             // Scroll back up
             scrollView.swipeDown()
-            sleep(0.5)
+            Thread.sleep(forTimeInterval: 0.5)
 
             XCTAssertTrue(scrollView.exists, "Home screen should support vertical scrolling")
         }
@@ -206,17 +209,17 @@ final class HomeScreenUITests: XCTestCase {
         sleep(2)
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             // Scroll to bottom
             for _ in 1...5 {
                 scrollView.swipeUp()
-                sleep(0.3)
+                Thread.sleep(forTimeInterval: 0.3)
             }
 
             // Scroll to top
             for _ in 1...5 {
                 scrollView.swipeDown()
-                sleep(0.3)
+                Thread.sleep(forTimeInterval: 0.3)
             }
 
             XCTAssertTrue(scrollView.exists, "Should handle full scroll range")
@@ -246,7 +249,7 @@ final class HomeScreenUITests: XCTestCase {
         sleep(2)
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             // Pull down from top to refresh (if implemented)
             let startPoint = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
             let endPoint = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
@@ -266,9 +269,9 @@ final class HomeScreenUITests: XCTestCase {
 
         // Tap content item
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
                 firstImage.tap()
                 sleep(1)
 
@@ -278,7 +281,7 @@ final class HomeScreenUITests: XCTestCase {
                             "Should navigate to details screen")
 
                 // Navigate back
-                if app.navigationBars.buttons.firstMatch.exists {
+                if requireUICondition(app.navigationBars.buttons.firstMatch.exists) {
                     app.navigationBars.buttons.firstMatch.tap()
                     sleep(1)
 
@@ -316,10 +319,10 @@ final class HomeScreenUITests: XCTestCase {
         sleep(2)
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             measure {
                 scrollView.swipeUp()
-                sleep(0.3)
+                Thread.sleep(forTimeInterval: 0.3)
             }
         }
     }
@@ -328,10 +331,10 @@ final class HomeScreenUITests: XCTestCase {
         sleep(2)
 
         let firstImage = app.images.firstMatch
-        if firstImage.exists {
+        if requireUICondition(firstImage.exists) {
             measure {
                 firstImage.swipeLeft()
-                sleep(0.5)
+                Thread.sleep(forTimeInterval: 0.5)
             }
         }
     }
@@ -343,15 +346,15 @@ final class HomeScreenUITests: XCTestCase {
 
         // Scroll multiple times to test memory stability
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             for _ in 1...10 {
                 scrollView.swipeUp()
-                sleep(0.2)
+                Thread.sleep(forTimeInterval: 0.2)
             }
 
             for _ in 1...10 {
                 scrollView.swipeDown()
-                sleep(0.2)
+                Thread.sleep(forTimeInterval: 0.2)
             }
 
             // App should remain responsive
