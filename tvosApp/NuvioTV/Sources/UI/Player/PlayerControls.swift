@@ -675,11 +675,7 @@ struct PlayerControls: View {
         .focusEffectDisabledIfAvailable()
         .onExitCommand(perform: handleExit)
         .onTapGesture {
-            if viewModel.isScrubbing {
-                viewModel.commitScrub()
-            } else {
-                viewModel.togglePlayPause()
-            }
+            viewModel.handleSelectTap()
         }
         .onMoveCommand { direction in
             // Timeline owns move while focused so hold-to-seek cannot promote

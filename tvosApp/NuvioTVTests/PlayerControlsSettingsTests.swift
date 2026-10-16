@@ -1059,6 +1059,117 @@ extension PlayerControlsSettingsTests {
     }
 
     @MainActor
+    func test1stGenRemoteEdgeClickSeeksLeftAndRight() {
+        let provider = ControlledScrubThumbnailProvider()
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            scrubThumbnailProvider: provider
+        )
+        defer { model.commitPendingSeekIfNeeded(); model.pendingSeekDelta = 0 }
+        model.seekStepSeconds = 10
+        model.time = PlayerTime(current: 100, duration: 1000)
+        model.status = .playing
+
+        // Left edge click on 1st Gen remote (x = -0.8)
+        model.handleGCButtonA(isPressed: true, touchX: -0.8)
+        model.handleGCButtonA(isPressed: false, touchX: -0.8)
+        model.handleSelectTap()
+
+        XCTAssertEqual(model.pendingSeekDelta, -10, "Left edge click must seek backward 10s")
+        XCTAssertEqual(model.status, .playing, "Left edge click must not pause playback")
+
+        // Right edge click on 1st Gen remote (x = 0.8)
+        model.handleGCButtonA(isPressed: true, touchX: 0.8)
+        model.handleGCButtonA(isPressed: false, touchX: 0.8)
+        model.handleSelectTap()
+
+        XCTAssertEqual(model.pendingSeekDelta, 0, "Right edge click must seek forward 10s (-10 + 10 = 0)")
+        XCTAssertEqual(model.status, .playing, "Right edge click must not pause playback")
+    }
+
+    @MainActor
+    func test1stGenRemoteCenterClickTogglesPlayPause() {
+        let provider = ControlledScrubThumbnailProvider()
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            scrubThumbnailProvider: provider
+        )
+        defer { model.commitPendingSeekIfNeeded(); model.pendingSeekDelta = 0 }
+        model.time = PlayerTime(current: 100, duration: 1000)
+        model.status = .paused
+
+        // Center click on 1st Gen remote (x = 0.0) while paused resumes playback
+        model.handleGCButtonA(isPressed: true, touchX: 0.0)
+        model.handleGCButtonA(isPressed: false, touchX: 0.0)
+        model.handleSelectTap()
+
+        XCTAssertEqual(model.pendingSeekDelta, 0, "Center click must not seek")
+        XCTAssertEqual(model.status, .playing, "Center click must toggle play/pause to playing")
+    }
+
+    @MainActor
+    func test1stGenRemoteEdgeTapSeeks() {
+        let provider = ControlledScrubThumbnailProvider()
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            scrubThumbnailProvider: provider
+        )
+        defer { model.commitPendingSeekIfNeeded(); model.pendingSeekDelta = 0 }
+        model.seekStepSeconds = 10
+        model.time = PlayerTime(current: 100, duration: 1000)
+        model.status = .playing
+
+        // Light touch tap on left edge (x = -0.8) without clicking
+        model.dpadSample(x: -0.8, y: 0.0)
+        model.dpadSample(x: 0.0, y: 0.0)
+
+        XCTAssertEqual(model.pendingSeekDelta, -10, "Left edge light tap must seek backward 10s")
+
+        // Light touch tap on right edge (x = 0.8) without clicking
+        model.dpadSample(x: 0.8, y: 0.0)
+        model.dpadSample(x: 0.0, y: 0.0)
+
+        XCTAssertEqual(model.pendingSeekDelta, 0, "Right edge light tap must seek forward 10s")
+    }
+
+    @MainActor
+    func test1stGenRemoteCenterTapShowsPeek() {
+        let provider = ControlledScrubThumbnailProvider()
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            scrubThumbnailProvider: provider
+        )
+        model.time = PlayerTime(current: 100, duration: 1000)
+        model.status = .playing
+
+        // Center tap (x = 0.1)
+        model.dpadSample(x: 0.1, y: 0.0)
+        model.dpadSample(x: 0.0, y: 0.0)
+
+        XCTAssertEqual(model.pendingSeekDelta, 0, "Center tap must not seek")
+        XCTAssertTrue(model.peekVisible, "Center tap must show peek bar")
+    }
+
+    @MainActor
+    func test1stGenRemoteEdgeClickWhilePausedResumesPlayback() {
+        let provider = ControlledScrubThumbnailProvider()
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            scrubThumbnailProvider: provider
+        )
+        model.time = PlayerTime(current: 100, duration: 1000)
+        model.status = .paused
+
+        // Clicking while paused (even on edge) should resume playback and not discrete-seek
+        model.handleGCButtonA(isPressed: true, touchX: 0.8)
+        model.handleGCButtonA(isPressed: false, touchX: 0.8)
+        model.handleSelectTap()
+
+        XCTAssertEqual(model.pendingSeekDelta, 0, "Clicking while paused must not discrete-seek")
+        XCTAssertEqual(model.status, .playing, "Clicking while paused must resume playback")
+    }
+
+    @MainActor
     func testRemoteTouchScrubEntryHasNoThresholdJump() {
         let provider = ControlledScrubThumbnailProvider()
         let model = PlayerViewModel(

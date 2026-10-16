@@ -240,8 +240,8 @@ struct PlaybackErrorOverlayView: View {
                 info: info,
                 reason: viewModel.playbackDebugReason
             )
-            .transition(.opacity.combined(with: .move(edge: .top)))
-            .zIndex(100)
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
+            .zIndex(1)
         }
     }
 }

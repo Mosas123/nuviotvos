@@ -103,8 +103,8 @@ class PlayerViewModel: ObservableObject {
                 engine: activeEngineKind,
                 isLive: isLiveStream,
                 renderedFirstFrame: hasRenderedFirstFrame,
-                position: time.current,
-                duration: time.duration
+                position: self.time.current,
+                duration: self.time.duration
             ))
         }
     }
@@ -414,7 +414,15 @@ class PlayerViewModel: ObservableObject {
     private let wheelSecondsPerRevolution: Double = 24
     private var gcTouchDown = false
     private var gcTouchStartTime = Date()
+    private var gcTouchStartX: Double = 0
+    private var gcLastTouchX: Double?
+    private var gcLastTouchTime: Date?
     private var gcPanFiredThisTouch = false
+    private var gcButtonAPressed = false
+    private var gcButtonAPressedStartTime: Date?
+    private var gcButtonAPressX: Double?
+    private var gcDidHandlePressAsSeek = false
+    private var gcHoldSeekTimer: Timer?
     private var controllerConnectObserver: NSObjectProtocol?
     private var peekTask: Task<Void, Never>?
     private var seekDebounceTask: Task<Void, Never>?
@@ -424,6 +432,7 @@ class PlayerViewModel: ObservableObject {
     private var diskCachedBufferedPosition: Double = 0
     private var diskCachedBytes: Int64 = 0
     private var diskCacheTotalBytes: Int64 = 0
+    private var diskCacheConcurrencyStr: String = ""
     private var diskCachePollTask: Task<Void, Never>?
 
     /// Best estimate of the real title's length, captured at load time from the
@@ -1184,6 +1193,7 @@ class PlayerViewModel: ObservableObject {
         self.clock.duration = 0
         self.clock.buffered = 0
         self.diskCachedBufferedPosition = 0
+        self.diskCacheConcurrencyStr = ""
         self.diskCachePollTask?.cancel()
         self.diskCachePollTask = nil
         self.clock.scrubTarget = nil
@@ -2342,6 +2352,7 @@ class PlayerViewModel: ObservableObject {
                 }
                 info.diskBufferSeconds = diskLeadAhead
             }
+            info.concurrency = diskCacheConcurrencyStr
         }
     }
 
@@ -2638,6 +2649,7 @@ class PlayerViewModel: ObservableObject {
                         playheadSeconds: currentPos, totalDuration: duration
                     )
                     let metrics = await PlaybackStreamCacheManager.shared.activeStreamMetrics()
+                    let concurrency = await PlaybackStreamCacheManager.shared.activeConcurrencyMetrics()
                     guard let self else { return }
                     if let metrics {
                         self.diskCachedBytes = metrics.cachedBytes
@@ -2645,6 +2657,19 @@ class PlayerViewModel: ObservableObject {
                         if self.activeVideoSize == nil && metrics.totalBytes > 0 {
                             self.activeVideoSize = metrics.totalBytes
                         }
+                    }
+                    if let concurrency {
+                        if concurrency.active > 0 {
+                            if concurrency.currentMax < concurrency.configuredMax {
+                                self.diskCacheConcurrencyStr = "\(concurrency.active)/\(concurrency.currentMax) (max \(concurrency.configuredMax))"
+                            } else {
+                                self.diskCacheConcurrencyStr = "\(concurrency.active)/\(concurrency.currentMax) active"
+                            }
+                        } else {
+                            self.diskCacheConcurrencyStr = "0/\(concurrency.currentMax) idle"
+                        }
+                    } else {
+                        self.diskCacheConcurrencyStr = ""
                     }
                     if forwardSec > 0 {
                         self.diskCachedBufferedPosition = min(duration, currentPos + forwardSec)
@@ -3104,6 +3129,7 @@ class PlayerViewModel: ObservableObject {
         diskCachePollTask?.cancel()
         diskCachePollTask = nil
         diskCachedBufferedPosition = 0
+        diskCacheConcurrencyStr = ""
         seekDebounceTask?.cancel()
         seekDebounceTask = nil
         loadWatchdogTask?.cancel()
@@ -3122,6 +3148,8 @@ class PlayerViewModel: ObservableObject {
             NotificationCenter.default.removeObserver(controllerConnectObserver)
             self.controllerConnectObserver = nil
         }
+        gcHoldSeekTimer?.invalidate()
+        gcHoldSeekTimer = nil
         trailerResolveTask?.cancel()
         trailerResolveTask = nil
         trickplayResolveTask?.cancel()
@@ -3943,7 +3971,24 @@ class PlayerViewModel: ObservableObject {
         wheelEngaged = false
     }
 
-    private func dpadSample(x: Double, y: Double) {
+    /// Whether discrete directional seek (10s skip / hold-to-seek) can be performed from remote input.
+    var canPerformDiscreteSeek: Bool {
+        status == .playing
+            && hasStartedPlayback
+            && !isLiveStream
+            && !isScrubbing
+            && !showSettingsPanel
+            && !showScenePanel
+            && !isSceneDetailVisible
+            && sidePanel == nil
+            && !postPlayState.isVisible
+            && !showNextEpisodeCard
+            && !showSkipSegmentCard
+            && (!showControls || isTimelineFocused)
+            && currentErrorDiagnostic == nil
+    }
+
+    func dpadSample(x: Double, y: Double) {
         guard !showScenePanel, !isSceneDetailVisible else { return }
         if isScrubbing {
             wheelSample(x: x, y: y)
@@ -3952,17 +3997,134 @@ class PlayerViewModel: ObservableObject {
 
         let touching = abs(x) > 0.001 || abs(y) > 0.001
         if touching {
+            gcLastTouchX = x
+            gcLastTouchTime = Date()
             if !gcTouchDown {
                 gcTouchDown = true
                 gcTouchStartTime = Date()
+                gcTouchStartX = x
                 gcPanFiredThisTouch = false
+                gcDidHandlePressAsSeek = false
             }
         } else if gcTouchDown {
             gcTouchDown = false
             let dur = Date().timeIntervalSince(gcTouchStartTime)
-            if dur < 0.6, !gcPanFiredThisTouch {
-                remoteTapped()
+            let lastX = gcLastTouchX ?? gcTouchStartX
+            if dur < 0.5, !gcPanFiredThisTouch, !gcDidHandlePressAsSeek, !gcButtonAPressed {
+                if canPerformDiscreteSeek, lastX < -0.45 {
+                    handleMoveSeek(direction: .left)
+                } else if canPerformDiscreteSeek, lastX > 0.45 {
+                    handleMoveSeek(direction: .right)
+                } else {
+                    remoteTapped()
+                }
             }
+        }
+    }
+
+    /// Handles GameController buttonA (physical click on Siri Remote touchpad).
+    /// On 1st Gen Siri Remotes (black remote), clicks on the left/right sides trigger discrete seek or hold-to-seek.
+    func handleGCButtonA(isPressed: Bool, pad: GCMicroGamepad? = nil, touchX: Double? = nil) {
+        let currentTouchX = touchX ?? gcLastTouchX ?? pad.map { Double($0.dpad.xAxis.value) } ?? 0
+
+        if isPressed {
+            gcButtonAPressed = true
+            gcButtonAPressedStartTime = Date()
+            gcButtonAPressX = currentTouchX
+
+            if canPerformDiscreteSeek, abs(currentTouchX) > 0.35 {
+                gcHoldSeekTimer?.invalidate()
+                let direction: MoveCommandDirection = currentTouchX < 0 ? .left : .right
+                let timer = Timer(timeInterval: 0.35, repeats: false) { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self, self.gcButtonAPressed else { return }
+                        self.gcDidHandlePressAsSeek = true
+                        if direction == .left {
+                            self.beginRepeatingSkipBackward()
+                        } else {
+                            self.beginRepeatingSkipForward()
+                        }
+                    }
+                }
+                RunLoop.main.add(timer, forMode: .common)
+                gcHoldSeekTimer = timer
+            }
+        } else {
+            gcButtonAPressed = false
+            gcHoldSeekTimer?.invalidate()
+            gcHoldSeekTimer = nil
+
+            if isHoldingSeek {
+                stopRepeatingSkip()
+                gcDidHandlePressAsSeek = true
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    self.gcDidHandlePressAsSeek = false
+                }
+                return
+            }
+
+            let pressX = gcButtonAPressX ?? currentTouchX
+            if canPerformDiscreteSeek, abs(pressX) > 0.35 {
+                if !gcDidHandlePressAsSeek {
+                    gcDidHandlePressAsSeek = true
+                    if pressX < -0.35 {
+                        handleMoveSeek(direction: .left)
+                    } else {
+                        handleMoveSeek(direction: .right)
+                    }
+                }
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    self.gcDidHandlePressAsSeek = false
+                }
+            }
+        }
+    }
+
+    /// Handles a select / click gesture from the remote (e.g. from SwiftUI `.onTapGesture`).
+    /// Dispatches edge clicks to discrete seeking on 1st Gen Siri Remotes, and center clicks to play/pause.
+    func handleSelectTap(isOverlayFocused: Bool = false) {
+        if isOverlayFocused {
+            if isScrubbing {
+                commitScrub()
+            } else if showPauseOverlay {
+                play()
+            } else {
+                togglePlayPause()
+            }
+            return
+        }
+
+        if gcDidHandlePressAsSeek {
+            gcDidHandlePressAsSeek = false
+            return
+        }
+
+        if let lastTouchTime = gcLastTouchTime,
+           Date().timeIntervalSince(lastTouchTime) < 0.45,
+           let lastX = gcLastTouchX,
+           canPerformDiscreteSeek,
+           abs(lastX) > 0.35 {
+            gcDidHandlePressAsSeek = true
+            if lastX < -0.35 {
+                handleMoveSeek(direction: .left)
+            } else {
+                handleMoveSeek(direction: .right)
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                self.gcDidHandlePressAsSeek = false
+            }
+            return
+        }
+
+        if isScrubbing {
+            commitScrub()
+        } else if showPauseOverlay {
+            play()
+        } else {
+            togglePlayPause()
         }
     }
 
@@ -4013,6 +4175,11 @@ class PlayerViewModel: ObservableObject {
             pad.dpad.valueChangedHandler = { [weak self] _, x, y in
                 Task { @MainActor in
                     self?.dpadSample(x: Double(x), y: Double(y))
+                }
+            }
+            pad.buttonA.pressedChangedHandler = { [weak self] _, _, isPressed in
+                Task { @MainActor in
+                    self?.handleGCButtonA(isPressed: isPressed, pad: pad)
                 }
             }
         }
@@ -5457,7 +5624,8 @@ class PlayerViewModel: ObservableObject {
             audioLanguage: audioLanguage,
             audioBitrate: audioBitrate,
             audioSpatialFormat: audioSpatialFormat,
-            audioDecoder: audioDecoder
+            audioDecoder: audioDecoder,
+            avSyncGapMs: Self.sceneAVSyncGap(debug: debug)
         )
     }
 
@@ -5534,6 +5702,11 @@ class PlayerViewModel: ObservableObject {
         case .aether: return aether
         case .mpv: return mpv
         }
+    }
+
+    static func sceneAVSyncGap(debug: PlaybackDebugInfo?) -> Double? {
+        guard let gap = debug?.avSyncGapMs, gap.isFinite else { return nil }
+        return gap
     }
 
     func openScene() {
@@ -5665,6 +5838,12 @@ class PlayerViewModel: ObservableObject {
         if shouldSaveNextUpProgress(at: progressTime), let nextEpisode {
             print("[ContinueWatching][Player] shouldSaveNextUpProgress triggered for nextEpisode: S\(nextEpisode.season)E\(nextEpisode.episode)")
             markWatchedIfNeeded()
+            LastPlaybackStreamStore.remove(
+                metaId: activeMeta.id,
+                season: resolvedEpisodeNumbers?.season,
+                episode: resolvedEpisodeNumbers?.episode,
+                profileId: WatchedStore.activeProfileId
+            )
             if !usesTraktProgress {
                 // The card is up because this episode reached its ending, so
                 // retire it in the ledger before suggesting the next one.
@@ -5699,7 +5878,15 @@ class PlayerViewModel: ObservableObject {
                 url: activeStreamURL,
                 httpHeaders: activeHTTPHeaders,
                 season: season,
-                episode: episode
+                episode: episode,
+                profileId: WatchedStore.activeProfileId
+            )
+        } else {
+            LastPlaybackStreamStore.remove(
+                metaId: activeMeta.id,
+                season: season,
+                episode: episode,
+                profileId: WatchedStore.activeProfileId
             )
         }
         if usesTraktProgress {

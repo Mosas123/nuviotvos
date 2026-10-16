@@ -327,13 +327,9 @@ extension PlayerView {
                     screensaverDebugLog("[ScreensaverDebug][Input] onTapGesture suppressed by isWakingFromBackground")
                     return
                 }
-                if viewModel.isScrubbing {
-                    viewModel.commitScrub()
-                } else if viewModel.showPauseOverlay {
-                    viewModel.play()
-                } else {
-                    viewModel.togglePlayPause()
-                }
+                viewModel.handleSelectTap(
+                    isOverlayFocused: nextEpisodeFocused || cancelAutoPlayFocused || skipSegmentFocused
+                )
             }
             .onMoveCommand { direction in
                 let elapsedWake = Date().timeIntervalSince(lastBecameActiveAt)
@@ -670,6 +666,7 @@ extension PlayerView {
             .animation(.playerControls, value: viewModel.showPauseOverlay)
             .animation(.playerControls, value: viewModel.showScenePanel)
             .animation(.playerControls, value: viewModel.isSceneDetailVisible)
+            .zIndex(20)
         }
     }
 
