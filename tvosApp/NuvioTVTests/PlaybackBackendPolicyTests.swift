@@ -1700,6 +1700,37 @@ final class PlaybackBackendPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testAutomaticSubtitlePreferenceDoesNotPreserveForcedTrackWhenDisabled() {
+        let forced = SubtitleTrack(
+            id: "3", name: "English (Forced)", language: "eng", isSelected: true
+        )
+        XCTAssertFalse(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
+            forced, preferredLanguages: ["English"], allowForcedSubtitles: false
+        ))
+        XCTAssertTrue(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
+            forced, preferredLanguages: ["English"], allowForcedSubtitles: true
+        ))
+        XCTAssertTrue(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
+            SubtitleTrack(id: "4", name: "English Full", language: "eng", isSelected: true),
+            preferredLanguages: ["English"], allowForcedSubtitles: false
+        ))
+        XCTAssertFalse(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
+            forced, preferredLanguages: ["Spanish"], allowForcedSubtitles: true
+        ))
+    }
+
+    @MainActor
+    func testForcedSubtitleLabelsMatchWholeWords() {
+        for label in ["English (Forced)", "FORCED", "Español - Forzado", "Español [Forzados]"] {
+            XCTAssertTrue(PlayerViewModel.isForcedSubtitleLabel(label), label)
+        }
+        for label in ["English Full", "Unforced", "Reinforced", "Forcedly", "", "ForzadosExtra"] {
+            XCTAssertFalse(PlayerViewModel.isForcedSubtitleLabel(label), label)
+        }
+        XCTAssertFalse(PlayerViewModel.isForcedSubtitleLabel(nil))
+    }
+
+    @MainActor
     func testAetherOverlayStatePublishesClockIndependently() {
         let state = AetherSubtitleOverlayState()
         state.updateSourceTime(12.5)
