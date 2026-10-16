@@ -8540,7 +8540,7 @@ private struct SubtitlePreviewCard: View {
 
     private var styledSubtitleText: some View {
         let font = Font.system(size: fontSize, weight: style.bold ? .heavy : .semibold)
-        let fill = Color(hex: style.textColorHex).opacity(Double(style.textOpacity) / 100.0)
+        let fill = Color(hex: style.textColorHex).opacity(Double(min(max(style.textOpacity, 0), 100)) / 100.0)
         let outline = Color(hex: style.outlineColorHex)
         return ZStack {
             if style.outlineEnabled {
