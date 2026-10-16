@@ -43,6 +43,16 @@ public actor FrameExtractor {
     /// Set by `shutdown()`. Once true, the extractor refuses further
     /// work instead of lazily reopening a closed context.
     private var isShutDown = false
+    private var admissionGeneration: UInt64 = 0
+    private var isClosingAuxiliaryContext = false
+    private var contextCloseTask: Task<Void, Never>?
+    private var contextCloseID: UUID?
+    private let beforeContextCloseForTesting: (@Sendable () -> Void)?
+
+    // Internal diagnostics let the @testable concurrency regression prove that
+    // overlapping callers joined one close while its queue operation was held.
+    private(set) var coalescedContextCloseCountForTesting = 0
+    var isClosingContextForTesting: Bool { isClosingAuxiliaryContext }
 
     private let idleInterval: Duration = .seconds(10)
     private var idleTask: Task<Void, Never>?
@@ -57,7 +67,7 @@ public actor FrameExtractor {
     /// Refined results bypass the old 0.1 s snapshot bucket entirely.
     func residentPreview(rawTarget: Double, refined: Bool, maxWidth: Int,
                                 isCancelled: @escaping @Sendable () -> Bool) async -> ScrubFrame? {
-        guard !isShutDown, rawTarget.isFinite,
+        guard !isShutDown, !isClosingAuxiliaryContext, rawTarget.isFinite,
               !Task.isCancelled, !isCancelled() else { return nil }
         guard maxWidth > 0 else { return nil }
         let width = maxWidth
@@ -68,6 +78,7 @@ public actor FrameExtractor {
         currentToken?.cancel()
         boundedCancellation?.cancel()
         let token = CancelToken(); currentToken = token
+        let generation = admissionGeneration
         let context = self.context
         let result: ScrubFrame? = await withTaskCancellationHandler {
             await runOnQueue {
@@ -83,7 +94,7 @@ public actor FrameExtractor {
                 return ScrubFrame(image: image, actualSeconds: actual, refined: didRefine)
             }
         } onCancel: { token.cancel() }
-        guard !Task.isCancelled, !isCancelled(), !token.isCancelled else { return nil }
+        guard generation == admissionGeneration, !Task.isCancelled, !isCancelled(), !token.isCancelled else { return nil }
         if !refined, let result, result.image.bytesPerRow * result.image.height <= 512 * 1_024 {
             residentApproximation = (width, result)
         }
@@ -91,10 +102,12 @@ public actor FrameExtractor {
         return result
     }
 
-    private init(context: FrameDecodeContext, yieldWhile: (@Sendable () -> Bool)?, residentIdentity: String? = nil) {
+    private init(context: FrameDecodeContext, yieldWhile: (@Sendable () -> Bool)?, residentIdentity: String? = nil,
+                 beforeContextCloseForTesting: (@Sendable () -> Void)? = nil) {
         self.context = context
         self.residentIdentity = residentIdentity
         self.yieldWhile = yieldWhile
+        self.beforeContextCloseForTesting = beforeContextCloseForTesting
         self.cache = FrameCache(
             thumbnailLimit: 24,
             snapshotLimit: 2,
@@ -127,6 +140,13 @@ public actor FrameExtractor {
     init(residentReader: IOReader, formatHint: String, identity: String) {
         self.init(context: FrameDecodeContext(reader: residentReader, formatHint: formatHint),
                   yieldWhile: nil, residentIdentity: identity)
+    }
+
+    /// Test-only construction seam for holding the serial queue at context teardown.
+    init(testingReader reader: IOReader, formatHint: String,
+         beforeContextClose: @escaping @Sendable () -> Void) {
+        self.init(context: FrameDecodeContext(reader: reader, formatHint: formatHint),
+                  yieldWhile: nil, beforeContextCloseForTesting: beforeContextClose)
     }
 
     /// Yield decision for elective (thumbnail) extraction. The disposable decode's demuxer pulls
@@ -162,7 +182,8 @@ public actor FrameExtractor {
     /// `snapshot`, uncached (the cache keys on stream time), and with the same Dolby Vision and HDR
     /// conversion as every still.
     func snapshot(afterFirstFrameBy offset: Double, maxSize: CGSize? = nil) async -> CGImage? {
-        guard !isShutDown, offset.isFinite else { return nil }
+        guard !isShutDown, !isClosingAuxiliaryContext, offset.isFinite, !Task.isCancelled else { return nil }
+        let generation = admissionGeneration
         let context = self.context
         let image = await runOnQueue { () -> CGImage? in
             do { try context.ensureOpen() } catch {
@@ -172,6 +193,7 @@ public actor FrameExtractor {
             return context.decodeFrame(at: 0, mode: .snapshot, targetWidth: 0, maxSize: maxSize,
                                        afterFirstFrame: offset, isCancelled: { false })
         }
+        guard generation == admissionGeneration, !Task.isCancelled else { return nil }
         scheduleIdleClose()
         return image
     }
@@ -182,12 +204,13 @@ public actor FrameExtractor {
     /// Unlike snapshot(), this never uses a previously opened or cached context.
     public func boundedSnapshot(at seconds: Double, maxSize: CGSize,
                                 limits: ProbeLimits, cancellation: ProbeCancellation) async -> BoundedStillFrame? {
-        guard !isShutDown, seconds.isFinite, !Task.isCancelled, !cancellation.isCancelled,
+        guard !isShutDown, !isClosingAuxiliaryContext, seconds.isFinite, !Task.isCancelled, !cancellation.isCancelled,
               let control = try? ProbeControl(limits: limits, cancellation: cancellation) else { return nil }
         currentToken?.cancel()
         boundedCancellation?.cancel()
         boundedCancellation = cancellation
         let token = CancelToken(); currentToken = token
+        let generation = admissionGeneration
         let context = self.context
         let result = await withTaskCancellationHandler {
             await runOnQueue { () -> BoundedStillFrame? in
@@ -211,7 +234,7 @@ public actor FrameExtractor {
             cancellation.cancel()
         }
         if boundedCancellation === cancellation { boundedCancellation = nil }
-        return !Task.isCancelled && !cancellation.isCancelled && !token.isCancelled ? result : nil
+        return generation == admissionGeneration && !Task.isCancelled && !cancellation.isCancelled && !token.isCancelled ? result : nil
     }
 
     /// Decode a frame-accurate still at thumbnail dimensions.
@@ -234,10 +257,39 @@ public actor FrameExtractor {
     /// Open the decode context ahead of the first request to hide cold-start latency
     /// (e.g. at the start of a scrub gesture).
     public func prewarm() async {
-        guard !isShutDown else { return }
+        guard !isShutDown, !isClosingAuxiliaryContext, !Task.isCancelled else { return }
+        let generation = admissionGeneration
         let context = self.context
         await runOnQueue { try? context.ensureOpen() }
+        guard generation == admissionGeneration, !Task.isCancelled else { return }
         scheduleIdleClose()
+    }
+
+    /// Transient teardown during active playback: cancels in-flight and bounded work,
+    /// increments the admission generation to reject stale completions, and awaits queue closure.
+    /// Unlike shutdown(), does NOT permanently mark the actor shut down.
+    public func closeAuxiliaryContext() async {
+        guard !isShutDown else {
+            if let task = contextCloseTask { await task.value }
+            return
+        }
+        if let task = contextCloseTask {
+            coalescedContextCloseCountForTesting += 1
+            await task.value
+            return
+        }
+        idleTask?.cancel()
+        idleTask = nil
+        currentToken?.cancel()
+        currentToken = nil
+        boundedCancellation?.cancel()
+        boundedCancellation = nil
+        cache.clear()
+        residentApproximation = nil
+        admissionGeneration &+= 1
+        let (closeID, task) = startContextClose()
+        await task.value
+        finishContextClose(closeID)
     }
 
     /// Permanently tear down the decode context and clear the cache. Awaits teardown on
@@ -246,14 +298,54 @@ public actor FrameExtractor {
     /// and do NOT reopen; create a new FrameExtractor to extract again.
     public func shutdown() async {
         idleTask?.cancel()
+        idleTask = nil
         isShutDown = true
+        admissionGeneration &+= 1
         currentToken?.cancel()
+        currentToken = nil
         boundedCancellation?.cancel()
         boundedCancellation = nil
         cache.clear()
         residentApproximation = nil
+        if let task = contextCloseTask {
+            await task.value
+            return
+        }
+        let (closeID, task) = startContextClose()
+        await task.value
+        finishContextClose(closeID)
+    }
+
+    /// All teardown paths share one serial-queue close. The task is deliberately
+    /// independent of its caller so cancellation cannot strand the admission gate.
+    private func startContextClose() -> (UUID, Task<Void, Never>) {
+        if let contextCloseID, let contextCloseTask {
+            return (contextCloseID, contextCloseTask)
+        }
+        let closeID = UUID()
         let context = self.context
-        await runOnQueue { context.close() }
+        let decodeQueue = self.decodeQueue
+        let beforeClose = beforeContextCloseForTesting
+        isClosingAuxiliaryContext = true
+        let task = Task {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                decodeQueue.async {
+                    beforeClose?()
+                    context.close()
+                    continuation.resume()
+                }
+            }
+        }
+        contextCloseID = closeID
+        contextCloseTask = task
+        return (closeID, task)
+    }
+
+    private func finishContextClose(_ closeID: UUID) {
+        guard contextCloseID == closeID else { return }
+        contextCloseTask = nil
+        contextCloseID = nil
+        isClosingAuxiliaryContext = false
     }
 
     // MARK: - Core
@@ -267,7 +359,7 @@ public actor FrameExtractor {
         relativeToFirstFrame: Bool = false
     ) async -> CGImage? {
         // Audit BIT-105: a 0/0 scrub fraction or `CMTime.indefinite.seconds` is a host bug, not a position.
-        guard !isShutDown, seconds.isFinite, seconds >= 0 else { return nil }
+        guard !isShutDown, !isClosingAuxiliaryContext, !Task.isCancelled, seconds.isFinite, seconds >= 0 else { return nil }
         if let hit = cache.get(mode: mode, seconds: seconds) {
             scheduleIdleClose()
             return hit
@@ -283,39 +375,45 @@ public actor FrameExtractor {
         boundedCancellation?.cancel()
         let token = CancelToken()
         currentToken = token
+        let generation = admissionGeneration
 
         let context = self.context
-        let result = await runOnQueue { () -> FrameResult in
-            if token.isCancelled { return FrameResult(image: nil) }
-            let start = DispatchTime.now()
-            let wasOpen = context.isOpen
-            let bytesBefore = context.bytesFetched
-            do {
-                try context.ensureOpen()
-            } catch {
-                EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
-                return FrameResult(image: nil)
+        let result = await withTaskCancellationHandler {
+            await runOnQueue { () -> FrameResult in
+                if token.isCancelled { return FrameResult(image: nil) }
+                let start = DispatchTime.now()
+                let wasOpen = context.isOpen
+                let bytesBefore = context.bytesFetched
+                do {
+                    try context.ensureOpen()
+                } catch {
+                    EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
+                    return FrameResult(image: nil)
+                }
+                let image = context.decodeFrame(
+                    at: seconds, mode: mode,
+                    targetWidth: targetWidth, maxSize: maxSize,
+                    relativeToFirstFrame: relativeToFirstFrame,
+                    isCancelled: { token.isCancelled }
+                )
+                // Per-miss cost line: correlates extraction bursts with playback stutter
+                // (#93 post-recovery lag diagnosis). bytes = link bandwidth this miss consumed.
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+                let bytes = context.bytesFetched - bytesBefore
+                EngineLog.emit(
+                    "[FrameExtractor] miss mode=\(mode) t=\(String(format: "%.2f", seconds))s "
+                    + "took=\(String(format: "%.0f", ms))ms bytes=\(bytes) "
+                    + "reopened=\(wasOpen ? "n" : "y") image=\(image == nil ? "nil" : "ok") "
+                    + "cancelled=\(token.isCancelled ? "y" : "n")",
+                    category: .swPlayback, level: .verbose
+                )
+                return FrameResult(image: image)
             }
-            let image = context.decodeFrame(
-                at: seconds, mode: mode,
-                targetWidth: targetWidth, maxSize: maxSize,
-                relativeToFirstFrame: relativeToFirstFrame,
-                isCancelled: { token.isCancelled }
-            )
-            // Per-miss cost line: correlates extraction bursts with playback stutter
-            // (#93 post-recovery lag diagnosis). bytes = link bandwidth this miss consumed.
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
-            let bytes = context.bytesFetched - bytesBefore
-            EngineLog.emit(
-                "[FrameExtractor] miss mode=\(mode) t=\(String(format: "%.2f", seconds))s "
-                + "took=\(String(format: "%.0f", ms))ms bytes=\(bytes) "
-                + "reopened=\(wasOpen ? "n" : "y") image=\(image == nil ? "nil" : "ok") "
-                + "cancelled=\(token.isCancelled ? "y" : "n")",
-                category: .swPlayback, level: .verbose
-            )
-            return FrameResult(image: image)
+        } onCancel: {
+            token.cancel()
         }
-        if let image = result.image, !token.isCancelled {
+        guard generation == admissionGeneration, !token.isCancelled, !Task.isCancelled else { return nil }
+        if let image = result.image {
             cache.set(image, mode: mode, seconds: seconds)
         }
         scheduleIdleClose()

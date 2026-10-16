@@ -7,6 +7,7 @@
 
 import XCTest
 
+@MainActor
 final class HomeScreenUITests: XCTestCase {
 
     var app: XCUIApplication!
@@ -80,7 +81,7 @@ final class HomeScreenUITests: XCTestCase {
         // Try swiping the hero carousel
         let firstImage = app.images.firstMatch
         if requireUICondition(firstImage.exists) {
-            firstImage.swipeLeft()
+            moveTVFocus(.right, in: app, within: firstImage)
             sleep(1)
 
             // Should transition to next item
@@ -109,7 +110,7 @@ final class HomeScreenUITests: XCTestCase {
         if requireUICondition(images.count > 0) {
             let firstImage = images.firstMatch
             if requireUICondition(firstImage.exists) {
-                firstImage.swipeLeft()
+                moveTVFocus(.right, in: app, within: firstImage)
                 Thread.sleep(forTimeInterval: 0.5)
 
                 XCTAssertTrue(app.exists, "Category rows should support horizontal scrolling")
@@ -125,7 +126,7 @@ final class HomeScreenUITests: XCTestCase {
         if requireUICondition(images.count > 1) {
             let item = images.element(boundBy: 1)
             if requireUICondition(item.exists && item.isHittable) {
-                item.tap()
+                selectTVElement(item, in: app)
                 sleep(1)
 
                 // Should navigate to details
@@ -190,15 +191,15 @@ final class HomeScreenUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         if requireUICondition(scrollView.exists) {
             // Scroll down
-            scrollView.swipeUp()
+            moveTVFocus(.down, in: app, within: scrollView)
             Thread.sleep(forTimeInterval: 0.5)
 
             // Scroll down more
-            scrollView.swipeUp()
+            moveTVFocus(.down, in: app, within: scrollView)
             Thread.sleep(forTimeInterval: 0.5)
 
             // Scroll back up
-            scrollView.swipeDown()
+            moveTVFocus(.up, in: app, within: scrollView)
             Thread.sleep(forTimeInterval: 0.5)
 
             XCTAssertTrue(scrollView.exists, "Home screen should support vertical scrolling")
@@ -212,13 +213,13 @@ final class HomeScreenUITests: XCTestCase {
         if requireUICondition(scrollView.exists) {
             // Scroll to bottom
             for _ in 1...5 {
-                scrollView.swipeUp()
+                moveTVFocus(.down, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.3)
             }
 
             // Scroll to top
             for _ in 1...5 {
-                scrollView.swipeDown()
+                moveTVFocus(.up, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.3)
             }
 
@@ -246,20 +247,7 @@ final class HomeScreenUITests: XCTestCase {
     // MARK: - Refresh Tests
 
     func testPullToRefresh() throws {
-        sleep(2)
-
-        let scrollView = app.scrollViews.firstMatch
-        if requireUICondition(scrollView.exists) {
-            // Pull down from top to refresh (if implemented)
-            let startPoint = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
-            let endPoint = scrollView.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-
-            startPoint.press(forDuration: 0.1, thenDragTo: endPoint)
-            sleep(2)
-
-            // Should handle pull-to-refresh gracefully (even if not implemented)
-            XCTAssertTrue(scrollView.exists, "Should handle pull gesture")
-        }
+        throw XCTSkip("Touch pull-to-refresh has no defined tvOS remote action or refresh fixture.")
     }
 
     // MARK: - Navigation Tests
@@ -272,7 +260,7 @@ final class HomeScreenUITests: XCTestCase {
         if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
             if requireUICondition(firstImage.exists && firstImage.isHittable) {
-                firstImage.tap()
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 // Should navigate to details
@@ -281,8 +269,8 @@ final class HomeScreenUITests: XCTestCase {
                             "Should navigate to details screen")
 
                 // Navigate back
-                if requireUICondition(app.navigationBars.buttons.firstMatch.exists) {
-                    app.navigationBars.buttons.firstMatch.tap()
+                if requireUICondition(app.exists) {
+                    XCUIRemote.shared.press(.menu)
                     sleep(1)
 
                     // Should return to home screen
@@ -321,7 +309,7 @@ final class HomeScreenUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         if requireUICondition(scrollView.exists) {
             measure {
-                scrollView.swipeUp()
+                moveTVFocus(.down, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.3)
             }
         }
@@ -333,7 +321,7 @@ final class HomeScreenUITests: XCTestCase {
         let firstImage = app.images.firstMatch
         if requireUICondition(firstImage.exists) {
             measure {
-                firstImage.swipeLeft()
+                moveTVFocus(.right, in: app, within: firstImage)
                 Thread.sleep(forTimeInterval: 0.5)
             }
         }
@@ -348,12 +336,12 @@ final class HomeScreenUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         if requireUICondition(scrollView.exists) {
             for _ in 1...10 {
-                scrollView.swipeUp()
+                moveTVFocus(.down, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.2)
             }
 
             for _ in 1...10 {
-                scrollView.swipeDown()
+                moveTVFocus(.up, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.2)
             }
 

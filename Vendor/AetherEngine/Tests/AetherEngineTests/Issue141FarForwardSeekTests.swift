@@ -37,6 +37,7 @@ struct Issue141FarForwardSeekTests {
                 if storeOnRestart {
                     cache?.store(index: idx, data: Data(repeating: 0x41, count: 8))
                 }
+                return .restarted(at: idx)
             },
             restartActivity: { false },
             activeProducerBase: { producerBase },

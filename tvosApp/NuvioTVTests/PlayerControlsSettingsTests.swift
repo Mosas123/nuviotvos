@@ -2,6 +2,23 @@ import XCTest
 import CoreGraphics
 @testable import NuvioTV
 
+private final class PlaybackTaskCancellationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _isCancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _isCancelled
+    }
+
+    func markCancelled() {
+        lock.lock()
+        _isCancelled = true
+        lock.unlock()
+    }
+}
+
 @MainActor
 private final class PlayerControlsTestEngine: PlaybackEngineControlling {
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
@@ -67,6 +84,8 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertEqual(SettingsKey.playerShowAudio, "nuvio.tv.settings.playback.showAudio")
         XCTAssertEqual(SettingsKey.seekPreviewEnabled, "nuvio.tv.settings.playback.seekPreviewEnabled")
         XCTAssertEqual(SettingsKey.showLoadingStatus, "nuvio.tv.settings.playback.showLoadingStatus")
+        XCTAssertEqual(SettingsKey.audioDelayPersistEnabled, "nuvio.tv.settings.playback.audioDelayPersistEnabled")
+        XCTAssertEqual(SettingsKey.persistentAudioDelayMs, "nuvio.tv.settings.playback.persistentAudioDelayMs")
 
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowPiP))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowEpisodes))
@@ -75,6 +94,8 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.playerShowAudio))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.seekPreviewEnabled))
         XCTAssertTrue(SettingsKey.all.contains(SettingsKey.showLoadingStatus))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.audioDelayPersistEnabled))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.persistentAudioDelayMs))
     }
 
     func testPromptFocusBlocksWindowInputCaptureButTimelineCaptureRemainsAllowed() {
@@ -193,6 +214,52 @@ final class PlayerControlsSettingsTests: XCTestCase {
             HybridSeekThumbnailPolicy.coarseLookupTolerance(duration: 4 * 60 * 60),
             10.0
         )
+    }
+
+    @MainActor
+    func testPlaybackEntryCancelsCoarseWorkOnce() async throws {
+        let controller = try XCTUnwrap(AetherPlaybackController())
+        defer {
+            controller.coarseThumbnailTask?.cancel()
+            controller.destroyPlayer()
+        }
+
+        controller.applyPhase(.paused, engineIsBuffering: false)
+        let firstProbe = PlaybackTaskCancellationProbe()
+        let firstTask = makePendingThumbnailTask(probe: firstProbe)
+        controller.coarseThumbnailTask = firstTask
+
+        controller.applyPhase(.playing, engineIsBuffering: false)
+        XCTAssertNil(controller.coarseThumbnailTask)
+        for _ in 0..<1_000 where !firstProbe.isCancelled {
+            await Task.yield()
+        }
+        XCTAssertTrue(firstProbe.isCancelled)
+
+        // CombineLatest may deliver multiple updates for one .playing phase. A
+        // repeated value must not cancel work started after the phase transition.
+        let secondProbe = PlaybackTaskCancellationProbe()
+        let secondTask = makePendingThumbnailTask(probe: secondProbe)
+        controller.coarseThumbnailTask = secondTask
+        controller.applyPhase(.playing, engineIsBuffering: false)
+        XCTAssertFalse(secondProbe.isCancelled)
+        XCTAssertNotNil(controller.coarseThumbnailTask)
+
+        secondTask.cancel()
+        await secondTask.value
+        XCTAssertTrue(secondProbe.isCancelled)
+    }
+
+    private func makePendingThumbnailTask(
+        probe: PlaybackTaskCancellationProbe
+    ) -> Task<Void, Never> {
+        Task {
+            await withTaskCancellationHandler {
+                try? await Task.sleep(for: .seconds(60))
+            } onCancel: {
+                probe.markCancelled()
+            }
+        }
     }
 
     func testHybridSeekThumbnailIndexRejectsDistantFramesForShortAndLongSeeks() async {
@@ -1817,6 +1884,119 @@ final class ExternalPlayerTests: XCTestCase {
             isSelected: true
         )
         XCTAssertEqual(SubtitleMenuFormatter.optionDisplayTitle(for: builtInWithDetail), "English (SDH)")
+    }
+
+    @MainActor
+    func testAudioDelayPersistenceLifecycle() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let model = PlayerViewModel(
+            sessionCoordinator: coordinator,
+            scrubThumbnailProvider: nil
+        )
+
+        // Clean up before test
+        ProfileSettings.current.removeObject(forKey: SettingsKey.audioDelayPersistEnabled)
+        ProfileSettings.current.removeObject(forKey: SettingsKey.persistentAudioDelayMs)
+        defer {
+            ProfileSettings.current.removeObject(forKey: SettingsKey.audioDelayPersistEnabled)
+            ProfileSettings.current.removeObject(forKey: SettingsKey.persistentAudioDelayMs)
+        }
+
+        // 1. By default, audio delay persistence is disabled
+        XCTAssertFalse(model.isAudioDelayPersistEnabled)
+        XCTAssertEqual(model.audioDelayMs, 0)
+
+        // 2. Setting audio delay when persistence is disabled does not persist to settings
+        model.setAudioDelayMs(250)
+        XCTAssertEqual(model.audioDelayMs, 250)
+        XCTAssertEqual(ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs), 0)
+
+        // 3. Enabling persistence saves current delay and updates setting
+        model.setAudioDelayPersistEnabled(true)
+        XCTAssertTrue(model.isAudioDelayPersistEnabled)
+        XCTAssertEqual(ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs), 250)
+
+        // 4. Modifying delay while persistence is enabled updates persisted value
+        model.setAudioDelayMs(-150)
+        XCTAssertEqual(model.audioDelayMs, -150)
+        XCTAssertEqual(ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs), -150)
+
+        // 5. Clamping works as expected (-3000ms to +3000ms)
+        model.setAudioDelayMs(5000)
+        XCTAssertEqual(model.audioDelayMs, 3000)
+        XCTAssertEqual(ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs), 3000)
+
+        model.setAudioDelayMs(-4000)
+        XCTAssertEqual(model.audioDelayMs, -3000)
+        XCTAssertEqual(ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs), -3000)
+
+        // 6. Resetting / disabling persistence keeps current session delay but unsets persist flag
+        model.setAudioDelayMs(100)
+        model.setAudioDelayPersistEnabled(false)
+        XCTAssertFalse(model.isAudioDelayPersistEnabled)
+        XCTAssertEqual(model.audioDelayMs, 100)
+    }
+
+    @MainActor
+    func testAudioDelayPersistenceAcrossPlaybackSessions() {
+        ProfileSettings.current.removeObject(forKey: SettingsKey.audioDelayPersistEnabled)
+        ProfileSettings.current.removeObject(forKey: SettingsKey.persistentAudioDelayMs)
+        defer {
+            ProfileSettings.current.removeObject(forKey: SettingsKey.audioDelayPersistEnabled)
+            ProfileSettings.current.removeObject(forKey: SettingsKey.persistentAudioDelayMs)
+        }
+
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        let model = PlayerViewModel(
+            sessionCoordinator: coordinator,
+            scrubThumbnailProvider: nil
+        )
+
+        // Enable persistence and set delay to 350ms
+        model.setAudioDelayMs(350)
+        model.setAudioDelayPersistEnabled(true)
+        XCTAssertEqual(model.audioDelayMs, 350)
+
+        // Start a new stream session (applyStreamState with preserveSessionPreferences = false)
+        let sampleMeta = NuvioMeta(
+            id: "tt1234567",
+            name: "Sample Movie",
+            type: "movie",
+            year: 2024,
+            genres: [],
+            rating: 8.0,
+            releaseInfo: "2024",
+            runtime: "120 min"
+        )
+        model.applyStreamState(
+            url: URL(string: "https://example.com/video.mkv")!,
+            meta: sampleMeta,
+            subtitle: "Sample Subtitle",
+            httpHeaders: [:],
+            externalSubtitles: [],
+            resumeFrom: nil,
+            preserveSessionPreferences: false
+        )
+
+        // Audio delay should have reloaded from persistent settings!
+        XCTAssertEqual(model.audioDelayMs, 350)
+
+        // Disable persistence
+        model.setAudioDelayPersistEnabled(false)
+
+        // Start another session without preserving session preferences
+        model.applyStreamState(
+            url: URL(string: "https://example.com/video2.mkv")!,
+            meta: sampleMeta,
+            subtitle: "Sample Subtitle 2",
+            httpHeaders: [:],
+            externalSubtitles: [],
+            resumeFrom: nil,
+            preserveSessionPreferences: false
+        )
+
+        // Audio delay should have reset to 0!
+        XCTAssertEqual(model.audioDelayMs, 0)
     }
 }
 

@@ -2208,6 +2208,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard level == "warn" || level == "error" || level == "fatal" else { return }
+        PlaybackDiagnosticLogStore.shared.append(
+            source: "MPV",
+            message: "[\(level)] [\(prefix)] \(trimmed)"
+        )
         errorStateLock.lock()
         recentPlaybackLogs.append("[\(prefix)] \(trimmed)")
         if recentPlaybackLogs.count > 4 {

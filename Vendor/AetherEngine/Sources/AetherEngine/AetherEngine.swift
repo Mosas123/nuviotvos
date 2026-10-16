@@ -1382,6 +1382,8 @@ public final class AetherEngine: ObservableObject {
     /// #240: the lead the running session was started with. A changed lead (the OCR worker arming)
     /// is the one anchor change that still needs a rebuild, since the loop captures it at start.
     var subtitleForwardPrefetchActiveLead: Double?
+    /// Stashed prefetch anchor when subtitle forward prefetch is deferred until HLSVideoEngine builds >= 2 segments.
+    var deferredSubtitleForwardPrefetchAnchor: Double?
     /// #496: why the last live prefetch session was cancelled. Set only when a task was actually
     /// running, so it names a real teardown rather than the many no-op cancels on the way through
     /// a selection. Mirrors the log line; kept as state so a test can assert the routing.
@@ -1933,6 +1935,7 @@ public final class AetherEngine: ObservableObject {
             guard let session = nativeVideoSession else {
                 residentPlaylistRanges = []
                 residentRanges = []
+                deferredSubtitleForwardPrefetchAnchor = nil
                 return
             }
             session.setResidentRangesObserver { [weak self, weak session] ranges in
@@ -1940,6 +1943,14 @@ public final class AetherEngine: ObservableObject {
                     guard let self, let session, self.nativeVideoSession === session else { return }
                     self.residentPlaylistRanges = ranges
                     self.republishResidentRanges()
+                    if let anchor = self.deferredSubtitleForwardPrefetchAnchor, session.segmentCacheCount >= 2 {
+                        self.deferredSubtitleForwardPrefetchAnchor = nil
+                        EngineLog.emit(
+                            "[AetherEngine] resuming deferred subtitle forward prefetch (resident count=\(session.segmentCacheCount))",
+                            category: .engine
+                        )
+                        self.startSubtitleForwardPrefetcher(startAt: anchor)
+                    }
                 }
             }
             residentPlaylistRanges = []

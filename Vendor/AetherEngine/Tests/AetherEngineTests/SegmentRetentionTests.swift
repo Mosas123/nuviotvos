@@ -113,6 +113,7 @@ struct VideoSegmentProviderRetentionTests {
                 recorder.record(idx)
                 // Simulate the restarted producer: write the segment AVPlayer is starved for.
                 cache?.store(index: idx, data: Data(repeating: 0xCD, count: 10))
+                return .restarted(at: idx)
             }
         )
     }

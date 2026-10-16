@@ -24,6 +24,9 @@ class DetailsViewModel: ObservableObject {
     @Published private(set) var uiState = DetailsUiState()
     private(set) var didLoadMetadataSuccessfully = false
     private(set) var metadataLoadError: String?
+    private(set) var prefetchedStreamId: String?
+    private(set) var prefetchedEpisode: NuvioVideo?
+    private(set) var prefetchStartTime: Date?
 
     private let repository: CatalogRepository
     private let streamDiscoveryMode: DetailsStreamDiscoveryMode
@@ -65,6 +68,9 @@ class DetailsViewModel: ObservableObject {
         streamObserveTask?.cancel()
         enrichmentTask?.cancel()
         uiState.isLoadingEnrichment = false
+        prefetchedStreamId = nil
+        prefetchedEpisode = nil
+        prefetchStartTime = nil
         detailsRequestGeneration &+= 1
         let requestGeneration = detailsRequestGeneration
 
@@ -126,9 +132,7 @@ class DetailsViewModel: ObservableObject {
                           self.detailsRequestGeneration == requestGeneration,
                           self.uiState.meta?.id == meta.id else { return }
 
-                    if !meta.isSeries {
-                        self.prepareStreams(forId: meta.streamId, type: meta.type)
-                    }
+                    self.triggerStreamPreFetch(for: meta)
                     let metaHasImdbId = NuvioMeta.canonicalImdbID(from: meta.imdbId ?? "") != nil
                         || NuvioMeta.canonicalImdbID(from: meta.id) != nil
                     let needsEnrichmentRetry = !cachedHadImdbId && metaHasImdbId
@@ -169,6 +173,56 @@ class DetailsViewModel: ObservableObject {
         enrichmentTask?.cancel()
         enrichmentTask = nil
         uiState.isLoadingEnrichment = false
+        prefetchedStreamId = nil
+        prefetchedEpisode = nil
+        prefetchStartTime = nil
+    }
+
+    func resolveDefaultPlayTarget(for meta: NuvioMeta) -> (streamId: String, episode: NuvioVideo?)? {
+        if meta.isSeries || NuvioMeta.isSeriesType(meta.type) {
+            guard let videos = meta.videos, !videos.isEmpty else {
+                return nil
+            }
+            let continueItem: ContinueWatchingItem? = {
+                if RemoteTrackingState.isProgressSourceAuthenticated {
+                    return TraktProgressService.currentContinueWatchingItem(for: meta)
+                }
+                return ContinueWatchingStore.item(for: meta.id)
+            }()
+            let watchedKeys = WatchedStore.currentSnapshot().watchedEpisodeKeys(meta: meta)
+            let playTarget = TvDetailsPlayTargetBuilder.makePlayTarget(
+                episodes: videos,
+                continueItem: continueItem,
+                watchedKeys: watchedKeys
+            )
+            if let episode = playTarget.episode {
+                let streamId = meta.canonicalEpisodeStreamId(for: episode)
+                return (streamId, episode)
+            }
+            return nil
+        } else {
+            return (meta.streamId, nil)
+        }
+    }
+
+    func triggerStreamPreFetch(for meta: NuvioMeta) {
+        let prefetchEnabled = (ProfileSettings.current.object(forKey: SettingsKey.backgroundStreamPreFetch) as? Bool) ?? true
+        guard prefetchEnabled else { return }
+        guard prefetchedStreamId == nil else { return }
+
+        guard let (targetStreamId, targetEpisode) = resolveDefaultPlayTarget(for: meta) else {
+            return
+        }
+        prefetchedStreamId = targetStreamId
+        prefetchedEpisode = targetEpisode
+        prefetchStartTime = Date()
+        let contentType = (meta.isSeries || NuvioMeta.isSeriesType(meta.type)) ? "series" : meta.type
+        if let targetEpisode {
+            print("[PreFetch] 🚀 Started background stream pre-fetch for series \"\(meta.name)\" S\(targetEpisode.season)E\(targetEpisode.episode) (streamId: \(targetStreamId))")
+        } else {
+            print("[PreFetch] 🚀 Started background stream pre-fetch for \"\(meta.name)\" (streamId: \(targetStreamId))")
+        }
+        prepareStreams(forId: targetStreamId, type: contentType)
     }
 
     /// Loads More Like This, Production companies, and top Trakt comments
@@ -217,6 +271,16 @@ class DetailsViewModel: ObservableObject {
                         let episodes = await TmdbDetailsService.fetchEpisodes(for: meta)
                         await MainActor.run { [weak self] in
                             self?.applyTmdbEpisodes(episodes, for: meta.id, generation: generation)
+                        }
+                    }
+                }
+
+                // 3b. TMDB Certification (Content Rating)
+                if meta.certification == nil || meta.certification?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                    group.addTask {
+                        let cert = await TmdbDetailsService.fetchCertification(for: meta)
+                        await MainActor.run { [weak self] in
+                            self?.applyCertification(cert, for: meta.id, generation: generation)
                         }
                     }
                 }
@@ -332,6 +396,15 @@ class DetailsViewModel: ObservableObject {
         }
     }
 
+    private func applyCertification(_ certification: String?, for metaId: String, generation: UInt64) {
+        guard isCurrentRequest(metaId: metaId, generation: generation) else { return }
+        guard let cert = certification?.trimmingCharacters(in: .whitespacesAndNewlines), !cert.isEmpty else { return }
+        guard let currentMeta = uiState.meta else { return }
+        if currentMeta.certification == nil || currentMeta.certification?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            uiState.meta = currentMeta.withCertification(cert)
+        }
+    }
+
     private func applyMdbListUserRating(_ rating: Int?, for metaId: String, generation: UInt64) {
         guard isCurrentRequest(metaId: metaId, generation: generation) else { return }
         uiState.mdbListUserRating = rating
@@ -354,7 +427,11 @@ class DetailsViewModel: ObservableObject {
                 fromTmdb: episodes,
                 parentId: currentMeta.id
             )
-            uiState.meta = currentMeta.withVideos(mergedVideos)
+            let updatedMeta = currentMeta.withVideos(mergedVideos)
+            uiState.meta = updatedMeta
+            if (updatedMeta.isSeries || NuvioMeta.isSeriesType(updatedMeta.type)) && prefetchedStreamId == nil {
+                triggerStreamPreFetch(for: updatedMeta)
+            }
         }
     }
 

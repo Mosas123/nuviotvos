@@ -2006,6 +2006,7 @@ private final class PlaybackStreamCacheURLProtocol: URLProtocol {
         var bodyChunkDelay: TimeInterval = 0
         var declaredContentLength: Int? = nil
         var redirectURL: URL? = nil
+        var errorCode: URLError.Code? = nil
     }
 
     struct RequestSnapshot {
@@ -2088,6 +2089,12 @@ private final class PlaybackStreamCacheURLProtocol: URLProtocol {
                 finished = true
                 Self.metricsLock.withLock { Self.activeRequests -= 1 }
                 client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            if let errorCode = response.errorCode {
+                finished = true
+                Self.metricsLock.withLock { Self.activeRequests -= 1 }
+                client?.urlProtocol(self, didFailWithError: URLError(errorCode))
                 return
             }
             if let redirectURL = response.redirectURL {
@@ -3613,13 +3620,13 @@ extension PlaybackStreamCacheTests {
         XCTAssertEqual(PlaybackCacheProfile.medium.hybridCacheTargetLeadSeconds, 90.0)
         XCTAssertEqual(PlaybackCacheProfile.large.hybridCacheTargetLeadSeconds, 150.0)
         XCTAssertEqual(PlaybackCacheProfile.max.hybridCacheTargetLeadSeconds, 240.0)
-        XCTAssertEqual(PlaybackCacheProfile.ultra.hybridCacheTargetLeadSeconds, 360.0)
+        XCTAssertEqual(PlaybackCacheProfile.ultra.hybridCacheTargetLeadSeconds, 600.0)
 
         // 2. Verify Auto lead seconds scaling
         let autoHighRAM = PlaybackCacheProfile.resolveAutoLeadSeconds(
             physicalMemoryBytes: 4 * 1024 * 1024 * 1024, availableMemoryBytes: 1200 * 1024 * 1024
         )
-        XCTAssertEqual(autoHighRAM, 360.0)
+        XCTAssertEqual(autoHighRAM, 600.0)
 
         let autoLowRAM = PlaybackCacheProfile.resolveAutoLeadSeconds(
             physicalMemoryBytes: 2 * 1024 * 1024 * 1024, availableMemoryBytes: 100 * 1024 * 1024
@@ -4093,5 +4100,174 @@ extension PlaybackStreamCacheTests {
         XCTAssertLessThan(elapsed, 2.0, "Demand fetch should bypass the 5s cooldown and complete quickly")
 
         await server.stop()
+    }
+
+    func testCannotConnectBackoffIsSharedBetweenBackgroundAndDemandFetches() async throws {
+        let chunk = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunk * 8)
+        let body = Data(repeating: 0x8D, count: Int(fileLength))
+        let remoteURL = URL(string: "https://cache-test.invalid/transport_backoff_shared")!
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            var response = PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+            if PlaybackStreamCacheURLProtocol.requestCount == 1 {
+                response.errorCode = .cannotConnectToHost
+            }
+            return response
+        }
+
+        let session = "test_transport_backoff_shared_\(UUID().uuidString)"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(session)
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let server = PlaybackStreamCacheServer(
+            remoteURL: remoteURL,
+            fileLength: fileLength,
+            sessionID: session,
+            cacheRoot: root,
+            sessionConfiguration: configuration,
+            rateLimitCooldown: 0.1,
+            transportRetryBaseDelay: 0.25,
+            maxConcurrentUpstream: 1
+        )
+        _ = try await server.start()
+
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1, "Background fill should be the first upstream request")
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.activeRequestCount > 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        // Let the server classify the failed transport before adding a competing demand read.
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        let data = await server.fetchDemandChunk(6)
+
+        XCTAssertEqual(data, Data(repeating: 0x8D, count: chunk))
+        let starts = PlaybackStreamCacheURLProtocol.requestStarts
+        XCTAssertGreaterThanOrEqual(starts.count, 2)
+        XCTAssertTrue(starts.dropFirst().allSatisfy {
+            $0.timeIntervalSince(starts[0]) >= 0.20
+        }, "Every later demand/background request must respect the shared transport cooldown")
+        let demandStart = Int64(chunk * 6)
+        let demandEnd = Int64(chunk * 7)
+        let demandRangeWasFetched = PlaybackStreamCacheURLProtocol.requestSnapshots.contains { snapshot in
+            guard snapshot.url == remoteURL,
+                  let range = snapshot.value(forHTTPHeaderField: "Range"),
+                  range.hasPrefix("bytes=") else { return false }
+            let bounds = range.dropFirst("bytes=".count).split(separator: "-")
+            guard bounds.count == 2,
+                  let lower = Int64(bounds[0]),
+                  let upper = Int64(bounds[1]) else { return false }
+            return lower <= demandStart && upper >= demandEnd - 1
+        }
+        XCTAssertTrue(demandRangeWasFetched, "An upstream range must cover the requested demand chunk")
+        XCTAssertTrue(PlaybackStreamCacheURLProtocol.requestSnapshots.allSatisfy { $0.url == remoteURL })
+
+        await server.stop()
+    }
+
+    func testSuccessfulDemandFetchResetsCannotConnectBackoffStreak() async throws {
+        let chunk = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunk * 8)
+        let body = Data(repeating: 0x6C, count: Int(fileLength))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            var response = PlaybackStreamCacheURLProtocol.response(for: request, body: body, total: fileLength)
+            if [1, 3].contains(PlaybackStreamCacheURLProtocol.requestCount) {
+                response.errorCode = .cannotConnectToHost
+            }
+            return response
+        }
+
+        let session = "test_transport_backoff_reset_\(UUID().uuidString)"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(session)
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            try? FileManager.default.removeItem(at: root)
+        }
+        let server = PlaybackStreamCacheServer(
+            remoteURL: URL(string: "https://cache-test.invalid/transport_backoff_reset")!,
+            fileLength: fileLength,
+            sessionID: session,
+            cacheRoot: root,
+            sessionConfiguration: configuration,
+            transportRetryBaseDelay: 0.6,
+            maxConcurrentUpstream: 1
+        )
+
+        let firstRead = await server.fetchDemandChunk(0)
+        let recoveredRead = await server.fetchDemandChunk(4)
+
+        XCTAssertEqual(firstRead, Data(repeating: 0x6C, count: chunk))
+        XCTAssertEqual(recoveredRead, Data(repeating: 0x6C, count: chunk))
+        let starts = PlaybackStreamCacheURLProtocol.requestStarts
+        XCTAssertEqual(starts.count, 4)
+        let firstRetryDelay = starts[1].timeIntervalSince(starts[0])
+        let postRecoveryRetryDelay = starts[3].timeIntervalSince(starts[2])
+        XCTAssertGreaterThanOrEqual(firstRetryDelay, 0.55)
+        XCTAssertGreaterThanOrEqual(postRecoveryRetryDelay, 0.55)
+        XCTAssertLessThan(postRecoveryRetryDelay, 1.0,
+                          "A successful upstream fetch must reset the next transport failure to the base delay")
+
+        await server.stop()
+    }
+
+    func testStoppingServerCancelsCannotConnectCooldownWaitPromptly() async throws {
+        let chunk = Int(PlaybackStreamDiskCache.defaultChunkSize)
+        let fileLength = Int64(chunk * 4)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PlaybackStreamCacheURLProtocol.self]
+        PlaybackStreamCacheURLProtocol.resetMetrics()
+        PlaybackStreamCacheURLProtocol.handler = { request in
+            var response = PlaybackStreamCacheURLProtocol.response(
+                for: request, body: Data(repeating: 0x2A, count: Int(fileLength)), total: fileLength)
+            response.errorCode = .cannotConnectToHost
+            return response
+        }
+
+        let session = "test_transport_backoff_stop_\(UUID().uuidString)"
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(session)
+        defer {
+            PlaybackStreamCacheURLProtocol.handler = nil
+            try? FileManager.default.removeItem(at: root)
+        }
+        let server = PlaybackStreamCacheServer(
+            remoteURL: URL(string: "https://cache-test.invalid/transport_backoff_stop")!,
+            fileLength: fileLength,
+            sessionID: session,
+            cacheRoot: root,
+            sessionConfiguration: configuration,
+            transportRetryBaseDelay: 2.0,
+            maxConcurrentUpstream: 1
+        )
+
+        let fetch = Task { await server.fetchDemandChunk(0) }
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.requestCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
+        for _ in 0..<100 where PlaybackStreamCacheURLProtocol.activeRequestCount > 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        let stopStarted = Date()
+        await server.stop()
+        let result = await fetch.value
+
+        XCTAssertNil(result)
+        XCTAssertLessThan(Date().timeIntervalSince(stopStarted), 1.0,
+                          "Stopping must interrupt the cooldown wait instead of waiting out its deadline")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 1)
     }
 }
