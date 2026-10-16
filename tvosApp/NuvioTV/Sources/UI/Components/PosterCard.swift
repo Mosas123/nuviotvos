@@ -389,7 +389,10 @@ struct PosterCard: View {
             // trailer is ready to draw, avoiding a black frame on slow links.
             .opacity(isTrailerPreviewVisible ? 0 : 1)
             .overlay {
-                if isTrailerPreviewActive && trailersEnabled && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
+                // Prepare during the delay, but keep playback and visibility
+                // gated by isTrailerPreviewActive until the timer completes.
+                if isFocused && effectiveLandscape && trailersEnabled
+                    && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
                     TrailerPreviewPlayer(
                         meta: meta,
                         isActive: isTrailerPreviewActive,
@@ -1144,8 +1147,8 @@ struct TrailerPlayerSurface: UIViewRepresentable {
 /// Shared video preview for Home cards and the focused Grid hero.
 struct TrailerPreviewPlayer: View {
     let meta: NuvioMeta
-    /// Resolution begins as soon as the card gains focus; playback waits for
-    /// Home's configured delay to promote the card to landscape.
+    /// Prepare while the caller's delay runs; playback and visibility remain
+    /// gated by its activation state.
     let isActive: Bool
     let onPlaybackReady: () -> Void
     let onPlaybackFinished: () -> Void
@@ -1159,6 +1162,8 @@ struct TrailerPreviewPlayer: View {
     @State private var itemStatusObserver: NSKeyValueObservation?
     @State private var failedToEndObserver: NSObjectProtocol?
     @State private var didReportUnavailable = false
+    @State private var isPlaybackUnavailable = false
+    @State private var playbackActiveOverride: Bool?
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
     private let resolver = YouTubeTrailerResolver.shared
 
@@ -1175,11 +1180,18 @@ struct TrailerPreviewPlayer: View {
         .opacity(isVisible ? 1 : 0)
         .animation(.easeInOut(duration: 0.32), value: isVisible)
         .allowsHitTesting(false)
+        .onAppear { playbackActiveOverride = isActive }
         .task(id: previewIdentity) {
             await startPreview()
         }
         .onChange(of: isActive) { _, active in
+            playbackActiveOverride = active
             if active {
+                if isPlaybackUnavailable {
+                    reportPlaybackUnavailable()
+                    return
+                }
+                applySoundPreference(trailerPreviewSound)
                 player.play()
                 if isRenderReady { onPlaybackReady() }
             } else {
@@ -1199,6 +1211,7 @@ struct TrailerPreviewPlayer: View {
             onPlaybackFinished()
         }
         .onDisappear {
+            playbackActiveOverride = false
             isRenderReady = false
             cleanupTimeObserver()
             cleanupFailureObservers()
@@ -1223,10 +1236,15 @@ struct TrailerPreviewPlayer: View {
         isActive && isRenderReady
     }
 
+    // The resolving task can outlive the View value that launched it. Read
+    // shared state after suspension instead of that value's initial isActive.
+    private var wantsPlayback: Bool { playbackActiveOverride ?? isActive }
+
     @MainActor
     private func startPreview() async {
         isRenderReady = false
         didReportUnavailable = false
+        isPlaybackUnavailable = false
 
         guard let playbackSource = await resolver.resolvePreview(for: meta) else {
             guard !Task.isCancelled else { return }
@@ -1261,7 +1279,7 @@ struct TrailerPreviewPlayer: View {
         observePlaybackFailure(for: item)
         applySoundPreference(trailerPreviewSound)
         setupTimeObserver()
-        if isActive {
+        if wantsPlayback {
             player.play()
         }
     }
@@ -1342,7 +1360,10 @@ struct TrailerPreviewPlayer: View {
 
     @MainActor
     private func reportPlaybackUnavailable() {
-        guard let onPlaybackUnavailable, !didReportUnavailable else { return }
+        isPlaybackUnavailable = true
+        // Preparation may fail before the delay ends. Report it when playback
+        // becomes active, so the parent's existing fallback guards still apply.
+        guard wantsPlayback, let onPlaybackUnavailable, !didReportUnavailable else { return }
         didReportUnavailable = true
         onPlaybackUnavailable()
     }
@@ -1350,7 +1371,7 @@ struct TrailerPreviewPlayer: View {
     private func applySoundPreference(_ soundEnabled: Bool) {
         player.isMuted = !soundEnabled
         player.volume = soundEnabled ? 1 : 0
-        guard soundEnabled else { return }
+        guard soundEnabled, wantsPlayback else { return }
 
         // Home previews do not pass through PlayerView, which normally
         // activates the movie-playback audio session for full-screen video.

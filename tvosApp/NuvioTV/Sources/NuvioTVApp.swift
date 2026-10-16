@@ -9737,11 +9737,11 @@ private struct TVGridHeroSlideshowView: View {
             #if os(tvOS)
             let previewIdentity = currentTrailerPreviewIdentity ?? trailerPreviewIdentity(for: item)
             if isTrailerPreviewEligible,
-               activeTrailerPreviewIdentity == previewIdentity,
+               currentTrailerPreviewIdentity == previewIdentity,
                finishedTrailerPreviewIdentity != previewIdentity {
                 TrailerPreviewPlayer(
                     meta: item,
-                    isActive: true,
+                    isActive: activeTrailerPreviewIdentity == previewIdentity,
                     onPlaybackReady: {
                         guard isTrailerPreviewEligible,
                               currentTrailerPreviewIdentity == previewIdentity,
@@ -9771,7 +9771,7 @@ private struct TVGridHeroSlideshowView: View {
                     }
                 )
                 .id(previewIdentity)
-                .task(id: "\(previewIdentity)|\(readyTrailerPreviewIdentity == previewIdentity)") {
+                .task(id: "\(previewIdentity)|\(activeTrailerPreviewIdentity == previewIdentity)|\(readyTrailerPreviewIdentity == previewIdentity)") {
                     await enforceTrailerRenderReadinessTimeout(for: previewIdentity)
                 }
             }
