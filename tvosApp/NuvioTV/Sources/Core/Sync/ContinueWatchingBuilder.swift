@@ -117,6 +117,7 @@ enum ContinueWatchingBuilder {
     /// `ContinueWatchingStore` can reorder those items by release recency, so
     /// their membership cannot be recovered by slicing `materialized`.
     @MainActor private static var persistedFirstPageIDs: Set<String> = []
+    @MainActor private static var persistedFirstPageItems: [ContinueWatchingItem] = []
     /// Whose history `plan` and `materialized` describe.
     ///
     /// This state is static while the profile it belongs to is not, and Home
@@ -139,16 +140,24 @@ enum ContinueWatchingBuilder {
     @MainActor
     static var memoryOnlyPagedItems: [ContinueWatchingItem] {
         guard materializedProfileId == WatchProgressLedger.activeProfileId else { return [] }
-        return memoryOnlyItems(from: materialized, persistedItemIDs: persistedFirstPageIDs)
+        return memoryOnlyItems(
+            from: materialized,
+            persistedItemIDs: persistedFirstPageIDs,
+            persistedItems: persistedFirstPageItems
+        )
     }
 
     /// Pure membership filter kept separate from view state so page membership
     /// remains stable even when the store's recency ordering differs.
     static func memoryOnlyItems(
         from items: [ContinueWatchingItem],
-        persistedItemIDs: Set<String>
+        persistedItemIDs: Set<String>,
+        persistedItems: [ContinueWatchingItem] = []
     ) -> [ContinueWatchingItem] {
-        items.filter { !persistedItemIDs.contains($0.meta.id) }
+        items.filter { item in
+            !persistedItemIDs.contains(item.meta.id)
+                && !persistedItems.contains { WatchedStore.sameContent($0.meta, item.meta) }
+        }
     }
 
     /// Merge later in-memory pages first and the current persisted snapshot
@@ -158,14 +167,11 @@ enum ContinueWatchingBuilder {
         _ memoryOnlyItems: [ContinueWatchingItem],
         with storedItems: [ContinueWatchingItem]
     ) -> [ContinueWatchingItem] {
-        var byId: [String: ContinueWatchingItem] = [:]
-        for item in memoryOnlyItems {
-            byId[item.meta.id] = item
+        let stored = deduplicatingResolvedIdentities(storedItems)
+        let memory = deduplicatingResolvedIdentities(memoryOnlyItems).filter { item in
+            !stored.contains { WatchedStore.sameContent($0.meta, item.meta) }
         }
-        for item in storedItems {
-            byId[item.meta.id] = item
-        }
-        return Array(byId.values)
+        return memory + stored
     }
 
     /// True while the ledger still holds titles that have not been rendered.
@@ -252,6 +258,7 @@ enum ContinueWatchingBuilder {
                 materialized = []
                 consumedEntries = 0
                 persistedFirstPageIDs = []
+                persistedFirstPageItems = []
                 materializedProfileId = profileId
                 ContinueWatchingStore.replaceAll([])
             }
@@ -306,7 +313,8 @@ enum ContinueWatchingBuilder {
             diagnostic = diagText
             // Only the first page is persisted; it is what a cold start renders.
             ContinueWatchingStore.replaceAll(page.items)
-            persistedFirstPageIDs = Set(ContinueWatchingStore.items().map(\.meta.id))
+            persistedFirstPageItems = ContinueWatchingStore.items()
+            persistedFirstPageIDs = Set(persistedFirstPageItems.map(\.meta.id))
         }
 
         TVHomeDebugTrace.log(
@@ -359,7 +367,7 @@ enum ContinueWatchingBuilder {
         }
 
         consumedEntries += page.consumed
-        materialized = retainingUnwatched(materialized + page.items)
+        materialized = retainingUnwatched(deduplicatingResolvedIdentities(materialized + page.items))
         return materialized
     }
 
@@ -404,7 +412,7 @@ enum ContinueWatchingBuilder {
             guard !Task.isCancelled, isCurrentGeneration(currentGeneration),
                   profileId == WatchProgressLedger.activeProfileId else { break }
 
-            accumulatedItems.append(contentsOf: result.items)
+            accumulatedItems = deduplicatingResolvedIdentities(accumulatedItems + result.items)
             totalFailedLookups += result.failedLookups
             currentExisting += result.items
 
@@ -418,6 +426,30 @@ enum ContinueWatchingBuilder {
             consumed: cursor - startIndex,
             failedLookups: totalFailedLookups
         )
+    }
+
+    /// Collapse resolved provider aliases while retaining real playback before
+    /// generated Up Next, then the newest representation within the same kind.
+    static func deduplicatingResolvedIdentities(
+        _ items: [ContinueWatchingItem]
+    ) -> [ContinueWatchingItem] {
+        var result: [ContinueWatchingItem] = []
+        for item in items {
+            guard let index = result.firstIndex(where: {
+                WatchedStore.sameContent($0.meta, item.meta)
+            }) else {
+                result.append(item)
+                continue
+            }
+            let current = result[index]
+            if current.isUpNextEntry && !item.isUpNextEntry {
+                result[index] = item
+            } else if current.isUpNextEntry == item.isUpNextEntry,
+                      item.lastWatchedAt > current.lastWatchedAt {
+                result[index] = item
+            }
+        }
+        return result
     }
 
     private struct PageResult: Sendable {
