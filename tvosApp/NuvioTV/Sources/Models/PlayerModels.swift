@@ -621,6 +621,8 @@ struct PreparedNextStream {
     var artworkURL: URL? = nil
     /// Storyboard URL belonging to this replacement source, if provided.
     var trickplayURL: URL? = nil
+    /// Original source-row identity, independent of its resolved playback URL.
+    var sourceID: String? = nil
 }
 
 struct PlayerTime: Equatable {

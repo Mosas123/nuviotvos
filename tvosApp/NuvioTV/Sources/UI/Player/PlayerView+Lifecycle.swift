@@ -48,6 +48,7 @@ extension PlayerView {
                     videoHash: videoHash,
                     cacheFileIdentity: cacheFileIdentity,
                     trickplayURL: trickplayURL,
+                    sourceID: sourceID,
                     currentEpisode: currentEpisode
                 )
                 if subtitle != PlaybackMarkers.trailerSubtitle {
