@@ -163,6 +163,7 @@ final class NuvioSyncManager: ObservableObject {
     private var pushTaskDeadline: Date?
     private var homeCatalogPushTask: Task<Void, Never>?
     private var profileSelectionRefreshTask: Task<Void, Never>?
+    private var profileSelectionRefreshGeneration: UInt = 0
     var completedInitialPullKeys: Set<String> = []
     /// When each account+profile last finished a pull, so a screen re-entry can
     /// tell "the user came back" from "the data is old".
@@ -443,6 +444,7 @@ final class NuvioSyncManager: ObservableObject {
             isPushExecuting = false
             homeCatalogPushTask?.cancel()
             profileSelectionRefreshTask?.cancel()
+            profileSelectionRefreshGeneration &+= 1
             profileSelectionRefreshTask = nil
             completedInitialPullKeys.removeAll()
             lastCompletedPullAt.removeAll()
@@ -722,21 +724,26 @@ final class NuvioSyncManager: ObservableObject {
 
         profileSyncError = nil
         isPullingAccountProfiles = true
+        profileSelectionRefreshGeneration &+= 1
+        let generation = profileSelectionRefreshGeneration
         profileSelectionRefreshTask = Task(priority: .utility) { @MainActor [weak self] in
-            await self?.refreshProfilesForSelection()
+            await self?.refreshProfilesForSelection(generation: generation)
         }
     }
 
-    private func refreshProfilesForSelection() async {
+    private func refreshProfilesForSelection(generation: UInt) async {
         var shouldPullFullAccount = false
         defer {
-            isPullingAccountProfiles = false
-            profileSelectionRefreshTask = nil
-            if shouldPullFullAccount {
-                retryInitialAccountPull()
+            if generation == profileSelectionRefreshGeneration {
+                isPullingAccountProfiles = false
+                profileSelectionRefreshTask = nil
+                if shouldPullFullAccount {
+                    retryInitialAccountPull()
+                }
             }
         }
         guard let authManager, let profileViewModel else { return }
+        guard case let .fullAccount(recoveryAccountId, _) = authManager.authState else { return }
 
         var lastError: Error?
         let delays: [UInt64] = [0, 1, 2, 4]
@@ -748,14 +755,17 @@ final class NuvioSyncManager: ObservableObject {
                     return
                 }
             }
-            guard !Task.isCancelled, authManager.isAuthenticated else { return }
+            guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
 
             guard let session = await authManager.validSessionForSync(validateWithServer: true) else {
                 lastError = AuthError(message: "Your account session could not be restored.")
                 continue
             }
+            guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId),
+                  session.userId == recoveryAccountId else { return }
             do {
                 var remoteProfiles = try await client.pullProfiles(session: session)
+                guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                 if remoteProfiles.isEmpty {
                     if attempt == 0 {
                         lastError = nil
@@ -763,7 +773,9 @@ final class NuvioSyncManager: ObservableObject {
                     }
                     let initialProfiles = defaultInitialProfiles()
                     try await client.pushProfiles(session: session, profiles: initialProfiles)
+                    guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                     remoteProfiles = try await client.pullProfiles(session: session)
+                    guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                     guard !remoteProfiles.isEmpty else {
                         lastError = nil
                         continue
@@ -791,15 +803,18 @@ final class NuvioSyncManager: ObservableObject {
                 print("Nuvio profile picker refreshed \(remoteProfiles.count) account profile(s).")
                 return
             } catch {
+                guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                 lastError = error
                 // Match the Android client: if the first authenticated request
                 // is rejected, refresh the JWT before retrying the RPC.
                 if attempt == 0 {
                     _ = await authManager.refreshSessionForSync()
+                    guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                 }
             }
         }
 
+        guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
         isApplyingRemoteProfiles = false
         isApplyingRemote = false
         if let lastError {
@@ -807,6 +822,11 @@ final class NuvioSyncManager: ObservableObject {
         } else {
             profileSyncError = "No synced profiles were returned for this account."
         }
+    }
+
+    private func profileRecoveryIsCurrent(generation: UInt, accountId: String) -> Bool {
+        guard generation == profileSelectionRefreshGeneration else { return false }
+        return (try? ensureStillSyncing(accountId: accountId)) != nil
     }
 
     private func schedulePull(force: Bool = false) {
