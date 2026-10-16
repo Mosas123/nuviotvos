@@ -2331,6 +2331,7 @@ enum ContinueWatchingStore {
     private static var cachedData: Data?
     private static var writeGeneration: UInt64 = 0
     private static let cacheLock = NSLock()
+    private static let topShelfSnapshotLock = NSLock()
 
     private static func invalidateCache() {
         cacheLock.withLock {
@@ -3212,32 +3213,34 @@ enum ContinueWatchingStore {
     /// shared container isn't available.
     private static func writeTopShelfFeed() {
         guard TopShelfFeedStore.isAvailable else { return }
+        topShelfSnapshotLock.lock()
+        defer { topShelfSnapshotLock.unlock() }
         let currentItems = Array(items().prefix(10))
-        Task.detached(priority: .utility) {
-            let entries = currentItems.map { item -> TopShelfEntry in
-                let fraction = item.duration > 0 ? min(max(item.position / item.duration, 0), 1) : nil
-                var subtitleParts: [String] = []
-                if let season = item.season, let episode = item.episode {
-                    subtitleParts.append("S\(season) · E\(episode)")
-                } else if let year = item.meta.year {
-                    subtitleParts.append(String(year))
-                }
-                if let remaining = remainingTimeText(
-                    seconds: max(0, item.duration - item.position)
-                ) {
-                    subtitleParts.append("\(remaining) left")
-                }
-                return TopShelfEntry(
-                    contentId: item.meta.id,
-                    contentType: item.meta.type,
-                    title: item.meta.name,
-                    subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: "  ·  "),
-                    imageURL: item.meta.posterUrl,
-                    progress: item.isUpNextEntry ? nil : fraction
-                )
+        // Register this snapshot before any detached work can reorder it.
+        // Mapping at most ten cards is cheap; disk/network/artwork stay async.
+        let entries = currentItems.map { item -> TopShelfEntry in
+            let fraction = item.duration > 0 ? min(max(item.position / item.duration, 0), 1) : nil
+            var subtitleParts: [String] = []
+            if let season = item.season, let episode = item.episode {
+                subtitleParts.append("S\(season) · E\(episode)")
+            } else if let year = item.meta.year {
+                subtitleParts.append(String(year))
             }
-            TopShelfFeedStore.write(entries)
+            if let remaining = remainingTimeText(
+                seconds: max(0, item.duration - item.position)
+            ) {
+                subtitleParts.append("\(remaining) left")
+            }
+            return TopShelfEntry(
+                contentId: item.meta.id,
+                contentType: item.meta.type,
+                title: item.meta.name,
+                subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: "  ·  "),
+                imageURL: item.meta.posterUrl,
+                progress: item.isUpNextEntry ? nil : fraction
+            )
         }
+        TopShelfFeedStore.write(entries)
     }
 
     private static func remainingTimeText(seconds: Double) -> String? {
