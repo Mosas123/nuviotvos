@@ -39,7 +39,7 @@ struct ScenePanelView: View {
                         upNextTabContent
                     }
                 }
-                .frame(height: 272, alignment: .top)
+                .frame(height: viewModel.selectedTab == .info ? 300 : 272, alignment: .top)
                 .padding(.bottom, 24)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -218,7 +218,7 @@ struct ScenePanelView: View {
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .top, spacing: 20) {
                 // Section 1: PLAYBACK ENGINE
-                telemetryCard(title: "PLAYBACK ENGINE", width: 340) {
+                telemetryCard(title: "PLAYBACK ENGINE", width: 340, height: 256) {
                     VStack(alignment: .leading, spacing: 6) {
                         infoRow(label: "Engine", value: info.engine)
                         infoRow(label: "Version", value: info.version)
@@ -226,7 +226,7 @@ struct ScenePanelView: View {
                 }
                 
                 // Section 2: VIDEO STREAM
-                telemetryCard(title: "VIDEO STREAM", width: 560) {
+                telemetryCard(title: "VIDEO STREAM", width: 560, height: 256) {
                     VStack(alignment: .leading, spacing: 4) {
                         infoRow(label: "Codec", value: info.videoCodec)
                         infoRow(label: "Resolution", value: info.resolution)
@@ -242,12 +242,13 @@ struct ScenePanelView: View {
                 }
                 
                 // Section 3: AUDIO STREAM
-                telemetryCard(title: "AUDIO STREAM", width: 540) {
+                telemetryCard(title: "AUDIO STREAM", width: 540, height: 256) {
                     VStack(alignment: .leading, spacing: 6) {
                         infoRow(label: "Codec", value: info.audioCodec)
                         infoRow(label: "Channels", value: info.audioChannels)
                         infoRow(label: "Language", value: info.audioLanguage)
                         infoRow(label: "Bitrate", value: info.audioBitrate)
+                        infoRow(label: "A/V producer gap", value: formattedAVSyncGap(info.avSyncGapMs))
                         infoRow(label: "Spatial format", value: info.audioSpatialFormat)
                         infoRow(label: "Audio pipeline", value: info.audioDecoder, lineLimit: 2)
                     }
@@ -263,6 +264,7 @@ struct ScenePanelView: View {
     private func telemetryCard<Content: View>(
         title: String,
         width: CGFloat,
+        height: CGFloat = 236,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -282,7 +284,7 @@ struct ScenePanelView: View {
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
-        .frame(width: width, height: 236, alignment: .topLeading)
+        .frame(width: width, height: height, alignment: .topLeading)
         .modifier(TvCardGlassBackground(isFocused: false, shape: RoundedRectangle(cornerRadius: 32, style: .continuous)))
     }
     

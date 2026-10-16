@@ -60,8 +60,8 @@ struct PlaybackDebugHUDView: View {
                 .stroke(Color.white.opacity(0.16), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.7), radius: 24, x: 0, y: 10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(.leading, 48)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .padding(.trailing, 48)
         .padding(.top, 36)
         .allowsHitTesting(false)
         .accessibilityElement(children: .combine)
@@ -195,6 +195,12 @@ struct PlaybackDebugHUDView: View {
                     value: info.diskBuffer.isEmpty ? "--" : info.diskBuffer,
                     hasDot: true,
                     dotColor: info.diskBufferSeconds >= 10.0 ? .green : (info.diskBufferSeconds > 0 ? .yellow : .gray)
+                )
+                hudRow(
+                    label: "Concurrency",
+                    value: info.concurrency.isEmpty ? "--" : info.concurrency,
+                    hasDot: true,
+                    dotColor: (info.concurrency.isEmpty || info.concurrency == "--") ? .gray : (info.concurrency.contains("idle") ? .yellow : .green)
                 )
                 hudRow(label: "Speed", value: info.speed.isEmpty ? "Unavailable" : info.speed, hasDot: true, dotColor: info.speed == "Unavailable" ? .gray : .green)
                 hudRow(label: "Ping", value: info.ping.isEmpty ? "--" : info.ping, hasDot: true, dotColor: info.ping == "--" ? .gray : .green)

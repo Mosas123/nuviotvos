@@ -1,6 +1,6 @@
 import XCTest
 import SwiftUI
-import AetherEngine
+@testable import AetherEngine
 @testable import NuvioTV
 
 @MainActor
@@ -377,5 +377,110 @@ final class SceneNavigationTests: XCTestCase {
         XCTAssertEqual(activeSnapshot?.videoCodec, "AV1")
         XCTAssertEqual(activeSnapshot?.frameRate, "59.940 fps")
         XCTAssertEqual(activeSnapshot?.aBitrate, "meas 2.00 Mbit/s")
+    }
+
+    func testSceneInfoUsesAetherDeliveryAndSyncGapThenClearsThemOnHandoff() throws {
+        let engine = try AetherEngine()
+        let outgoingPipeline = "TrueHD Atmos → APAC 9.1.6"
+        engine.audioDelivery = .bridged
+        engine.activeAudioDecoder = outgoingPipeline
+        engine.audioTracks = [TrackInfo(
+            id: 1,
+            name: "TrueHD Atmos",
+            codec: "truehd",
+            language: "en",
+            channels: 8,
+            isDefault: true,
+            profile: "Dolby TrueHD + Dolby Atmos"
+        )]
+        engine.activeAudioTrackIndex = 1
+        engine.diagnostics.liveTelemetry = makeTelemetry(syncGapMs: -14.26)
+
+        let aether = try XCTUnwrap(AetherPlaybackController(engine: engine))
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            engineSettingProvider: { "AetherEngine" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let viewModel = PlayerViewModel(sessionCoordinator: coordinator)
+        defer { viewModel.shutdown() }
+
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.com/movie.mkv")!))
+        let aetherDebug = aether.playbackDebugInfo
+        let aetherInfo = viewModel.buildScenePlaybackInfo()
+        XCTAssertEqual(aetherDebug.audioPipeline, "Bridged (\(outgoingPipeline))")
+        XCTAssertTrue(aetherDebug.audio.hasSuffix("· \(aetherDebug.audioPipeline ?? "")"))
+        XCTAssertEqual(aetherDebug.audioSourceCodec, "truehd")
+        XCTAssertEqual(aetherDebug.audioSpatialFormat, "Atmos", "source profile evidence remains independent of the delivery label")
+        XCTAssertEqual(aetherDebug.avSyncGapMs, -14.26)
+        XCTAssertEqual(aetherInfo.audioDecoder, aetherDebug.audioPipeline)
+        XCTAssertEqual(aetherInfo.audioSpatialFormat, "Atmos")
+        XCTAssertEqual(aetherInfo.avSyncGapMs, -14.26)
+        XCTAssertEqual(formattedAVSyncGap(aetherInfo.avSyncGapMs), "-14.3 ms")
+
+        // Reload and no-session values cannot expose the outgoing pipeline. The
+        // source profile can still establish Atmos while the live route is loading.
+        engine.state = .loading
+        engine.audioDelivery = .bridged
+        engine.diagnostics.liveTelemetry = makeTelemetry(syncGapMs: .nan)
+        let loadingDebug = aether.playbackDebugInfo
+        XCTAssertNil(loadingDebug.audioPipeline)
+        XCTAssertNil(loadingDebug.avSyncGapMs)
+        XCTAssertEqual(loadingDebug.aJitter, "Unavailable")
+        XCTAssertEqual(loadingDebug.audioSpatialFormat, "Atmos")
+        XCTAssertFalse(loadingDebug.audio.contains(outgoingPipeline))
+        XCTAssertEqual(formattedAVSyncGap(loadingDebug.avSyncGapMs), "Unavailable")
+        let loadingInfo = viewModel.buildScenePlaybackInfo()
+        XCTAssertEqual(loadingInfo.audioDecoder, "Unavailable")
+        XCTAssertNil(loadingInfo.avSyncGapMs)
+
+        engine.state = .idle
+        engine.audioDelivery = .none
+        engine.diagnostics.liveTelemetry = nil
+        let idleDebug = aether.playbackDebugInfo
+        XCTAssertNil(idleDebug.audioPipeline)
+        XCTAssertNil(idleDebug.avSyncGapMs)
+        XCTAssertFalse(idleDebug.audio.contains(outgoingPipeline))
+        XCTAssertEqual(formattedAVSyncGap(nil), "Unavailable")
+        XCTAssertEqual(formattedAVSyncGap(Double.infinity), "Unavailable")
+        XCTAssertNil(PlayerViewModel.sceneAVSyncGap(debug: PlaybackDebugInfo(avSyncGapMs: Double.nan)))
+        let idleInfo = viewModel.buildScenePlaybackInfo()
+        XCTAssertEqual(idleInfo.audioDecoder, "Unavailable")
+        XCTAssertNil(idleInfo.avSyncGapMs)
+
+        coordinator.handoffToMPV(reason: "scene telemetry regression", resumeSeconds: 0)
+        XCTAssertEqual(coordinator.activeBackend, .mpv)
+        let mpvDebug = coordinator.mpvController.playbackDebugInfo
+        let mpvInfo = viewModel.buildScenePlaybackInfo()
+        XCTAssertNil(mpvDebug.avSyncGapMs)
+        XCTAssertNil(mpvInfo.avSyncGapMs, "the previous Aether metric must not survive backend handoff")
+        XCTAssertEqual(
+            mpvInfo.audioDecoder,
+            PlayerViewModel.sceneAudioPresentation(debug: mpvDebug, legacyDetails: nil).pipeline,
+            "InSight keeps the active MPV pipeline fallback"
+        )
+        XCTAssertFalse(mpvInfo.audioDecoder.contains(outgoingPipeline))
+    }
+
+    private func makeTelemetry(syncGapMs: Double?) -> LiveTelemetry {
+        LiveTelemetry(
+            instantBitrateMbps: nil,
+            averageBitrateMbps: nil,
+            audioBridgeBitrateMbps: nil,
+            observedFps: nil,
+            droppedFrameCount: nil,
+            forwardBufferSeconds: nil,
+            cachedBytes: nil,
+            networkThroughputMbps: nil,
+            networkTransferredBytes: nil,
+            avSyncGapMs: syncGapMs,
+            producerRestartCount: 0,
+            muxedBytesLifetime: 0,
+            serverBytesSentLifetime: 0,
+            serverRequestCount: 0,
+            demuxerBytesFetched: 0,
+            audioBridgeLiveBytes: 0,
+            rssMb: 0
+        )
     }
 }

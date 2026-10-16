@@ -48,6 +48,7 @@ struct ScenePlaybackInfo: Equatable, Sendable {
     var audioBitrate: String
     var audioSpatialFormat: String
     var audioDecoder: String
+    var avSyncGapMs: Double?
     
     init(
         engine: String = "—",
@@ -65,7 +66,8 @@ struct ScenePlaybackInfo: Equatable, Sendable {
         audioLanguage: String = "—",
         audioBitrate: String = "—",
         audioSpatialFormat: String = "Not confirmed",
-        audioDecoder: String = "Unavailable"
+        audioDecoder: String = "Unavailable",
+        avSyncGapMs: Double? = nil
     ) {
         self.engine = engine
         self.version = version
@@ -83,6 +85,7 @@ struct ScenePlaybackInfo: Equatable, Sendable {
         self.audioBitrate = audioBitrate
         self.audioSpatialFormat = audioSpatialFormat
         self.audioDecoder = audioDecoder
+        self.avSyncGapMs = avSyncGapMs
     }
 }
 
