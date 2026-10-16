@@ -304,6 +304,8 @@ class PlayerViewModel: ObservableObject {
     var activeMeta: NuvioMeta?
     private var activeStreamURL: String?
     private var activeSourceID: String?
+    private var manualSourceProfileID: String?
+    private var didRememberManualSource = false
     private var activeHTTPHeaders: [String: String] = [:]
     private var activePlaybackOrigin: PlaybackOrigin = .main
     private(set) var activeBingeGroup: String?
@@ -816,6 +818,8 @@ class PlayerViewModel: ObservableObject {
         activeCacheFileIdentity = cacheFileIdentity
         activeTrickplayURL = trickplayURL
         activeSourceID = sourceID
+        manualSourceProfileID = ProfileSettings.activeProfileID
+        didRememberManualSource = false
         if !hasLoaded { sessionTrackSelection = nil }
 
         // Adopt active Picture in Picture session if already playing this content
@@ -1988,6 +1992,7 @@ class PlayerViewModel: ObservableObject {
         self.activeCacheFileIdentity = prepared.cacheFileIdentity
         self.activeTrickplayURL = prepared.trickplayURL
         self.activeSourceID = prepared.sourceID
+        didRememberManualSource = false
         if let bg = prepared.bingeGroup, !bg.isEmpty {
             self.activeBingeGroup = bg
         }
@@ -5768,9 +5773,31 @@ class PlayerViewModel: ObservableObject {
         seek(to: target)
     }
 
+    private func rememberManualSourceIfReady() {
+        guard !didRememberManualSource, !isLiveStream, !isTrailerPlaybackSession,
+              hasRenderedFirstFrame, !isAwaitingStreamStart,
+              !isSwitchingSource, !isReloadingStream, !isFailingOver,
+              !sessionCoordinator.isProgressSaveSuspended,
+              !loadedStreamLooksLikeReplacement(), !didDetectReplacementStream,
+              time.current.isFinite, time.current > 0,
+              currentLoadPresentationIsConfirmed(
+                engineKind: activeEngineKind, generation: sessionCoordinator.loadGeneration
+              ),
+              let profileID = manualSourceProfileID,
+              Self.isCurrentPlaybackProfile(profileID),
+              let meta = activeMeta, let sourceID = activeSourceID else { return }
+        let numbers = resolvedEpisodeNumbers
+        LastManualSourceStore.remember(
+            sourceID: sourceID, profileID: profileID, metaID: meta.id, type: meta.type,
+            season: numbers?.season, episode: numbers?.episode
+        )
+        didRememberManualSource = true
+    }
+
     private func saveProgressIfNeeded() {
         guard isTrackablePlayback else { return }
         guard status == .playing else { return }
+        rememberManualSourceIfReady()
         // Start a Trakt scrobble promptly so its remote Continue Watching feed
         // has an entry before the user leaves the player. Subsequent saves keep
         // the normal cadence (and Trakt's separate 30-second report cadence).
