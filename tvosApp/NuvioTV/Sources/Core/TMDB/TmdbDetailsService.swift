@@ -1175,6 +1175,7 @@ enum TmdbDetailsService {
     ) async -> TmdbLocalizedDetailsResponse? {
         guard let apiKey else { return nil }
         let cacheKey = "\(mediaType):\(tmdbId):\(preferredLanguage)"
+        let cacheGeneration = await localizedDetailsCache.snapshotGeneration()
         if let cached = await localizedDetailsCache.value(for: cacheKey) {
             return cached
         }
@@ -1206,7 +1207,7 @@ enum TmdbDetailsService {
         guard let decoded = try? JSONDecoder().decode(TmdbLocalizedDetailsResponse.self, from: data) else {
             return nil
         }
-        await localizedDetailsCache.insert(decoded, for: cacheKey)
+        await localizedDetailsCache.insert(decoded, for: cacheKey, ifGeneration: cacheGeneration)
         return decoded
     }
 
@@ -1601,16 +1602,27 @@ private actor TmdbFindCache {
 
 private actor TmdbLocalizedDetailsCache {
     private var values: [String: TmdbLocalizedDetailsResponse] = [:]
+    private var generation: UInt64 = 0
+
+    func snapshotGeneration() -> UInt64 {
+        generation
+    }
 
     func value(for key: String) -> TmdbLocalizedDetailsResponse? {
         values[key]
     }
 
-    func insert(_ value: TmdbLocalizedDetailsResponse, for key: String) {
+    func insert(
+        _ value: TmdbLocalizedDetailsResponse,
+        for key: String,
+        ifGeneration expectedGeneration: UInt64
+    ) {
+        guard generation == expectedGeneration else { return }
         values[key] = value
     }
 
     func clear() {
+        generation &+= 1
         values.removeAll()
     }
 }
