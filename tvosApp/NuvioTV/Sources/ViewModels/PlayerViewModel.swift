@@ -1928,6 +1928,9 @@ class PlayerViewModel: ObservableObject {
     private func replaceStream(prepared: PreparedNextStream, episode: NuvioVideo?, resumeFrom: Double?) {
         guard let meta = activeMeta else { return }
         cancelSourcesFetch()
+        if let episode, episode.id != currentEpisodeVideo?.id {
+            availableSources = []
+        }
         applyStreamState(
             url: prepared.url,
             meta: meta,
