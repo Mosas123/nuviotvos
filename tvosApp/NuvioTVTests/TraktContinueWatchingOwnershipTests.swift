@@ -18,20 +18,22 @@ final class TraktContinueWatchingOwnershipTests: XCTestCase {
         activate(profileA)
     }
 
-    override func tearDown() {
-        for profileID in [profileA, profileB] {
-            activate(profileID)
-            TraktProgressService.forgetLocalPlayback(meta: checkpointMeta, notify: false)
-            TraktProgressService.forgetLocalPlayback(meta: remoteMeta, notify: false)
-            UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileID)")
+    override func tearDown() async throws {
+        await MainActor.run {
+            for profileID in [profileA, profileB] {
+                activate(profileID)
+                TraktProgressService.forgetLocalPlayback(meta: checkpointMeta, notify: false)
+                TraktProgressService.forgetLocalPlayback(meta: remoteMeta, notify: false)
+                UserDefaults.standard.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileID)")
+            }
+            ContinueWatchingStore.setActiveProfile(previousContinueWatchingProfileID)
+            if let previousSettingsProfileID {
+                ProfileSettings.setActiveProfile(previousSettingsProfileID, isPrimary: previousSettingsProfileIsPrimary)
+            } else {
+                ProfileSettings.clearActiveProfile()
+            }
         }
-        ContinueWatchingStore.setActiveProfile(previousContinueWatchingProfileID)
-        if let previousSettingsProfileID {
-            ProfileSettings.setActiveProfile(previousSettingsProfileID, isPrimary: previousSettingsProfileIsPrimary)
-        } else {
-            ProfileSettings.clearActiveProfile()
-        }
-        super.tearDown()
+        try await super.tearDown()
     }
 
     @MainActor
@@ -134,6 +136,7 @@ final class TraktContinueWatchingOwnershipTests: XCTestCase {
                                     forKey: SettingsKey.traktWatchProgressSource)
     }
 
+    @MainActor
     private func seedCheckpoint() {
         TraktProgressService.recordLocalPlayback(meta: checkpointMeta, position: 300, duration: 1000,
                                                 season: nil, episode: nil, source: .trakt, notify: false)
@@ -150,6 +153,7 @@ final class TraktContinueWatchingOwnershipTests: XCTestCase {
         item(meta: checkpointMeta, position: 800, date: Date().addingTimeInterval(60))
     }
 
+    @MainActor
     private func current(_ meta: NuvioMeta) -> ContinueWatchingItem? {
         TraktProgressService.currentContinueWatchingItem(for: meta, source: .trakt)
     }
