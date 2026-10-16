@@ -974,7 +974,7 @@ private struct CollectionFolderHomeStyleRow: View {
         landscapeFocusTask?.cancel()
 
         let targetKey = cardKey
-        let delaySeconds = max(0, focusedPosterBackdropDelay)
+        let delaySeconds = min(10, max(0, focusedPosterBackdropDelay))
         landscapeFocusTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
             guard !Task.isCancelled,

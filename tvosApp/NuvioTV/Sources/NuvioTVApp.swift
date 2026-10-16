@@ -7161,7 +7161,7 @@ struct TVHomeView: View {
         focusWork.landscapeFocusTask?.cancel()
 
         let targetKey = cardKey
-        let delaySeconds = max(0, focusedPosterBackdropDelay)
+        let delaySeconds = min(10, max(0, focusedPosterBackdropDelay))
         TVHomeDebugTrace.log(
             "backdrop.schedule card=\(cardKey) delayMs=\(delaySeconds * 1_000)"
         )
