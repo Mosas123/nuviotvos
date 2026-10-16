@@ -173,6 +173,7 @@ enum TraktAuthStore {
         static let username = "nuvio.tv.trakt.auth.username"
         static let userSlug = "nuvio.tv.trakt.auth.userSlug"
         static let accountBindingID = "nuvio.tv.trakt.auth.accountBindingID"
+        static let deviceFlowRequestID = "nuvio.tv.trakt.auth.deviceFlowRequestID"
         static let deviceCode = "nuvio.tv.trakt.auth.deviceCode"
         static let userCode = "nuvio.tv.trakt.auth.userCode"
         static let verificationURL = "nuvio.tv.trakt.auth.verificationURL"
@@ -220,11 +221,22 @@ enum TraktAuthStore {
         )
     }
 
+    static func beginDeviceFlowRequest(store: UserDefaults) -> String {
+        let requestID = UUID().uuidString
+        store.set(requestID, forKey: Key.deviceFlowRequestID)
+        return requestID
+    }
+
+    static func isCurrentDeviceFlowRequest(_ requestID: String, store: UserDefaults) -> Bool {
+        store.string(forKey: Key.deviceFlowRequestID) == requestID
+    }
+
     static func saveDeviceFlow(
         _ response: TraktDeviceCodeResponse,
         clientID: String,
         store defaults: UserDefaults = ProfileSettings.current
     ) {
+        defaults.removeObject(forKey: Key.deviceFlowRequestID)
         if defaults.string(forKey: Key.credentialClientID) != clientID {
             [
                 Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt,
@@ -248,6 +260,7 @@ enum TraktAuthStore {
         isNewLogin: Bool = false
     ) {
         if isNewLogin {
+            defaults.removeObject(forKey: Key.deviceFlowRequestID)
             defaults.removeObject(forKey: Key.username)
             defaults.removeObject(forKey: Key.userSlug)
             defaults.set(UUID().uuidString, forKey: Key.accountBindingID)
@@ -302,7 +315,7 @@ enum TraktAuthStore {
     }
 
     static func clearDeviceFlow(store defaults: UserDefaults = ProfileSettings.current) {
-        [Key.deviceCode, Key.userCode, Key.verificationURL, Key.expiresAt, Key.pollInterval].forEach {
+        [Key.deviceFlowRequestID, Key.deviceCode, Key.userCode, Key.verificationURL, Key.expiresAt, Key.pollInterval].forEach {
             defaults.removeObject(forKey: $0)
         }
     }
@@ -310,7 +323,7 @@ enum TraktAuthStore {
     static func clearAuth(store defaults: UserDefaults = ProfileSettings.current) {
         [
             Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt, Key.expiresIn,
-            Key.username, Key.userSlug, Key.accountBindingID, Key.deviceCode, Key.userCode, Key.verificationURL,
+            Key.username, Key.userSlug, Key.accountBindingID, Key.deviceFlowRequestID, Key.deviceCode, Key.userCode, Key.verificationURL,
             Key.expiresAt, Key.pollInterval, Key.credentialClientID, Key.cachedStats
         ].forEach { defaults.removeObject(forKey: $0) }
         defaults.removeObject(forKey: SettingsKey.traktConnected)
@@ -782,7 +795,10 @@ final class TraktAuthService {
         TraktAuthStore.state(in: store)
     }
 
+    @MainActor
     func startDeviceAuth() async throws -> TraktDeviceCodeResponse {
+        try Task.checkCancellation()
+        guard ProfileSettings.isActiveStore(store) else { throw CancellationError() }
         guard hasRequiredCredentials() else {
             throw TraktServiceError.message("Enter your Trakt Client ID first.")
         }
@@ -802,12 +818,23 @@ final class TraktAuthService {
             return response
         }
 
+        let capturedProfileID = ProfileSettings.activeProfileID
+        let capturedClientID = clientID
+        let requestID = TraktAuthStore.beginDeviceFlowRequest(store: store)
         let response: TraktDeviceCodeResponse = try await post(
             path: "oauth/device/code",
-            body: TraktDeviceCodeRequest(clientID: clientID),
+            body: TraktDeviceCodeRequest(clientID: capturedClientID),
             authorized: false
         )
-        TraktAuthStore.saveDeviceFlow(response, clientID: clientID, store: store)
+        guard !Task.isCancelled,
+              ProfileSettings.isActiveStore(store),
+              ProfileSettings.activeProfileID == capturedProfileID,
+              clientID == capturedClientID,
+              TraktAuthStore.isCurrentDeviceFlowRequest(requestID, store: store) else {
+            throw CancellationError()
+        }
+        // Validation and persistence stay on MainActor with no suspension.
+        TraktAuthStore.saveDeviceFlow(response, clientID: capturedClientID, store: store)
         return response
     }
 
@@ -4021,14 +4048,17 @@ final class TraktSettingsViewModel: ObservableObject {
     private let store: UserDefaults
     private let service: TraktAuthService
     private var pollTask: Task<Void, Never>?
+    private(set) var connectionTask: Task<Void, Never>?
+    private var connectionGeneration = 0
 
-    init(store: UserDefaults = ProfileSettings.current) {
+    init(store: UserDefaults = ProfileSettings.current, session: URLSession = .shared) {
         self.store = store
-        self.service = TraktAuthService(store: store)
+        self.service = TraktAuthService(session: session, store: store)
         reload()
     }
 
     deinit {
+        connectionTask?.cancel()
         pollTask?.cancel()
     }
 
@@ -4060,39 +4090,65 @@ final class TraktSettingsViewModel: ObservableObject {
     }
 
     func credentialsDidChange() {
+        invalidatePendingConnection()
         errorMessage = nil
         statusMessage = nil
         reload()
     }
 
+    private func invalidatePendingConnection() {
+        connectionGeneration &+= 1
+        connectionTask?.cancel()
+        connectionTask = nil
+        isLoading = false
+    }
+
     func connect() {
-        guard !isLoading else { return }
+        guard !isLoading, ProfileSettings.isActiveStore(store) else { return }
         guard credentialsConfigured else {
             errorMessage = "Enter your Trakt Client ID first."
             return
         }
+        invalidatePendingConnection()
+        let generation = connectionGeneration
         isLoading = true
         statusMessage = nil
         errorMessage = nil
-        Task {
+        connectionTask = Task { [weak self, service, store] in
+            defer {
+                if let self, generation == self.connectionGeneration {
+                    self.connectionTask = nil
+                    self.isLoading = false
+                }
+            }
             do {
                 let response = try await service.startDeviceAuth()
-                deviceUserCode = response.userCode
-                verificationURL = response.verificationURL
-                deviceCodeExpiresAtMillis = Date().timeIntervalSince1970 * 1000.0 + Double(response.expiresIn * 1000)
-                pollInterval = response.interval
-                mode = .awaitingApproval
-                statusMessage = "Waiting for approval…"
-                isLoading = false
-                startPolling()
+                guard let self, !Task.isCancelled,
+                      generation == self.connectionGeneration,
+                      ProfileSettings.isActiveStore(store),
+                      TraktAuthStore.state(in: store).deviceCode == response.deviceCode else { return }
+                self.deviceUserCode = response.userCode
+                self.verificationURL = response.verificationURL
+                self.deviceCodeExpiresAtMillis = Date().timeIntervalSince1970 * 1000.0 + Double(response.expiresIn * 1000)
+                self.pollInterval = response.interval
+                self.mode = .awaitingApproval
+                self.statusMessage = "Waiting for approval…"
+                self.isLoading = false
+                self.connectionTask = nil
+                self.startPolling()
             } catch {
-                errorMessage = error.localizedDescription
-                isLoading = false
+                guard let self, generation == self.connectionGeneration else { return }
+                self.connectionTask = nil
+                self.isLoading = false
+                guard !Task.isCancelled, !(error is CancellationError),
+                      ProfileSettings.isActiveStore(store) else { return }
+                self.errorMessage = error.localizedDescription
             }
         }
     }
 
     func cancelDeviceFlow() {
+        invalidatePendingConnection()
         pollTask?.cancel()
         TraktAuthStore.clearDeviceFlow(store: store)
         statusMessage = nil
@@ -4106,7 +4162,9 @@ final class TraktSettingsViewModel: ObservableObject {
     }
 
     func disconnect() {
+        invalidatePendingConnection()
         pollTask?.cancel()
+        TraktAuthStore.clearDeviceFlow(store: store)
         isLoading = true
         let profileId = WatchedStore.activeProfileId
         Task {
