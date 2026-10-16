@@ -639,7 +639,8 @@ struct DetailsScreen: View {
                 preResolvedVideoSize ?? preStream.videoSize,
                 preStream.videoHash,
                 nil,
-                startupToken
+                startupToken,
+                preStream.id
             )
             return
         }
@@ -1092,7 +1093,8 @@ struct DetailsScreen: View {
                 preResolvedVideoSize ?? stream.videoSize,
                 stream.videoHash,
                 nil,
-                startupToken
+                startupToken,
+                stream.id
             )
             return
         }

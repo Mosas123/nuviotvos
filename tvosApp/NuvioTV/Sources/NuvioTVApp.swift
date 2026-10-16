@@ -2679,7 +2679,8 @@ struct ContentView: View {
                     httpHeaders: prepared.httpHeaders,
                     filename: prepared.filename,
                     videoSize: prepared.videoSize,
-                    videoHash: prepared.videoHash
+                    videoHash: prepared.videoHash,
+                    sourceID: prepared.sourceID
                 )
             } else {
                 withAnimation(.easeInOut(duration: 0.28)) {
