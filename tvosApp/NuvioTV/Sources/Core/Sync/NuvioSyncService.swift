@@ -431,6 +431,9 @@ final class NuvioSyncManager: ObservableObject {
                 ContinueWatchingBuilder.cancelScheduledRebuild()
                 lastDeviceRegistrationAt = nil
                 unsupportedDeviceRegistrationKey = nil
+                profileSelectionRefreshTask?.cancel()
+                profileSelectionRefreshGeneration &+= 1
+                profileSelectionRefreshTask = nil
             }
             Self.accountSyncDiagnostic = "scheduled"
             if AuthConfig.isConfigured {
