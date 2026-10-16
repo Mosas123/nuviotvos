@@ -261,6 +261,27 @@ let unitTestsTarget: Target = .target(
     )
 )
 
+// UI flows have separate data/setup requirements and run through NuvioTV-UI.
+let uiTestsTarget: Target = .target(
+    name: "NuvioTVUITests",
+    destinations: [.appleTv],
+    product: .uiTests,
+    bundleId: "\(bundleID).uitests",
+    deploymentTargets: .tvOS(tvOSDeployment),
+    infoPlist: .default,
+    sources: ["NuvioTVUITests/**/*.swift"],
+    dependencies: [.target(name: "NuvioTV")],
+    settings: .settings(
+        base: [
+            "GENERATE_INFOPLIST_FILE": "YES",
+            "TEST_TARGET_NAME": "NuvioTV",
+            "SWIFT_EMIT_LOC_STRINGS": "NO",
+        ],
+        configurations: configurations(),
+        defaultSettings: defaultSettings
+    )
+)
+
 // MARK: - Project
 
 let project = Project(
@@ -277,7 +298,7 @@ let project = Project(
         configurations: configurations(),
         defaultSettings: defaultSettings
     ),
-    targets: [appTarget, topShelfTarget, unitTestsTarget],
+    targets: [appTarget, topShelfTarget, unitTestsTarget, uiTestsTarget],
     schemes: [
         .scheme(
             name: "NuvioTV",
@@ -291,6 +312,16 @@ let project = Project(
             archiveAction: .archiveAction(configuration: "Release"),
             profileAction: .profileAction(configuration: "Release"),
             analyzeAction: .analyzeAction(configuration: "Debug")
+        ),
+        .scheme(
+            name: "NuvioTV-UI",
+            shared: true,
+            buildAction: .buildAction(targets: ["NuvioTV"]),
+            testAction: .targets(
+                ["NuvioTVUITests"],
+                configuration: "Debug"
+            ),
+            runAction: .runAction(configuration: "Debug")
         ),
     ]
 )
