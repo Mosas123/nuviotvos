@@ -1231,8 +1231,6 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             dynamicRange = "HLG"
         } else if gamma.contains("pq") || gamma.contains("2084") {
             dynamicRange = "HDR10/PQ"
-        } else if primaries.contains("2020") {
-            dynamicRange = "HDR (BT.2020)"
         } else {
             dynamicRange = "SDR"
         }
