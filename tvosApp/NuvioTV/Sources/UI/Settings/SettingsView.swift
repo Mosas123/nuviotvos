@@ -10461,6 +10461,7 @@ private struct AddonsSettingsSection: View {
     /// edit. Canonicalize the complete list and notify sync immediately so the
     /// new add-on reaches the user's other devices.
     private func addAddonFromInput() {
+        let editedProfileId = ProfileSettings.activeProfileID ?? ""
         guard let url = CinemetaCatalogRepository.normalizedManifestURL(from: addonURLInput) else { return }
         var preferences = CinemetaCatalogRepository.configuredStreamAddonPreferences
         if let index = preferences.firstIndex(where: { $0.url == url.absoluteString }) {
@@ -10483,11 +10484,13 @@ private struct AddonsSettingsSection: View {
         addonURLInput = ""
         NotificationCenter.default.post(
             name: NuvioSyncManager.addonOrderChangedNotification,
-            object: preferences
+            object: preferences,
+            userInfo: [NuvioSyncManager.addonEditedProfileIdUserInfoKey: editedProfileId]
         )
     }
 
     private func persistSyncedAddons() {
+        let editedProfileId = ProfileSettings.activeProfileID ?? ""
         let preferences = syncedAddons.map {
             StreamAddonPreference(url: $0.url.absoluteString, enabled: $0.isEnabled)
         }
@@ -10505,7 +10508,8 @@ private struct AddonsSettingsSection: View {
         streamAddonManifestStates = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestStates) ?? ""
         NotificationCenter.default.post(
             name: NuvioSyncManager.addonOrderChangedNotification,
-            object: preferences
+            object: preferences,
+            userInfo: [NuvioSyncManager.addonEditedProfileIdUserInfoKey: editedProfileId]
         )
     }
 
@@ -10658,6 +10662,7 @@ private struct AddonsSettingsSection: View {
     }
 
     private func setLocalAddonEnabled(at index: Int, isEnabled: Bool) {
+        let editedProfileId = ProfileSettings.activeProfileID ?? ""
         guard addons.indices.contains(index) else { return }
         addons[index].isInstalled = isEnabled
         let addon = addons[index]
@@ -10674,7 +10679,8 @@ private struct AddonsSettingsSection: View {
             streamAddonManifestStates = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestStates) ?? ""
             NotificationCenter.default.post(
                 name: NuvioSyncManager.addonOrderChangedNotification,
-                object: preferences
+                object: preferences,
+                userInfo: [NuvioSyncManager.addonEditedProfileIdUserInfoKey: editedProfileId]
             )
             NotificationCenter.default.post(
                 name: TVHomeCatalogOrder.changedNotification,
@@ -10688,6 +10694,7 @@ private struct AddonsSettingsSection: View {
     }
 
     private func removeLocalAddon(at index: Int) {
+        let editedProfileId = ProfileSettings.activeProfileID ?? ""
         guard addons.indices.contains(index) else { return }
         let addon = addons.remove(at: index)
         var deleted = Self.deletedLocalAddonIDs()
@@ -10702,7 +10709,8 @@ private struct AddonsSettingsSection: View {
             streamAddonManifestStates = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestStates) ?? ""
             NotificationCenter.default.post(
                 name: NuvioSyncManager.addonOrderChangedNotification,
-                object: preferences
+                object: preferences,
+                userInfo: [NuvioSyncManager.addonEditedProfileIdUserInfoKey: editedProfileId]
             )
             NotificationCenter.default.post(
                 name: TVHomeCatalogOrder.changedNotification,
