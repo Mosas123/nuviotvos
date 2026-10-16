@@ -4693,7 +4693,7 @@ final class ContinueWatchingDismissStoreTests: XCTestCase {
         )
     }
 
-    func testFreshProgressRetiresTheRemoval() {
+    func testFreshStoreProgressPersistenceRetainsTheRemoval() {
         let meta = makeSeries()
         let item = makeItem(meta: meta, season: 1, episode: 1)
         ContinueWatchingDismissStore.dismiss(item)
@@ -4708,9 +4708,9 @@ final class ContinueWatchingDismissStoreTests: XCTestCase {
             episodeId: "tt-dismiss-series:1:1"
         )
 
-        XCTAssertFalse(
+        XCTAssertTrue(
             ContinueWatchingDismissStore.isDismissed(item),
-            "watching a removed title again must bring its card back"
+            "Store-only progress persistence is not an actual playback save and must retain the dismissal."
         )
     }
 
