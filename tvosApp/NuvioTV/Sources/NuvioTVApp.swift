@@ -2630,12 +2630,6 @@ struct ContentView: View {
         ) {
             dismissPlayer(meta: meta, subtitle: subtitle)
         }
-        .onAppear {
-            Task {
-                await PosterArtworkCache.shared.purge()
-                await BackdropImageCache.shared.purge()
-            }
-        }
     }
 
     private func playRecommendedTitle(meta: NuvioMeta, playManually: Bool) {
