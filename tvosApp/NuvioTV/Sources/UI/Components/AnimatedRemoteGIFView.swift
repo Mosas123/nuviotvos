@@ -40,14 +40,21 @@ struct AnimatedRemoteGIFView: View {
         }
         .opacity(isActive && decoded != nil ? 1 : 0)
         .animation(.easeInOut(duration: 0.2), value: isActive && decoded != nil)
-        .onAppear { ensureLoaded() }
+        .onAppear {
+            loadFailed = false
+            ensureLoaded()
+        }
         .onChange(of: urlString) { _, _ in
             decoded = nil
             loadFailed = false
             ensureLoaded()
         }
         .onChange(of: isActive) { _, active in
-            if active { ensureLoaded() }
+            if active {
+                // Retry a transient failure when the same mounted card regains focus.
+                loadFailed = false
+                ensureLoaded()
+            }
         }
         .onDisappear {
             loadTask?.cancel()
