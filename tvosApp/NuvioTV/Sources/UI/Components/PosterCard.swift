@@ -1171,7 +1171,7 @@ struct TrailerPreviewPlayer: View {
         TrailerPlayerSurface(player: player) {
             guard !isRenderReady else { return }
             isRenderReady = true
-            if isActive {
+            if wantsPlayback {
                 onPlaybackReady()
             }
         }
