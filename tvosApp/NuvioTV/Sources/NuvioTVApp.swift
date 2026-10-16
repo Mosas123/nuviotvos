@@ -9944,7 +9944,7 @@ private struct TVGridHeroSlideshowView: View {
               finishedTrailerPreviewIdentity != identity,
               unavailableTrailerPreviewIdentity != identity else { return }
 
-        let delay = max(0, trailerDelay)
+        let delay = min(15, max(0, trailerDelay))
         if delay > 0 {
             do {
                 try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
