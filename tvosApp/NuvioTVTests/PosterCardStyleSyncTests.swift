@@ -99,4 +99,77 @@ final class PosterCardStyleSyncTests: XCTestCase {
         XCTAssertEqual(radiusOpt, .rounded)
         XCTAssertEqual(sizeOpt, .compact)
     }
+
+    func testCustomPosterLayoutExportUsesTypedValuesAndPreservesSiblingSettings() {
+        let existing: [String: Any] = [
+            "discover_location": ["type": "string", "value": "Search"],
+            "search_discover_enabled": ["type": "boolean", "value": true]
+        ]
+        let pattern = "https://pictorium.elfhosted.com/api/poster/{type}/{tmdb_id|imdb_id}?u=test-space&shape={shape}"
+        let exported = CustomPosterSettingsSyncMapper.export(
+            pattern: pattern,
+            enabledScreens: "home,search",
+            existing: existing
+        )
+
+        XCTAssertEqual((exported[CustomPosterSettingsSyncMapper.patternKey] as? [String: Any])?["type"] as? String, "string")
+        XCTAssertEqual((exported[CustomPosterSettingsSyncMapper.patternKey] as? [String: Any])?["value"] as? String, pattern)
+        XCTAssertEqual((exported[CustomPosterSettingsSyncMapper.enabledScreensKey] as? [String: Any])?["type"] as? String, "string")
+        XCTAssertEqual((exported[CustomPosterSettingsSyncMapper.enabledScreensKey] as? [String: Any])?["value"] as? String, "home,search")
+        XCTAssertEqual((exported["discover_location"] as? [String: Any])?["value"] as? String, "Search")
+        XCTAssertEqual((exported["search_discover_enabled"] as? [String: Any])?["value"] as? Bool, true)
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.customPosterURLPattern))
+        XCTAssertTrue(SettingsKey.all.contains(SettingsKey.customPosterEnabledScreens))
+    }
+
+    func testCustomPosterLayoutExportUsesAndroidCompatibleAllScreenKeys() {
+        let allScreens = CustomPosterScreen.storageValue(for: Set(CustomPosterScreen.allCases))
+        let exported = CustomPosterSettingsSyncMapper.export(
+            pattern: "",
+            enabledScreens: allScreens,
+            existing: nil
+        )
+
+        XCTAssertEqual(
+            (exported[CustomPosterSettingsSyncMapper.enabledScreensKey] as? [String: Any])?["value"] as? String,
+            "home,continue_watching,collections,library,search,details,tv_recommendations"
+        )
+        XCTAssertNotEqual(
+            (exported[CustomPosterSettingsSyncMapper.enabledScreensKey] as? [String: Any])?["value"] as? String,
+            "all"
+        )
+    }
+
+    func testCustomPosterLayoutImportDefaultsMissingScreensToAll() {
+        let remote: [String: Any] = [
+            CustomPosterSettingsSyncMapper.patternKey: ["type": "string", "value": "https://example.com/{tmdb_id}"]
+        ]
+        let current = CustomPosterSettingsSyncMapper.Values(
+            pattern: "https://local.example/{imdb_id}",
+            enabledScreens: "home,library"
+        )
+        let imported = CustomPosterSettingsSyncMapper.importing(remote, preserving: current)
+
+        XCTAssertEqual(imported.pattern, "https://example.com/{tmdb_id}")
+        XCTAssertEqual(
+            imported.enabledScreens,
+            "home,continue_watching,collections,library,search,details,tv_recommendations"
+        )
+    }
+
+    func testCustomPosterLayoutImportPreservesLocalConfigWhenBothFieldsAreAbsent() {
+        let remote: [String: Any] = [
+            "discover_location": ["type": "string", "value": "Search"]
+        ]
+        let current = CustomPosterSettingsSyncMapper.Values(
+            pattern: "https://local.example/{imdb_id}",
+            enabledScreens: "home,library"
+        )
+
+        XCTAssertEqual(CustomPosterSettingsSyncMapper.importing(remote, preserving: current), current)
+        XCTAssertEqual(
+            CustomPosterSettingsSyncMapper.importing(nil, preserving: current),
+            current
+        )
+    }
 }

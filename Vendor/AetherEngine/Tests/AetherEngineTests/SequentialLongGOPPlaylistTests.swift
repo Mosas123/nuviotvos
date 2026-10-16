@@ -130,7 +130,10 @@ struct SequentialBackwardTargetTests {
             cache: cache, segments: plan, codecsString: "avc1.64001F,fLaC", supplementalCodecs: nil,
             resolution: (1280, 720), videoRange: .sdr, frameRate: 23.976, hdcpLevel: nil,
             sourceBitrate: 3_000_000, sequentialAppendPlaylist: true,
-            restartHandler: { recorder.record($0) })
+            restartHandler: { idx in
+                recorder.record(idx)
+                return .restarted(at: idx)
+            })
         for i in 0...20 {
             let hole = i == 1 || i == 7
             provider.appendSequentialSegmentDuration(index: i, durationSeconds: hole ? 0 : 4)

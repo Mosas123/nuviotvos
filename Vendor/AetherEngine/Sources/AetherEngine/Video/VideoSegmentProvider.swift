@@ -814,7 +814,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let stripASSMarkupInVTT: Bool
 
     /// Synchronous teardown + relaunch at the given absolute segment index.
-    private let restartHandler: ((Int) -> Void)?
+    private let restartHandler: ((Int) -> VODProviderRestartResult)?
     /// Called with a plan index the consumer wants and no pump will ever open (#358).
     private let unrecoverableGapHandler: ((Int) -> Void)?
     /// True while the engine's restart coalescer has an in-flight run (#93 residual): waiting
@@ -999,7 +999,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         firstServeLatchCoversEngineCut: Bool = false,
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
-        restartHandler: ((Int) -> Void)? = nil,
+        restartHandler: ((Int) -> VODProviderRestartResult)? = nil,
         unrecoverableGapHandler: ((Int) -> Void)? = nil,
         restartActivity: (() -> Bool)? = nil,
         activeProducerBase: (() -> Int?)? = nil,
@@ -1605,9 +1605,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     + "re-anchoring the producer there so its boundary can open",
                     category: .session
                 )
-                lastRestartIndex = index
-                restart(index)
-                cache.resetHighWaterForRestart()
+                applyRestartResult(restart(index))
                 return
             }
         }
@@ -1653,9 +1651,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 "[HLSVideoEngine] declareTarget backward jump \(previousTarget) → \(index), proactively restarting producer",
                 category: .session
             )
-            lastRestartIndex = index
-            restart(index)
-            cache.resetHighWaterForRestart()
+            applyRestartResult(restart(index))
         }
     }
 
@@ -1848,20 +1844,20 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     let isLatestTarget = cache.targetIndex == index
                     let orphanBackstop = attempt == Self.repositionMaxWaits - 1
                         && !firedThisCall && !producerCovers && isLatestTarget
-                    if isLatestTarget
+                    if isLatestTarget && !firedThisCall
                         && ((lastRestartIndex != index && !producerCovers) || orphanBackstop) {
                         EngineLog.emit(
                             "[HLSVideoEngine] seg\(index): out-of-range fetch (cache.range=\(range.map { "\($0.0)..\($0.1)" } ?? "empty") highWater=\(highWater) attempt=\(attempt + 1)/\(Self.repositionMaxWaits)), restarting producer",
                             category: .session
                         )
-                        lastRestartIndex = index
-                        clearForwardWaitMiss()
-                        restart(index)
-                        // Reset highWater AFTER restart() returns (synchronous: old producer has exited).
-                        // Pre-restart reset would be clobbered by the old producer's final write re-bumping
-                        // highWater, re-arming producerPassedAndPruned and cascading into per-segment restarts.
-                        cache.resetHighWaterForRestart()
+                        let result = restart(index)
                         firedThisCall = true
+                        if case .restarted(let target) = result {
+                            lastRestartIndex = target
+                            clearForwardWaitMiss()
+                            // Reset highWater only after an admitted replacement actually starts.
+                            cache.resetHighWaterForRestart()
+                        }
                     }
                     attempt += 1
                 }
@@ -1913,6 +1909,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         _forwardMissIndex = .min
         _forwardMissFront = .min
         stateLock.unlock()
+    }
+
+    private func applyRestartResult(_ result: VODProviderRestartResult) {
+        guard case .restarted(let target) = result else { return }
+        lastRestartIndex = target
+        cache.resetHighWaterForRestart()
     }
 
     private func logServed(index: Int, source: SegmentSource?, totalStart: DispatchTime,
