@@ -173,6 +173,45 @@ enum TmdbDetailsService {
     private static let findCache = TmdbFindCache()
     private static let detailsCache = TmdbDetailsCache()
 
+    private struct RequestContext: Sendable {
+        let apiKey: String?
+        let isEnabled: Bool
+        let language: String
+        let flags: [String: Bool]
+    }
+
+    @TaskLocal private static var requestContext: RequestContext?
+
+    // A value snapshot, inherited by structured child tasks and nested calls.
+    // The optional store lets regression tests exercise it without network I/O.
+    static func withRequestContext<T>(
+        defaults: UserDefaults? = nil,
+        _ operation: () async -> T
+    ) async -> T {
+        if requestContext != nil { return await operation() }
+        let store = defaults ?? ProfileSettings.current
+        let rawKey = store.string(forKey: SettingsKey.tmdbApiKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let keys = [
+            SettingsKey.tmdbUseTrailers, SettingsKey.tmdbUseArtwork,
+            SettingsKey.tmdbUseBasicInfo, SettingsKey.tmdbUseDetails,
+            SettingsKey.tmdbUseCredits, SettingsKey.tmdbUseProductions,
+            SettingsKey.tmdbUseNetworks, SettingsKey.tmdbUseEpisodes,
+            SettingsKey.tmdbUseSeasonPosters, SettingsKey.tmdbUseMoreLikeThis,
+            SettingsKey.tmdbUseCollections, SettingsKey.tmdbApplyToHome
+        ]
+        let flags = Dictionary(uniqueKeysWithValues: keys.map { key in
+            (key, (store.object(forKey: key) as? Bool) ?? (key != SettingsKey.tmdbApplyToHome))
+        })
+        let context = RequestContext(
+            apiKey: rawKey.isEmpty ? nil : rawKey,
+            isEnabled: (store.object(forKey: SettingsKey.tmdbEnabled) as? Bool) ?? false,
+            language: normalizedLanguage(store.string(forKey: SettingsKey.tmdbLanguage)),
+            flags: flags
+        )
+        return await $requestContext.withValue(context) { await operation() }
+    }
+
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 8
@@ -205,17 +244,20 @@ enum TmdbDetailsService {
 
     static var currentApiKey: String? { apiKey }
     private static var apiKey: String? {
+        if let requestContext { return requestContext.apiKey }
         let key = ProfileSettings.current.string(forKey: SettingsKey.tmdbApiKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return key.isEmpty ? nil : key
     }
 
     private static var isEnabled: Bool {
-        (ProfileSettings.current.object(forKey: SettingsKey.tmdbEnabled) as? Bool) ?? false
+        if let requestContext { return requestContext.isEnabled }
+        return (ProfileSettings.current.object(forKey: SettingsKey.tmdbEnabled) as? Bool) ?? false
     }
 
     static var preferredLanguage: String {
-        normalizedLanguage(
+        if let requestContext { return requestContext.language }
+        return normalizedLanguage(
             ProfileSettings.current.string(forKey: SettingsKey.tmdbLanguage)
         )
     }
@@ -236,6 +278,9 @@ enum TmdbDetailsService {
     // MARK: - Public
 
     static func resolveTmdbId(for meta: NuvioMeta) async -> (id: Int, mediaType: String)? {
+        if requestContext == nil {
+            return await withRequestContext { await resolveTmdbId(for: meta) }
+        }
         guard isEnabled, apiKey != nil else { return nil }
         let mediaType = (meta.isSeries || isSeries(meta.type)) ? "tv" : "movie"
 
@@ -261,12 +306,18 @@ enum TmdbDetailsService {
     }
 
     static func fetchCompanies(for meta: NuvioMeta) async -> [MetaCompany] {
+        if requestContext == nil {
+            return await withRequestContext { await fetchCompanies(for: meta) }
+        }
         guard useProductions || useNetworks else { return [] }
         guard let resolved = await resolveTmdbId(for: meta) else { return [] }
         return await fetchCompanies(tmdbId: resolved.id, mediaType: resolved.mediaType)
     }
 
     static func fetchTrailerYouTubeId(for meta: NuvioMeta) async -> String? {
+        if requestContext == nil {
+            return await withRequestContext { await fetchTrailerYouTubeId(for: meta) }
+        }
         guard useTrailers,
               apiKey != nil,
               let resolved = await resolveTmdbId(for: meta) else {
@@ -276,6 +327,9 @@ enum TmdbDetailsService {
     }
 
     static func fetchTrailerYouTubeId(tmdbId: Int, mediaType: String) async -> String? {
+        if requestContext == nil {
+            return await withRequestContext { await fetchTrailerYouTubeId(tmdbId: tmdbId, mediaType: mediaType) }
+        }
         guard let apiKey else { return nil }
 
         // 1. Try preferred language first
@@ -323,6 +377,9 @@ enum TmdbDetailsService {
     }
 
     static func fetchCredits(for meta: NuvioMeta) async -> TmdbCreditMetadata? {
+        if requestContext == nil {
+            return await withRequestContext { await fetchCredits(for: meta) }
+        }
         guard useCredits,
               let apiKey,
               let resolved = await resolveTmdbId(for: meta) else {
@@ -428,6 +485,9 @@ enum TmdbDetailsService {
     }
 
     static func fetchMoreLikeThis(for meta: NuvioMeta, limit: Int = 16) async -> [RelatedTitle] {
+        if requestContext == nil {
+            return await withRequestContext { await fetchMoreLikeThis(for: meta, limit: limit) }
+        }
         guard useMoreLikeThis else { return [] }
         guard let resolved = await resolveTmdbId(for: meta) else { return [] }
         return await fetchRecommendations(
@@ -440,6 +500,9 @@ enum TmdbDetailsService {
     /// Fetches full season and episode listings from TMDB, enabling unreleased/TBD episodes
     /// and accurate episode thumbnails/titles for ongoing and announced TV series.
     static func fetchEpisodes(for meta: NuvioMeta) async -> [NuvioVideo]? {
+        if requestContext == nil {
+            return await withRequestContext { await fetchEpisodes(for: meta) }
+        }
         guard useEpisodes,
               let apiKey,
               let resolved = await resolveTmdbId(for: meta),
@@ -557,6 +620,9 @@ enum TmdbDetailsService {
     /// Applies the selected TMDB language to user-facing text while retaining
     /// Cinemeta/add-on values wherever TMDB has no translation.
     static func localizedMetadata(for meta: NuvioMeta) async -> NuvioMeta {
+        if requestContext == nil {
+            return await withRequestContext { await localizedMetadata(for: meta) }
+        }
         guard useBasicInfo || useArtwork else { return meta }
         guard let resolved = await resolveTmdbId(for: meta),
               let details = await fetchLocalizedDetails(
@@ -656,6 +722,9 @@ enum TmdbDetailsService {
     /// catalog cards while preserving their source order. The details screen
     /// remains the only place that requests credits and episode data.
     static func localizedMetadata(for metas: [NuvioMeta]) async -> [NuvioMeta] {
+        if requestContext == nil {
+            return await withRequestContext { await localizedMetadata(for: metas) }
+        }
         guard isEnabled, useHomeEnrichment, useBasicInfo || useArtwork, !metas.isEmpty else { return metas }
 
         var localized = metas
@@ -688,6 +757,9 @@ enum TmdbDetailsService {
         company: MetaCompany,
         page: Int = 1
     ) async -> [RelatedTitle] {
+        if requestContext == nil {
+            return await withRequestContext { await discoverTitles(company: company, page: page) }
+        }
         let moduleEnabled = company.kind == .production ? useProductions : useNetworks
         guard moduleEnabled,
               isEnabled,
@@ -733,6 +805,9 @@ enum TmdbDetailsService {
     /// Networks are TV-only in TMDB, so this intentionally does not request movie
     /// results or make a separate request for each title.
     static func fetchNetworkBrowse(company: MetaCompany) async -> TmdbNetworkBrowseData? {
+        if requestContext == nil {
+            return await withRequestContext { await fetchNetworkBrowse(company: company) }
+        }
         guard company.kind == .network,
               isEnabled,
               let apiKey,
@@ -792,6 +867,9 @@ enum TmdbDetailsService {
     }
 
     static func discoverTitles(person: TmdbPersonMetadata) async -> [RelatedTitle] {
+        if requestContext == nil {
+            return await withRequestContext { await discoverTitles(person: person) }
+        }
         guard useCredits,
               isEnabled,
               let apiKey,
@@ -1266,6 +1344,7 @@ enum TmdbDetailsService {
     }
 
     private static func tmdbBoolean(_ key: String, defaultValue: Bool = true) -> Bool {
+        if let value = requestContext?.flags[key] { return value }
         guard let value = ProfileSettings.current.object(forKey: key) else {
             // All Android TV TMDB modules default to enabled. Keep that same
             // behavior for existing tvOS profiles that predate these keys.
