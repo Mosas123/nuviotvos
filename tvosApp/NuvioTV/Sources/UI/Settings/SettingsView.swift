@@ -8461,7 +8461,7 @@ private struct SubtitlePreviewCard: View {
     }
 
     private var previewTracking: CGFloat {
-        CGFloat(style.letterSpacing) * 0.6
+        CGFloat(style.subSpacing) * 0.6
     }
 
     private var outlineWidth: CGFloat {
