@@ -24,32 +24,14 @@ final class CatalogBrowseUITests: XCTestCase {
     // MARK: - Filter Section Tests
 
     func testContentTypeToggle() throws {
-        // Navigate to catalog browse (if needed)
-        sleep(2)
-
-        // Look for Movies/Series toggle buttons
-        if app.buttons["Movies"].exists {
-            XCTAssertTrue(app.buttons["Movies"].exists, "Movies button should exist")
-
-            // Toggle to Series
-            if app.buttons["Series"].exists {
-                app.buttons["Series"].tap()
-                sleep(1)
-                XCTAssertTrue(true, "Should be able to toggle to Series")
-            }
-
-            // Toggle back to Movies
-            app.buttons["Movies"].tap()
-            sleep(1)
-            XCTAssertTrue(true, "Should be able to toggle back to Movies")
-        }
+        throw XCTSkip("This legacy flow has no catalog-entry fixture or observable selection assertion yet.")
     }
 
     func testGenreFiltering() throws {
         sleep(2)
 
         // Look for genre filter chips
-        if app.buttons["action"].exists {
+        if requireUICondition(app.buttons["action"].exists) {
             app.buttons["action"].tap()
             sleep(1)
 
@@ -67,12 +49,12 @@ final class CatalogBrowseUITests: XCTestCase {
         sleep(2)
 
         // Look for sort menu or picker
-        if app.buttons["Trending"].exists || app.pickers["Sort"].exists {
+        if requireUICondition(app.buttons["Trending"].exists || app.pickers["Sort"].exists) {
             // Try different sort options
             let sortOptions = ["Trending", "Popular", "Newest", "Top Rated"]
 
             for option in sortOptions {
-                if app.buttons[option].exists {
+                if requireUICondition(app.buttons[option].exists) {
                     app.buttons[option].tap()
                     sleep(1)
                     XCTAssertTrue(app.exists, "Should apply \(option) sort")
@@ -85,12 +67,12 @@ final class CatalogBrowseUITests: XCTestCase {
         sleep(2)
 
         // Apply a filter first
-        if app.buttons["comedy"].exists {
+        if requireUICondition(app.buttons["comedy"].exists) {
             app.buttons["comedy"].tap()
             sleep(1)
 
             // Look for clear filters button
-            if app.buttons["Clear Filters"].exists {
+            if requireUICondition(app.buttons["Clear Filters"].exists) {
                 app.buttons["Clear Filters"].tap()
                 sleep(1)
                 XCTAssertTrue(app.exists, "Should clear filters")
@@ -113,9 +95,9 @@ final class CatalogBrowseUITests: XCTestCase {
 
         // Tap a grid item to open details
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstItem = images.element(boundBy: 0)
-            if firstItem.exists && firstItem.isHittable {
+            if requireUICondition(firstItem.exists && firstItem.isHittable) {
                 firstItem.tap()
                 sleep(1)
 
@@ -132,7 +114,7 @@ final class CatalogBrowseUITests: XCTestCase {
 
         // Find scrollable content
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             let initialImageCount = app.images.count
 
             // Scroll down multiple times
@@ -151,17 +133,17 @@ final class CatalogBrowseUITests: XCTestCase {
         sleep(2)
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             // Scroll to bottom
             for _ in 1...5 {
                 scrollView.swipeUp()
-                sleep(0.5)
+                Thread.sleep(forTimeInterval: 0.5)
             }
 
             // Scroll back to top
             for _ in 1...5 {
                 scrollView.swipeDown()
-                sleep(0.5)
+                Thread.sleep(forTimeInterval: 0.5)
             }
 
             XCTAssertTrue(scrollView.exists, "Should handle scrolling to extremes")
@@ -190,13 +172,13 @@ final class CatalogBrowseUITests: XCTestCase {
         sleep(2)
 
         // Apply genre filter
-        if app.buttons["drama"].exists {
+        if requireUICondition(app.buttons["drama"].exists) {
             app.buttons["drama"].tap()
             sleep(1)
         }
 
         // Apply sort
-        if app.buttons["Popular"].exists {
+        if requireUICondition(app.buttons["Popular"].exists) {
             app.buttons["Popular"].tap()
             sleep(1)
         }
@@ -231,7 +213,7 @@ final class CatalogBrowseUITests: XCTestCase {
 
         measure {
             // Apply filter
-            if app.buttons["action"].exists {
+            if requireUICondition(app.buttons["action"].exists) {
                 app.buttons["action"].tap()
                 sleep(1)
             }
@@ -242,10 +224,10 @@ final class CatalogBrowseUITests: XCTestCase {
         sleep(2)
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             measure {
                 scrollView.swipeUp()
-                sleep(0.5)
+                Thread.sleep(forTimeInterval: 0.5)
             }
         }
     }

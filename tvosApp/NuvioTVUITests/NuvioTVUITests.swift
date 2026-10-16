@@ -64,7 +64,7 @@ final class NuvioTVUITests: XCTestCase {
 
         // Look for a "Browse" or category button/text
         // Note: This depends on actual navigation implementation
-        if app.buttons["Browse Movies"].exists {
+        if requireUICondition(app.buttons["Browse Movies"].exists) {
             app.buttons["Browse Movies"].tap()
 
             // Verify catalog browse screen loaded
@@ -79,10 +79,10 @@ final class NuvioTVUITests: XCTestCase {
 
         // Tap first content item if available
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             // Try to tap a content poster
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists {
+            if requireUICondition(firstImage.exists) {
                 firstImage.tap()
 
                 // Wait for details screen to load
@@ -105,7 +105,7 @@ final class NuvioTVUITests: XCTestCase {
 
         // Get first scroll view
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             // Scroll down
             scrollView.swipeUp()
             sleep(1)
