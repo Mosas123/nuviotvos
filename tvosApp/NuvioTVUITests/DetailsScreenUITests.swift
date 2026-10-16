@@ -7,6 +7,7 @@
 
 import XCTest
 
+@MainActor
 final class DetailsScreenUITests: XCTestCase {
 
     var app: XCUIApplication!
@@ -30,7 +31,7 @@ final class DetailsScreenUITests: XCTestCase {
         if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
             if requireUICondition(firstImage.exists && firstImage.isHittable) {
-                firstImage.tap()
+                selectTVElement(firstImage, in: app)
                 sleep(1)
             }
         }
@@ -91,14 +92,14 @@ final class DetailsScreenUITests: XCTestCase {
 
         if requireUICondition(app.buttons["Watchlist"].exists) {
             // Tap to add to watchlist
-            app.buttons["Watchlist"].tap()
+            selectTVElement(app.buttons["Watchlist"], in: app)
             Thread.sleep(forTimeInterval: 0.5)
 
             // Button should update (text might change or remain same)
             XCTAssertTrue(app.buttons["Watchlist"].exists, "Watchlist button should remain")
 
             // Tap again to remove from watchlist
-            app.buttons["Watchlist"].tap()
+            selectTVElement(app.buttons["Watchlist"], in: app)
             Thread.sleep(forTimeInterval: 0.5)
 
             XCTAssertTrue(app.buttons["Watchlist"].exists, "Watchlist button should toggle state")
@@ -116,7 +117,7 @@ final class DetailsScreenUITests: XCTestCase {
         navigateToDetailsScreen()
 
         if requireUICondition(app.buttons["Share"].exists) {
-            app.buttons["Share"].tap()
+            selectTVElement(app.buttons["Share"], in: app)
             sleep(1)
 
             // Share sheet should appear (platform specific)
@@ -145,11 +146,11 @@ final class DetailsScreenUITests: XCTestCase {
             "A watched-state button is required to exercise the toggle"
         )
         if app.buttons["Watched"].exists {
-            app.buttons["Watched"].tap()
+            selectTVElement(app.buttons["Watched"], in: app)
             sleep(1)
             XCTAssertTrue(app.exists, "Watched toggle should be handled")
         } else if app.buttons["Unwatched"].exists {
-            app.buttons["Unwatched"].tap()
+            selectTVElement(app.buttons["Unwatched"], in: app)
             sleep(1)
             XCTAssertTrue(app.exists, "Watched toggle should be handled")
         }
@@ -198,11 +199,11 @@ final class DetailsScreenUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         if requireUICondition(scrollView.exists) {
             // Scroll down to see more content
-            scrollView.swipeUp()
+            moveTVFocus(.down, in: app, within: scrollView)
             Thread.sleep(forTimeInterval: 0.5)
 
             // Scroll back up
-            scrollView.swipeDown()
+            moveTVFocus(.up, in: app, within: scrollView)
             Thread.sleep(forTimeInterval: 0.5)
 
             XCTAssertTrue(scrollView.exists, "Details screen should be scrollable")
@@ -228,24 +229,9 @@ final class DetailsScreenUITests: XCTestCase {
 
     func testBackNavigation() throws {
         navigateToDetailsScreen()
-
-        // Try to navigate back
-        if app.navigationBars.buttons.firstMatch.exists {
-            app.navigationBars.buttons.firstMatch.tap()
-            sleep(1)
-
-            // Should return to previous screen
-            XCTAssertTrue(app.exists, "Should navigate back")
-        } else {
-            // SwiftUI might use different navigation
-            // Try swipe back gesture
-            let startPoint = app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
-            let endPoint = app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
-            startPoint.press(forDuration: 0.1, thenDragTo: endPoint)
-            sleep(1)
-
-            XCTAssertTrue(app.exists, "Should support back navigation")
-        }
+        XCUIRemote.shared.press(.menu)
+        sleep(1)
+        XCTAssertTrue(app.exists, "App should remain running after remote Back")
     }
 
     // MARK: - Loading State Tests
@@ -258,7 +244,7 @@ final class DetailsScreenUITests: XCTestCase {
         if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
             if requireUICondition(firstImage.exists && firstImage.isHittable) {
-                firstImage.tap()
+                selectTVElement(firstImage, in: app)
 
                 // Loading indicator might appear briefly
                 let loadingIndicator = app.activityIndicators.firstMatch
@@ -297,7 +283,7 @@ final class DetailsScreenUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         if requireUICondition(scrollView.exists) {
             measure {
-                scrollView.swipeUp()
+                moveTVFocus(.down, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.5)
             }
         }
@@ -314,7 +300,7 @@ final class DetailsScreenUITests: XCTestCase {
             // First item
             let firstImage = images.element(boundBy: 0)
             if requireUICondition(firstImage.exists && firstImage.isHittable) {
-                firstImage.tap()
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 // Verify details loaded
@@ -323,8 +309,8 @@ final class DetailsScreenUITests: XCTestCase {
                             "First details screen should load")
 
                 // Navigate back
-                if requireUICondition(app.navigationBars.buttons.firstMatch.exists) {
-                    app.navigationBars.buttons.firstMatch.tap()
+                if requireUICondition(app.exists) {
+                    XCUIRemote.shared.press(.menu)
                     sleep(1)
                 }
 
@@ -332,7 +318,7 @@ final class DetailsScreenUITests: XCTestCase {
                 if requireUICondition(images.count > 1) {
                     let secondImage = images.element(boundBy: 1)
                     if requireUICondition(secondImage.exists && secondImage.isHittable) {
-                        secondImage.tap()
+                        selectTVElement(secondImage, in: app)
                         sleep(1)
 
                         // Verify second details loaded

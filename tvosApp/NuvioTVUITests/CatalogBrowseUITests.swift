@@ -7,6 +7,7 @@
 
 import XCTest
 
+@MainActor
 final class CatalogBrowseUITests: XCTestCase {
 
     var app: XCUIApplication!
@@ -32,14 +33,14 @@ final class CatalogBrowseUITests: XCTestCase {
 
         // Look for genre filter chips
         if requireUICondition(app.buttons["action"].exists) {
-            app.buttons["action"].tap()
+            selectTVElement(app.buttons["action"], in: app)
             sleep(1)
 
             // Content should reload with genre filter
             XCTAssertTrue(app.exists, "Should apply genre filter")
 
             // Tap again to deselect
-            app.buttons["action"].tap()
+            selectTVElement(app.buttons["action"], in: app)
             sleep(1)
             XCTAssertTrue(app.exists, "Should remove genre filter")
         }
@@ -55,7 +56,7 @@ final class CatalogBrowseUITests: XCTestCase {
 
             for option in sortOptions {
                 if requireUICondition(app.buttons[option].exists) {
-                    app.buttons[option].tap()
+                    selectTVElement(app.buttons[option], in: app)
                     sleep(1)
                     XCTAssertTrue(app.exists, "Should apply \(option) sort")
                 }
@@ -68,12 +69,12 @@ final class CatalogBrowseUITests: XCTestCase {
 
         // Apply a filter first
         if requireUICondition(app.buttons["comedy"].exists) {
-            app.buttons["comedy"].tap()
+            selectTVElement(app.buttons["comedy"], in: app)
             sleep(1)
 
             // Look for clear filters button
             if requireUICondition(app.buttons["Clear Filters"].exists) {
-                app.buttons["Clear Filters"].tap()
+                selectTVElement(app.buttons["Clear Filters"], in: app)
                 sleep(1)
                 XCTAssertTrue(app.exists, "Should clear filters")
             }
@@ -98,7 +99,7 @@ final class CatalogBrowseUITests: XCTestCase {
         if requireUICondition(images.count > 0) {
             let firstItem = images.element(boundBy: 0)
             if requireUICondition(firstItem.exists && firstItem.isHittable) {
-                firstItem.tap()
+                selectTVElement(firstItem, in: app)
                 sleep(1)
 
                 // Should navigate to details
@@ -119,7 +120,7 @@ final class CatalogBrowseUITests: XCTestCase {
 
             // Scroll down multiple times
             for _ in 1...3 {
-                scrollView.swipeUp()
+                moveTVFocus(.down, in: app, within: scrollView)
                 sleep(1)
             }
 
@@ -136,13 +137,13 @@ final class CatalogBrowseUITests: XCTestCase {
         if requireUICondition(scrollView.exists) {
             // Scroll to bottom
             for _ in 1...5 {
-                scrollView.swipeUp()
+                moveTVFocus(.down, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.5)
             }
 
             // Scroll back to top
             for _ in 1...5 {
-                scrollView.swipeDown()
+                moveTVFocus(.up, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.5)
             }
 
@@ -173,13 +174,13 @@ final class CatalogBrowseUITests: XCTestCase {
 
         // Apply genre filter
         if requireUICondition(app.buttons["drama"].exists) {
-            app.buttons["drama"].tap()
+            selectTVElement(app.buttons["drama"], in: app)
             sleep(1)
         }
 
         // Apply sort
         if requireUICondition(app.buttons["Popular"].exists) {
-            app.buttons["Popular"].tap()
+            selectTVElement(app.buttons["Popular"], in: app)
             sleep(1)
         }
 
@@ -214,7 +215,7 @@ final class CatalogBrowseUITests: XCTestCase {
         measure {
             // Apply filter
             if requireUICondition(app.buttons["action"].exists) {
-                app.buttons["action"].tap()
+                selectTVElement(app.buttons["action"], in: app)
                 sleep(1)
             }
         }
@@ -226,7 +227,7 @@ final class CatalogBrowseUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         if requireUICondition(scrollView.exists) {
             measure {
-                scrollView.swipeUp()
+                moveTVFocus(.down, in: app, within: scrollView)
                 Thread.sleep(forTimeInterval: 0.5)
             }
         }

@@ -7,6 +7,7 @@
 
 import XCTest
 
+@MainActor
 final class NuvioTVUITests: XCTestCase {
 
     var app: XCUIApplication!
@@ -65,7 +66,7 @@ final class NuvioTVUITests: XCTestCase {
         // Look for a "Browse" or category button/text
         // Note: This depends on actual navigation implementation
         if requireUICondition(app.buttons["Browse Movies"].exists) {
-            app.buttons["Browse Movies"].tap()
+            selectTVElement(app.buttons["Browse Movies"], in: app)
 
             // Verify catalog browse screen loaded
             sleep(1)
@@ -83,7 +84,7 @@ final class NuvioTVUITests: XCTestCase {
             // Try to tap a content poster
             let firstImage = images.element(boundBy: 0)
             if requireUICondition(firstImage.exists) {
-                firstImage.tap()
+                selectTVElement(firstImage, in: app)
 
                 // Wait for details screen to load
                 sleep(1)
@@ -107,11 +108,11 @@ final class NuvioTVUITests: XCTestCase {
         let scrollView = app.scrollViews.firstMatch
         if requireUICondition(scrollView.exists) {
             // Scroll down
-            scrollView.swipeUp()
+            moveTVFocus(.down, in: app, within: scrollView)
             sleep(1)
 
             // Scroll up
-            scrollView.swipeDown()
+            moveTVFocus(.up, in: app, within: scrollView)
             sleep(1)
 
             XCTAssertTrue(scrollView.exists, "Scroll view should remain responsive")
