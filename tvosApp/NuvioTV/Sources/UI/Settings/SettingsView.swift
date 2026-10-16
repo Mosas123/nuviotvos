@@ -8453,7 +8453,7 @@ private struct SubtitlePreviewCard: View {
     }
 
     private var previewBottomPadding: CGFloat {
-        22 + CGFloat(style.bottomOffset) * 0.7
+        22 + CGFloat(min(max(style.bottomOffset, 0), 160)) * 0.7
     }
 
     private var previewHorizontalPadding: CGFloat {
