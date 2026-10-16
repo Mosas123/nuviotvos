@@ -461,7 +461,7 @@ struct SubtitleStyle {
             defaults.string(forKey: key) ?? fallback
         }
         return SubtitleStyle(
-            textSize: intValue(SubtitleStyleKey.textSize, SubtitleStyleDefaults.textSize),
+            textSize: min(220, max(60, intValue(SubtitleStyleKey.textSize, SubtitleStyleDefaults.textSize))),
             bold: boolValue(SubtitleStyleKey.bold, SubtitleStyleDefaults.bold),
             bottomOffset: intValue(SubtitleStyleKey.bottomOffset, SubtitleStyleDefaults.bottomOffset),
             horizontalMargin: intValue(SubtitleStyleKey.horizontalMargin, SubtitleStyleDefaults.horizontalMargin),
@@ -8241,7 +8241,7 @@ struct SubtitleStyleEditor: View {
 
     private var style: SubtitleStyle {
         SubtitleStyle(
-            textSize: textSize,
+            textSize: min(220, max(60, textSize)),
             bold: bold,
             bottomOffset: bottomOffset,
             horizontalMargin: horizontalMargin,
