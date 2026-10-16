@@ -1285,6 +1285,9 @@ enum TmdbDetailsService {
     }
 
     static func fetchCertification(for meta: NuvioMeta) async -> String? {
+        if requestContext == nil {
+            return await withRequestContext { await fetchCertification(for: meta) }
+        }
         if let cert = nonEmpty(meta.certification) {
             return cert
         }
