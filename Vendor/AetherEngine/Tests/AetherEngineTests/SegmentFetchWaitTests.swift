@@ -55,6 +55,7 @@ struct SegmentFetchWaitTests {
                 if storeOnRestart {
                     cache?.store(index: idx, data: Data(repeating: 0xCD, count: 8))
                 }
+                return .restarted(at: idx)
             },
             restartActivity: { activity.get() },
             initialRestartIndex: initialRestartIndex,
@@ -90,7 +91,10 @@ struct SegmentFetchWaitTests {
             cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 8_000_000,
-            restartHandler: { idx in recorder.record(idx) },
+            restartHandler: { idx in
+                recorder.record(idx)
+                return .restarted(at: idx)
+            },
             restartActivity: { [weak cache] in
                 if polls.increment() == 3 {
                     cache?.store(index: 40, data: Data(repeating: 0xAB, count: 8))
@@ -132,7 +136,10 @@ struct SegmentFetchWaitTests {
             cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 8_000_000,
-            restartHandler: { idx in recorder.record(idx) },
+            restartHandler: { idx in
+                recorder.record(idx)
+                return .restarted(at: idx)
+            },
             restartActivity: { _ = polls.increment(); return true },
             initialRestartIndex: 0,
             repositionWaitSlice: 0.05,
@@ -212,7 +219,10 @@ struct SegmentFetchWaitTests {
             cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 8_000_000,
-            restartHandler: { idx in recorder.record(idx) },
+            restartHandler: { idx in
+                recorder.record(idx)
+                return .restarted(at: idx)
+            },
             restartActivity: { deliverer.get() },
             repositionWaitSlice: 0.05,
             repositionRideCapSeconds: 5.0
@@ -305,6 +315,7 @@ extension SegmentFetchWaitTests {
                 if storeOnRestart {
                     cache?.store(index: idx, data: Data(repeating: 0x55, count: 8))
                 }
+                return .restarted(at: idx)
             },
             restartActivity: { false },
             activeProducerBase: { producerBase },
@@ -343,7 +354,10 @@ extension SegmentFetchWaitTests {
             cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 8_000_000,
-            restartHandler: { idx in recorder.record(idx) },
+            restartHandler: { idx in
+                recorder.record(idx)
+                return .restarted(at: idx)
+            },
             restartActivity: { false },
             activeProducerBase: { base.get() },
             repositionWaitSlice: 0.05,
@@ -428,7 +442,10 @@ extension SegmentFetchWaitTests {
             cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 8_000_000,
-            restartHandler: { idx in recorder.record(idx) },
+            restartHandler: { idx in
+                recorder.record(idx)
+                return .restarted(at: idx)
+            },
             restartActivity: { [weak cache] in
                 cache?.declareTarget(45)
                 return false

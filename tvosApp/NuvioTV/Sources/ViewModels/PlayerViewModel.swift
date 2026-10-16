@@ -134,8 +134,10 @@ class PlayerViewModel: ObservableObject {
     @Published private(set) var subtitleStyle = SubtitleStyle.current
     /// Session-only override used when AI Subtitle auto-select is disabled.
     @Published private(set) var isAISubtitleTranslationManuallyEnabled = false
-    /// Current mpv `audio-delay`, in milliseconds. Per-session, not persisted.
-    @Published var audioDelayMs: Int = 0
+    /// Current audio delay in milliseconds. Persisted across sessions when `isAudioDelayPersistEnabled` is true.
+    @Published var audioDelayMs: Int = ProfileSettings.current.bool(forKey: SettingsKey.audioDelayPersistEnabled)
+        ? ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs)
+        : 0
     /// PCM amplification in whole dB (0…10), applied as mpv software volume.
     /// Per-session, not persisted.
     @Published var audioAmplificationDb: Int = 0
@@ -278,6 +280,7 @@ class PlayerViewModel: ObservableObject {
     private var hasLoaded = false
     private var didShutdown = false
     private var isTrailerPlaybackSession = false
+    private var hasClearedDismissalsForCurrentPlaybackSession = false
     var activeMeta: NuvioMeta?
     private var activeStreamURL: String?
     private var activeHTTPHeaders: [String: String] = [:]
@@ -1100,7 +1103,7 @@ class PlayerViewModel: ObservableObject {
     /// Applies all per-stream state for a title/episode. Shared by the initial
     /// `load` and the in-place `replaceStream` used for a seamless next-episode
     /// advance, so both paths reset resume/track/subtitle state identically.
-    private func applyStreamState(
+    func applyStreamState(
         url: URL,
         meta: NuvioMeta,
         subtitle: String,
@@ -1249,9 +1252,10 @@ class PlayerViewModel: ObservableObject {
         self.addedExternalSubtitleURLs = []
         self.pendingSelectedExternalSubtitleURL = nil
         self.isAISubtitleTranslationManuallyEnabled = false
+        self.hasClearedDismissalsForCurrentPlaybackSession = false
         if !preserveSessionPreferences {
             self.subtitleDelayMs = 0
-            self.audioDelayMs = 0
+            self.audioDelayMs = isAudioDelayPersistEnabled ? persistentAudioDelayMs : 0
             self.audioAmplificationDb = 0
         }
         self.skipIntervals = []
@@ -4141,8 +4145,27 @@ class PlayerViewModel: ObservableObject {
     func setAudioDelayMs(_ ms: Int) {
         let clamped = min(max(ms, -3_000), 3_000)
         audioDelayMs = clamped
+        if isAudioDelayPersistEnabled {
+            ProfileSettings.current.set(clamped, forKey: SettingsKey.persistentAudioDelayMs)
+        }
         sessionCoordinator.updateAudioDelay(Double(clamped) / 1_000)
         engine.setAudioDelay(Double(clamped) / 1000.0)
+    }
+
+    var isAudioDelayPersistEnabled: Bool {
+        ProfileSettings.current.bool(forKey: SettingsKey.audioDelayPersistEnabled)
+    }
+
+    var persistentAudioDelayMs: Int {
+        ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs)
+    }
+
+    func setAudioDelayPersistEnabled(_ enabled: Bool) {
+        ProfileSettings.current.set(enabled, forKey: SettingsKey.audioDelayPersistEnabled)
+        if enabled {
+            ProfileSettings.current.set(audioDelayMs, forKey: SettingsKey.persistentAudioDelayMs)
+        }
+        objectWillChange.send()
     }
 
     /// PCM amplification in whole dB (0…10).
@@ -5544,7 +5567,7 @@ class PlayerViewModel: ObservableObject {
                 ? checkpoint.time
                 : nil
         }
-        let progressTime = checkpointTime ?? (force ? (lastStablePlaybackTime ?? time) : time)
+        let progressTime = checkpointTime ?? lastStablePlaybackTime ?? time
         if isPeriodicHeartbeat, !force {
             if let lastSavedProgressPosition,
                abs(progressTime.current - lastSavedProgressPosition) < 2.0 {
@@ -5554,7 +5577,7 @@ class PlayerViewModel: ObservableObject {
         // Nuvio Sync retains the 10-second accidental-playback safeguard. A
         // Trakt start scrobble is the source of its Continue Watching row, so
         // send it once playback has genuinely begun instead of waiting 10+ s.
-        let minimumProgressSeconds: Double = usesTraktProgress ? 1 : 10
+        let minimumProgressSeconds: Double = usesTraktProgress ? 1 : WatchProgressLedger.minimumTrackableSeconds
         guard let activeMeta,
               let activeStreamURL,
               progressTime.current.isFinite,
@@ -5567,12 +5590,19 @@ class PlayerViewModel: ObservableObject {
               !didDetectReplacementStream,
               !isAwaitingStreamStart || didApplyResume,
               progressTime.current >= minimumProgressSeconds || (force && didApplyResume && progressTime.current > 5) else {
-            print("[ContinueWatching][Player] saveProgress guard failed: meta=\(activeMeta?.id ?? "nil"), streamURL=\(activeStreamURL != nil), pos=\(progressTime.current), dur=\(progressTime.duration), trackable=\(isTrackablePlayback), isReplacement=\(loadedStreamLooksLikeReplacement()), didDetectReplacement=\(didDetectReplacementStream), awaitingStreamStart=\(isAwaitingStreamStart), didApplyResume=\(didApplyResume), minSec=\(minimumProgressSeconds), force=\(force)")
+            if !isPeriodicHeartbeat || progressTime.current >= minimumProgressSeconds {
+                print("[ContinueWatching][Player] saveProgress guard failed: meta=\(activeMeta?.id ?? "nil"), streamURL=\(activeStreamURL != nil), pos=\(progressTime.current), dur=\(progressTime.duration), trackable=\(isTrackablePlayback), isReplacement=\(loadedStreamLooksLikeReplacement()), didDetectReplacement=\(didDetectReplacementStream), awaitingStreamStart=\(isAwaitingStreamStart), didApplyResume=\(didApplyResume), minSec=\(minimumProgressSeconds), force=\(force)")
+            }
             return
         }
 
         let epString = resolvedEpisodeNumbers.map { "S\($0.season)E\($0.episode)" } ?? "movie"
         print("[ContinueWatching][Player] saveProgress executing: meta=\(activeMeta.id) (\(activeMeta.name)), ep=\(epString), pos=\(progressTime.current)/\(progressTime.duration) (\(String(format: "%.1f", (progressTime.current / progressTime.duration) * 100))%), force=\(force), heartbeat=\(isPeriodicHeartbeat), usesTraktProgress=\(usesTraktProgress)")
+
+        if !hasClearedDismissalsForCurrentPlaybackSession {
+            hasClearedDismissalsForCurrentPlaybackSession = true
+            ContinueWatchingDismissStore.clear(contentId: activeMeta.id)
+        }
 
         if shouldSaveNextUpProgress(at: progressTime), let nextEpisode {
             print("[ContinueWatching][Player] shouldSaveNextUpProgress triggered for nextEpisode: S\(nextEpisode.season)E\(nextEpisode.episode)")

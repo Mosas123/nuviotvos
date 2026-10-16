@@ -163,6 +163,8 @@ enum SettingsKey {
     static let posterLabels = "nuvio.tv.settings.layout.posterLabels"
     static let catalogAddonNames = "nuvio.tv.settings.layout.catalogAddonNames"
     static let landscapePosters = "nuvio.tv.settings.layout.landscapePosters"
+    static let customPosterURLPattern = "nuvio.tv.settings.layout.customPosterURLPattern"
+    static let customPosterEnabledScreens = "nuvio.tv.settings.layout.customPosterEnabledScreens"
     static let discoverLocation = "nuvio.tv.settings.layout.discoverLocation"
     /// Which Search screen the Search tab shows: `"Netflix"` (embedded
     /// key-by-key keyboard with a title list beside the poster grid) or
@@ -269,6 +271,7 @@ enum SettingsKey {
     static let smartStreamUseTopResult = "nuvio.tv.settings.playback.smartStreamUseTopResult"
     static let smartStreamQuality = "nuvio.tv.settings.playback.smartStreamQuality"
     static let smartSubtitleMatching = "nuvio.tv.settings.playback.smartSubtitleMatching"
+    static let backgroundStreamPreFetch = "nuvio.tv.settings.playback.backgroundStreamPreFetch"
     static let cachedOnlyStreams = "nuvio.tv.settings.playback.cachedOnlyStreams"
     static let preferHardwareDecodedStreams = "nuvio.tv.settings.playback.preferHardwareDecodedStreams"
     static let preserveAddonStreamOrder = "nuvio.tv.settings.playback.preserveAddonStreamOrder"
@@ -310,6 +313,8 @@ enum SettingsKey {
     static let playerShowAudio = "nuvio.tv.settings.playback.showAudio"
     static let seekPreviewEnabled = "nuvio.tv.settings.playback.seekPreviewEnabled"
     static let showLoadingStatus = "nuvio.tv.settings.playback.showLoadingStatus"
+    static let audioDelayPersistEnabled = "nuvio.tv.settings.playback.audioDelayPersistEnabled"
+    static let persistentAudioDelayMs = "nuvio.tv.settings.playback.persistentAudioDelayMs"
     static let sceneFeatureEnabled = "nuvio.tv.settings.playback.sceneFeatureEnabled"
 
     static let fastNavigation = "nuvio.tv.settings.advanced.fastNavigation"
@@ -335,7 +340,7 @@ enum SettingsKey {
         profileName, profilePinEnabled, profileAutoSelectLast, profileRequireSelectionAfterBackground,
         accountSyncWatchState,
         theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
-        homeLayout, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, landscapePosters, discoverLocation,
+        homeLayout, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
         searchStyle, preferAddonArtworkInSearch,
         continueWatchingVisible, continueWatchingLandscape, continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp,
         cardCornerRadius, cardSize, liquidGlassCards,
@@ -366,6 +371,7 @@ enum SettingsKey {
         smbServers, smbLibraryIndex, smbLocalRowEnabled,
         jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
         playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        backgroundStreamPreFetch,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
         focusedPosterBackdropEnabled, focusedPosterBackdropDelay, audioLanguage,
@@ -373,6 +379,7 @@ enum SettingsKey {
         forcedSubtitles, subtitleSize, frameRateMatching, networkCache, hybridDiskCacheEnabled, hybridDiskCacheLimitGB, playbackTrackSelections, showAudioLanguages,
         externalPlayerForwardSubtitles, assOverrideMode,
         playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles, playerShowAudio, seekPreviewEnabled, showLoadingStatus,
+        audioDelayPersistEnabled, persistentAudioDelayMs,
         sceneFeatureEnabled,
         fastNavigation, smoothFocus, playbackDiagnostics, playbackDebug, focusHighlighter,
         iCloudSyncEnabled, iCloudLastSyncDate
@@ -2122,6 +2129,9 @@ private struct AppearanceSettingsView: View {
     @AppStorage(SettingsKey.amoledSurfaces) private var amoledSurfaces = false
     @AppStorage(SettingsKey.cardCornerRadius) private var cardCornerRadius = AppCardStyle.defaultCornerRadiusRaw
     @AppStorage(SettingsKey.liquidGlassCards) private var liquidGlassCards = true
+    @AppStorage(SettingsKey.customPosterURLPattern) private var customPosterURLPattern = ""
+    @AppStorage(SettingsKey.customPosterEnabledScreens) private var customPosterEnabledScreens = "all"
+    @State private var customPosterURLDraft = ""
     @ObservedObject private var localeManager = AppLocaleManager.shared
 
     private let cardRadiusOptions = CardCornerRadiusOption.allCases.map(\.rawValue)
@@ -2148,9 +2158,9 @@ private struct AppearanceSettingsView: View {
                 )
             ) {
                 CardStyleLivePreview(
+                    customPosterURLPattern: customPosterURLPattern,
                     cornerRadiusOption: CardCornerRadiusOption.from(rawValue: cardCornerRadius),
-                    isLiquidGlass: liquidGlassCards,
-                    accentColor: accentColor
+                    isLiquidGlass: liquidGlassCards
                 )
 
                 SettingsOptionRow(
@@ -2163,6 +2173,7 @@ private struct AppearanceSettingsView: View {
                     options: cardRadiusOptions,
                     accentColor: accentColor
                 )
+                .settingsEntryAnchor()
                 .onAppear {
                     if CardCornerRadiusOption(rawValue: cardCornerRadius) == nil {
                         cardCornerRadius = CardCornerRadiusOption.from(rawValue: cardCornerRadius).rawValue
@@ -2178,6 +2189,36 @@ private struct AppearanceSettingsView: View {
                     isOn: $liquidGlassCards,
                     accentColor: accentColor
                 )
+
+                SettingsTextFieldRow(
+                    title: "Custom Poster URL",
+                    subtitle: "Leave blank to use provider artwork. Supports {type}, {shape}, and {tmdb_id|imdb_id}.",
+                    placeholder: "https://example.com/{type}/{tmdb_id|imdb_id}?shape={shape}",
+                    text: $customPosterURLDraft,
+                    fieldWidth: 650,
+                    onCommit: {
+                        let committedPattern = customPosterURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        customPosterURLDraft = committedPattern
+                        customPosterURLPattern = committedPattern
+                    }
+                )
+                .onAppear {
+                    customPosterURLDraft = customPosterURLPattern
+                }
+                .onChange(of: customPosterURLPattern) { _, newPattern in
+                    customPosterURLDraft = newPattern
+                }
+
+                if !customPosterURLPattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ForEach(CustomPosterScreen.allCases.filter { $0 != .tvRecommendations }) { screen in
+                        SettingsToggleRow(
+                            title: "Apply to \(screen.title)",
+                            subtitle: "Use custom poster artwork on \(screen.title.lowercased()) cards.",
+                            isOn: customPosterScreenBinding(for: screen),
+                            accentColor: accentColor
+                        )
+                    }
+                }
             }
 
             SettingsGroup(
@@ -2188,7 +2229,6 @@ private struct AppearanceSettingsView: View {
                 )
             ) {
                 SettingsSwatchRow(swatches: accentSwatches, selection: $theme, accentColor: accentColor)
-                    .settingsEntryAnchor()
             }
 
             SettingsGroup(
@@ -2280,65 +2320,117 @@ private struct AppearanceSettingsView: View {
         .onChange(of: liquidGlassCards) { _, _ in
             ProfileSettings.notifySettingsChanged()
         }
+        .onChange(of: customPosterURLPattern) { _, _ in
+            ProfileSettings.notifySettingsChanged()
+        }
+        .onChange(of: customPosterEnabledScreens) { _, _ in
+            ProfileSettings.notifySettingsChanged()
+        }
+    }
+
+    private func customPosterScreenBinding(for screen: CustomPosterScreen) -> Binding<Bool> {
+        Binding(
+            get: {
+                CustomPosterScreen.fromStorageValue(customPosterEnabledScreens).contains(screen)
+            },
+            set: { isEnabled in
+                var screens = CustomPosterScreen.fromStorageValue(customPosterEnabledScreens)
+                if isEnabled {
+                    screens.insert(screen)
+                } else {
+                    screens.remove(screen)
+                }
+                customPosterEnabledScreens = CustomPosterScreen.storageValue(for: screens)
+            }
+        )
     }
 }
 
 // MARK: - Card Style Live Preview
 
 private struct CardStyleLivePreview: View {
+    let customPosterURLPattern: String
     let cornerRadiusOption: CardCornerRadiusOption
     let isLiquidGlass: Bool
-    let accentColor: Color
 
-    private var portraitRadius: CGFloat {
-        cornerRadiusOption.radius
+    @State private var selectedTitle = PreviewTitle.random()
+    @State private var loadedMetadata: NuvioMeta?
+    @State private var hasAppeared = false
+
+    private struct PreviewTitle: Identifiable {
+        let id: String
+        let name: String
+        let tmdbId: Int
+
+        static let samples = [
+            PreviewTitle(id: "tt1375666", name: "Inception", tmdbId: 27_205),
+            PreviewTitle(id: "tt0816692", name: "Interstellar", tmdbId: 157_336),
+            PreviewTitle(id: "tt15239678", name: "Dune: Part Two", tmdbId: 693_134)
+        ]
+
+        static func random() -> PreviewTitle {
+            samples.randomElement() ?? samples[0]
+        }
+
+        var fallbackMetadata: NuvioMeta {
+            NuvioMeta(
+                id: id,
+                name: name,
+                posterUrl: "https://images.metahub.space/poster/small/\(id)/img",
+                imdbId: id,
+                tmdbId: tmdbId,
+                type: "movie"
+            )
+        }
     }
 
-    private var landscapeRadius: CGFloat {
-        AppCardStyle.episodeCornerRadius(for: cornerRadiusOption.rawValue)
+    private var portraitRadius: CGFloat { cornerRadiusOption.radius }
+
+    private var previewMetadata: NuvioMeta {
+        loadedMetadata ?? selectedTitle.fallbackMetadata
+    }
+
+    private var customPortraitArtworkURL: String? {
+        CustomPosterURLResolver.resolve(
+            pattern: customPosterURLPattern,
+            meta: previewMetadata,
+            shape: "poster"
+        )
+    }
+
+    private var originalLandscapeArtworkURL: String? {
+        previewMetadata.backgroundUrl ?? previewMetadata.landscapePosterUrl ?? previewMetadata.posterUrl
+    }
+
+    private var customLandscapeArtworkURL: String? {
+        CustomPosterURLResolver.resolve(
+            pattern: customPosterURLPattern,
+            meta: previewMetadata,
+            shape: "landscape"
+        )
+    }
+
+    private var previewTitle: String {
+        loadedMetadata?.name ?? selectedTitle.name
     }
 
     var body: some View {
         VStack(spacing: 16) {
             HStack(spacing: 28) {
-                // Portrait Poster Preview
                 VStack(alignment: .leading, spacing: 8) {
                     Text("PORTRAIT")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(.white.opacity(0.55))
                         .tracking(1.2)
 
-                    ZStack(alignment: .bottomLeading) {
-                        LinearGradient(
-                            colors: [
-                                accentColor.opacity(0.35),
-                                Color(red: 0.14, green: 0.08, blue: 0.26),
-                                Color(red: 0.06, green: 0.04, blue: 0.12)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-
-                        Image(systemName: "film.stack.fill")
-                            .font(.system(size: 38))
-                            .foregroundColor(.white.opacity(0.35))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                        LinearGradient(
-                            colors: [.clear, .black.opacity(0.85)],
-                            startPoint: .center,
-                            endPoint: .bottom
-                        )
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Interstellar")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(.white)
-                            Text("★ 8.7 · 2014")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(.white.opacity(0.65))
-                        }
-                        .padding(12)
+                    CachedPosterArtwork(
+                        urlString: customPortraitArtworkURL ?? previewMetadata.posterUrl,
+                        fallbackURLString: customPortraitArtworkURL == nil ? nil : previewMetadata.posterUrl,
+                        width: 140,
+                        height: 210,
+                        maximumWidth: 140
+                    ) {
+                        Rectangle().fill(Color.white.opacity(0.07))
                     }
                     .frame(width: 140, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: portraitRadius, style: .continuous))
@@ -2359,88 +2451,33 @@ private struct CardStyleLivePreview: View {
                         RoundedRectangle(cornerRadius: portraitRadius, style: .continuous)
                             .stroke(AppFocusOutline.color, lineWidth: AppFocusOutline.width)
                     )
+
+                    Text(previewTitle)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.78))
+                        .lineLimit(1)
+                        .frame(width: 140, alignment: .leading)
                 }
 
-                // Landscape / Episode Card Preview
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("LANDSCAPE / EPISODE")
+                    Text("LANDSCAPE")
                         .font(.system(size: 13, weight: .bold))
                         .foregroundColor(.white.opacity(0.55))
                         .tracking(1.2)
 
-                    ZStack(alignment: .bottomLeading) {
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.10, green: 0.18, blue: 0.32),
-                                Color(red: 0.05, green: 0.08, blue: 0.16)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-
-                        Image(systemName: "play.tv.fill")
-                            .font(.system(size: 38))
-                            .foregroundColor(.white.opacity(0.30))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                        // Episode badge
-                        VStack {
-                            HStack {
-                                Spacer()
-                                Text("EPISODE 4")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background {
-                                        if isLiquidGlass {
-                                            Capsule()
-                                                .fill(Color.white.opacity(0.18))
-                                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.30), lineWidth: 1))
-                                        } else {
-                                            Capsule().fill(Color.black.opacity(0.60))
-                                        }
-                                    }
-                                    .padding(12)
-                            }
-                            Spacer()
-                        }
-
-                        LinearGradient(
-                            stops: [
-                                .init(color: .clear, location: 0.1),
-                                .init(color: .black.opacity(0.85), location: 0.75)
-                            ],
-                            startPoint: .center,
-                            endPoint: .bottom
-                        )
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Point of No Return")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                            Text("48m remaining")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(.white.opacity(0.65))
-
-                            // Mini progress bar
-                            GeometryReader { pGeo in
-                                ZStack(alignment: .leading) {
-                                    Capsule().fill(Color.white.opacity(0.20))
-                                    Capsule().fill(accentColor)
-                                        .frame(width: pGeo.size.width * 0.65)
-                                }
-                            }
-                            .frame(height: 4)
-                            .padding(.top, 4)
-                        }
-                        .padding(14)
+                    CachedPosterArtwork(
+                        urlString: customLandscapeArtworkURL ?? originalLandscapeArtworkURL,
+                        fallbackURLString: customLandscapeArtworkURL == nil ? nil : originalLandscapeArtworkURL,
+                        width: 373,
+                        height: 210,
+                        maximumWidth: 373
+                    ) {
+                        Rectangle().fill(Color.white.opacity(0.07))
                     }
-                    .frame(width: 340, height: 210)
-                    .clipShape(RoundedRectangle(cornerRadius: landscapeRadius, style: .continuous))
+                    .frame(width: 373, height: 210)
+                    .clipShape(RoundedRectangle(cornerRadius: portraitRadius, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: landscapeRadius, style: .continuous)
+                        RoundedRectangle(cornerRadius: portraitRadius, style: .continuous)
                             .strokeBorder(
                                 isLiquidGlass
                                     ? LinearGradient(
@@ -2452,6 +2489,12 @@ private struct CardStyleLivePreview: View {
                                 lineWidth: 1.5
                             )
                     )
+
+                    Text(previewTitle)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.78))
+                        .lineLimit(1)
+                        .frame(width: 373, alignment: .leading)
                 }
             }
             .padding(.vertical, 16)
@@ -2468,6 +2511,23 @@ private struct CardStyleLivePreview: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: cornerRadiusOption)
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isLiquidGlass)
+        .task(id: selectedTitle.id) {
+            loadedMetadata = nil
+            do {
+                let metadata = try await CinemetaCatalogRepository().getMetadata(id: selectedTitle.id, type: "movie")
+                guard !Task.isCancelled else { return }
+                loadedMetadata = metadata
+            } catch {
+                // Keep the seeded title, IDs, and portrait fallback when Cinemeta is unavailable.
+            }
+        }
+        .onAppear {
+            if hasAppeared {
+                selectedTitle = PreviewTitle.random()
+                loadedMetadata = nil
+            }
+            hasAppeared = true
+        }
     }
 }
 
@@ -3124,6 +3184,7 @@ private struct LayoutDiscoverySettingsView: View {
                     isOn: $landscapePosters,
                     accentColor: accentColor
                 )
+
             }
 
             SettingsGroup(
@@ -3357,6 +3418,7 @@ private struct LayoutDiscoverySettingsView: View {
             }
         }
     }
+
 }
 
 /// Grid View-only multi-select for choosing which Home catalogs feed the hero
@@ -7544,6 +7606,7 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.externalPlayerForwardSubtitles) private var externalPlayerForwardSubtitles = true
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
     @AppStorage(SettingsKey.smartStreamUseTopResult) private var smartStreamUseTopResult = false
+    @AppStorage(SettingsKey.backgroundStreamPreFetch) private var backgroundStreamPreFetch = true
     @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
     @AppStorage(SettingsKey.smartSubtitleMatching) private var smartSubtitleMatching = true
     @AppStorage(SettingsKey.cachedOnlyStreams) private var cachedOnlyStreams = false
@@ -7825,6 +7888,16 @@ private struct PlaybackSettingsView: View {
                     title: L10n.string("tvos_settings_auto_select_stream", fallback: "Auto Select Stream"),
                     subtitle: L10n.string("tvos_settings_skip_the_stream_picker_and_choose_the_be_da51db1f", fallback: "Skip the stream picker and choose the best link. Hold Play on details to pick manually."),
                     isOn: $smartStreamSelection,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_background_prefetch", fallback: "Background Pre-fetch"),
+                    subtitle: L10n.string(
+                        "tvos_settings_background_prefetch_subtitle",
+                        fallback: "Pre-fetch sources and pre-resolve the best stream on details view for instant playback"
+                    ),
+                    isOn: $backgroundStreamPreFetch,
                     accentColor: accentColor
                 )
 

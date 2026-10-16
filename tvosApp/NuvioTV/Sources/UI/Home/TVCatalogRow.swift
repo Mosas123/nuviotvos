@@ -315,6 +315,7 @@ extension TVLoadingCatalogRow: Equatable {
 
 struct TVCatalogRow: View {
     let id: String
+    var customPosterScreen: CustomPosterScreen = .home
     let title: String
     var addonName: String? = nil
     var showAddonName: Bool = true
@@ -564,6 +565,7 @@ struct TVCatalogRow: View {
 
                 PosterCard(
                     meta: item,
+                    customPosterScreen: customPosterScreen,
                     isLandscape: rowTileShape == .landscape || (rowHomeLayout == "Modern" && landscapeFocusedId == cardKey),
                     isAlwaysLandscape: rowTileShape == .landscape || item.tileShape == .landscape,
                     tileShape: item.tileShape != .poster ? item.tileShape : rowTileShape,
@@ -662,6 +664,7 @@ extension TVCatalogRow: Equatable {
     static func == (lhs: TVCatalogRow, rhs: TVCatalogRow) -> Bool {
         guard lhs.id == rhs.id,
               lhs.initialScrollIndex == rhs.initialScrollIndex,
+              lhs.customPosterScreen == rhs.customPosterScreen,
               lhs.landscapeFocusedId == rhs.landscapeFocusedId,
               lhs.suppressFocusAnimations == rhs.suppressFocusAnimations,
               lhs.horizontalEdgeInset == rhs.horizontalEdgeInset,
@@ -748,6 +751,7 @@ enum TVHomeGridLayout {
 
 struct TVHomeCatalogGridSection: View {
     let section: TVHomeSection
+    var customPosterScreen: CustomPosterScreen = .home
     let watchedTitleKeys: Set<String>
     let initialFocusCardKey: String?
     var externalFocus: FocusState<String?>.Binding? = nil
@@ -814,6 +818,7 @@ struct TVHomeCatalogGridSection: View {
                     let shouldRequestInitialFocus = cardKey == initialFocusCardKey
                     PosterGridCard(
                         meta: item,
+                        customPosterScreen: customPosterScreen,
                         width: TVHomeGridLayout.posterWidth,
                         height: TVHomeGridLayout.posterHeight,
                         externalFocus: externalFocus,

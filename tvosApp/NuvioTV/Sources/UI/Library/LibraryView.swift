@@ -680,12 +680,25 @@ struct LibraryItemButton: View {
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
     @AppStorage(SettingsKey.cardCornerRadius) private var cardCornerRadiusSetting = AppCardStyle.defaultCornerRadiusRaw
     @AppStorage(SettingsKey.liquidGlassCards) private var liquidGlassCards = true
+    @AppStorage(SettingsKey.customPosterURLPattern) private var customPosterURLPattern = ""
+    @AppStorage(SettingsKey.customPosterEnabledScreens) private var customPosterEnabledScreens = "all"
+
+    private var customPosterArtworkURL: String? {
+        CustomPosterURLResolver.resolve(
+            pattern: customPosterURLPattern,
+            meta: item.asNuvioMeta,
+            screen: .library,
+            enabledScreens: customPosterEnabledScreens,
+            shape: "poster"
+        )
+    }
     
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 12) {
                 CachedPosterArtwork(
-                    urlString: item.poster,
+                    urlString: customPosterArtworkURL ?? item.poster,
+                    fallbackURLString: customPosterArtworkURL == nil ? nil : item.poster,
                     width: LibraryGridMetrics.posterWidth,
                     height: LibraryGridMetrics.posterHeight,
                     maximumWidth: LibraryGridMetrics.posterWidth

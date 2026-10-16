@@ -107,7 +107,7 @@ struct Issue93SlowSegmentServeTests {
 
     private func makeProvider(cache: SegmentCache, isLive: Bool = false,
                               slowThreshold: TimeInterval,
-                              restartHandler: ((Int) -> Void)? = { _ in },
+                              restartHandler: ((Int) -> VODProviderRestartResult)? = { idx in .restarted(at: idx) },
                               restartActivity: (() -> Bool)? = { false },
                               segmentPlacedHandler: (@Sendable (Int) -> Void)? = nil) -> VideoSegmentProvider {
         VideoSegmentProvider(
@@ -135,7 +135,10 @@ struct Issue93SlowSegmentServeTests {
         let releaseServe = DispatchSemaphore(value: 0)
         let provider = makeProvider(
             cache: cache, slowThreshold: 0.02,
-            restartHandler: { _ in restarts.bump() },
+            restartHandler: { idx in
+                restarts.bump()
+                return .restarted(at: idx)
+            },
             segmentPlacedHandler: { _ in
                 if holdServeUntilSignal { releaseServe.wait() }
             })
@@ -185,7 +188,7 @@ struct Issue93SlowSegmentServeTests {
             cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 8_000_000,
-            restartHandler: { _ in },
+            restartHandler: { idx in .restarted(at: idx) },
             restartActivity: { [weak cache] in
                 polls.bump()
                 if polls.value == 4 { cache?.store(index: 40, data: Data(repeating: 0xCD, count: 8)) }

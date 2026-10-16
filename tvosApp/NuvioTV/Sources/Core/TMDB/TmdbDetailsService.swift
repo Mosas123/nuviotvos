@@ -608,6 +608,17 @@ enum TmdbDetailsService {
             ? meta.backgroundUrl
             : (tmdbBackgroundURL ?? meta.backgroundUrl)
 
+        let resolvedCertification: String? = {
+            if let cert = nonEmpty(meta.certification) {
+                return cert
+            }
+            if resolved.mediaType == "tv" {
+                return selectTvAgeRating(from: details.contentRatings?.results, language: preferredLanguage)
+            } else {
+                return selectMovieAgeRating(from: details.releaseDates?.results, language: preferredLanguage)
+            }
+        }()
+
         let resolvedType = (!meta.isSeries && resolved.mediaType == "tv") ? "series" : meta.type
         return NuvioMeta(
             id: meta.id,
@@ -627,7 +638,7 @@ enum TmdbDetailsService {
             cast: meta.cast,
             director: meta.director,
             writer: meta.writer,
-            certification: meta.certification,
+            certification: resolvedCertification,
             country: meta.country,
             language: nonEmpty(details.originalLanguage) ?? meta.language,
             released: meta.released,
@@ -1093,10 +1104,16 @@ enum TmdbDetailsService {
             url: apiBase.appendingPathComponent("\(mediaType)/\(tmdbId)"),
             resolvingAgainstBaseURL: false
         )!
+        var appendItems = ["images", "translations"]
+        if mediaType == "tv" {
+            appendItems.append("content_ratings")
+        } else {
+            appendItems.append("release_dates")
+        }
         components.queryItems = [
             URLQueryItem(name: "api_key", value: apiKey),
             URLQueryItem(name: "language", value: preferredLanguage),
-            URLQueryItem(name: "append_to_response", value: "images,translations"),
+            URLQueryItem(name: "append_to_response", value: appendItems.joined(separator: ",")),
             URLQueryItem(
                 name: "include_image_language",
                 value: "\(preferredLanguage),en,null"
@@ -1113,6 +1130,119 @@ enum TmdbDetailsService {
         }
         await localizedDetailsCache.insert(decoded, for: cacheKey)
         return decoded
+    }
+
+    private static func preferredRegions(for language: String) -> [String] {
+        var regions: [String] = []
+        let parts = language.split(separator: "-")
+        if parts.count > 1, parts[1].count == 2 {
+            regions.append(parts[1].uppercased())
+        }
+        let currentRegion = Locale.current.region?.identifier.uppercased() ?? Locale.current.regionCode?.uppercased()
+        if let currentRegion, currentRegion.count == 2, !regions.contains(currentRegion) {
+            regions.append(currentRegion)
+        }
+        if !regions.contains("US") {
+            regions.append("US")
+        }
+        if !regions.contains("GB") {
+            regions.append("GB")
+        }
+        return regions
+    }
+
+    private static func selectTvAgeRating(
+        from contentRatings: [TmdbTvContentRatingDTO]?,
+        language: String
+    ) -> String? {
+        guard let contentRatings, !contentRatings.isEmpty else { return nil }
+        let regions = preferredRegions(for: language)
+        let byRegion = Dictionary(
+            contentRatings.compactMap { item -> (String, String)? in
+                guard let code = item.iso31661?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+                      let rating = item.rating?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !rating.isEmpty else { return nil }
+                return (code, rating)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for region in regions {
+            if let rating = byRegion[region] {
+                return rating
+            }
+        }
+        return contentRatings
+            .compactMap { $0.rating?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    private static func selectMovieAgeRating(
+        from releaseDates: [TmdbMovieReleaseDateCountryDTO]?,
+        language: String
+    ) -> String? {
+        guard let releaseDates, !releaseDates.isEmpty else { return nil }
+        let regions = preferredRegions(for: language)
+        let byRegion = Dictionary(
+            releaseDates.compactMap { item -> (String, TmdbMovieReleaseDateCountryDTO)? in
+                guard let code = item.iso31661?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() else { return nil }
+                return (code, item)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for region in regions {
+            if let country = byRegion[region] {
+                let rating = country.releaseDates?
+                    .compactMap { $0.certification?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { !$0.isEmpty }
+                if let rating, !rating.isEmpty {
+                    return rating
+                }
+            }
+        }
+        return releaseDates
+            .flatMap { $0.releaseDates ?? [] }
+            .compactMap { $0.certification?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
+    static func fetchCertification(for meta: NuvioMeta) async -> String? {
+        if let cert = nonEmpty(meta.certification) {
+            return cert
+        }
+        guard let resolved = await resolveTmdbId(for: meta) else { return nil }
+        let cacheKey = "\(resolved.mediaType):\(resolved.id):\(preferredLanguage)"
+        if let cached = await localizedDetailsCache.value(for: cacheKey) {
+            let rating = (resolved.mediaType == "tv")
+                ? selectTvAgeRating(from: cached.contentRatings?.results, language: preferredLanguage)
+                : selectMovieAgeRating(from: cached.releaseDates?.results, language: preferredLanguage)
+            if let rating = nonEmpty(rating) {
+                return rating
+            }
+        }
+        guard let apiKey else { return nil }
+        let endpoint = (resolved.mediaType == "tv")
+            ? "tv/\(resolved.id)/content_ratings"
+            : "movie/\(resolved.id)/release_dates"
+        var components = URLComponents(
+            url: apiBase.appendingPathComponent(endpoint),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "api_key", value: apiKey)
+        ]
+        guard let url = components.url,
+              let (data, response) = try? await data(for: url),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode) else {
+            return nil
+        }
+        if resolved.mediaType == "tv" {
+            let decoded = try? JSONDecoder().decode(TmdbTvContentRatingsContainer.self, from: data)
+            return selectTvAgeRating(from: decoded?.results, language: preferredLanguage)
+        } else {
+            let decoded = try? JSONDecoder().decode(TmdbMovieReleaseDatesContainer.self, from: data)
+            return selectMovieAgeRating(from: decoded?.results, language: preferredLanguage)
+        }
     }
 
     private static func normalizedLanguage(_ value: String?) -> String {
@@ -1418,6 +1548,8 @@ private struct TmdbLocalizedDetailsResponse: Decodable {
     let images: TmdbImageCollection?
     let translations: TmdbTranslationsContainer?
     let genres: [TmdbGenreDTO]?
+    let contentRatings: TmdbTvContentRatingsContainer?
+    let releaseDates: TmdbMovieReleaseDatesContainer?
 
     enum CodingKeys: String, CodingKey {
         case title, name, overview, genres, translations
@@ -1427,7 +1559,41 @@ private struct TmdbLocalizedDetailsResponse: Decodable {
         case posterPath = "poster_path"
         case backdropPath = "backdrop_path"
         case images
+        case contentRatings = "content_ratings"
+        case releaseDates = "release_dates"
     }
+}
+
+private struct TmdbTvContentRatingsContainer: Decodable {
+    let results: [TmdbTvContentRatingDTO]?
+}
+
+private struct TmdbTvContentRatingDTO: Decodable {
+    let iso31661: String?
+    let rating: String?
+
+    enum CodingKeys: String, CodingKey {
+        case iso31661 = "iso_3166_1"
+        case rating
+    }
+}
+
+private struct TmdbMovieReleaseDatesContainer: Decodable {
+    let results: [TmdbMovieReleaseDateCountryDTO]?
+}
+
+private struct TmdbMovieReleaseDateCountryDTO: Decodable {
+    let iso31661: String?
+    let releaseDates: [TmdbMovieReleaseDateItemDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case iso31661 = "iso_3166_1"
+        case releaseDates = "release_dates"
+    }
+}
+
+private struct TmdbMovieReleaseDateItemDTO: Decodable {
+    let certification: String?
 }
 
 private struct TmdbTranslationsContainer: Decodable {

@@ -999,10 +999,14 @@ struct ContentView: View {
                 episode: session.episode
             )
         } else if let duration, progress > 0 {
+            let position = duration * progress
+            if position >= WatchProgressLedger.minimumTrackableSeconds {
+                ContinueWatchingDismissStore.clear(contentId: session.meta.id)
+            }
             ContinueWatchingStore.save(
                 meta: session.meta,
                 streamUrl: session.sourceURL,
-                position: duration * progress,
+                position: position,
                 duration: duration,
                 season: session.season,
                 episode: session.episode
@@ -4649,6 +4653,7 @@ struct TVHomeView: View {
                         } else if section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId {
                             TVCatalogRow(
                                 id: section.id,
+                                customPosterScreen: .continueWatching,
                                 title: section.title,
                                 addonName: section.addonName,
                                 showAddonName: catalogAddonNames,
@@ -4730,6 +4735,7 @@ struct TVHomeView: View {
                         } else {
                             TVHomeCatalogGridSection(
                                 section: section,
+                                customPosterScreen: .home,
                                 watchedTitleKeys: watchedTitleKeys,
                                 initialFocusCardKey: initialFocusCardKey,
                                 externalFocus: $focusedCardID,
@@ -5651,6 +5657,7 @@ struct TVHomeView: View {
         } else {
             TVCatalogRow(
                 id: section.id,
+                customPosterScreen: .home,
                 title: section.title,
                 addonName: section.addonName,
                 showAddonName: catalogAddonNames,
