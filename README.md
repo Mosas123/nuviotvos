@@ -237,7 +237,17 @@ xcodebuild test \
   -destination 'platform=tvOS Simulator,name=Apple TV'
 ```
 
-After regenerating the workspace, select `NuvioTV-UI` in Xcode to review/run the UI suite, or use:
+After regenerating the workspace, first verify the UI bundle compiles:
+
+```bash
+xcodebuild build-for-testing \
+  -workspace tvosApp/NuvioTV.xcworkspace \
+  -scheme NuvioTV-UI \
+  -destination 'platform=tvOS Simulator,name=Apple TV' \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+Choose an installed simulator destination if the example name differs. Then select `NuvioTV-UI` in Xcode to review/run the UI suite, or use:
 
 ```bash
 xcodebuild test \
@@ -248,6 +258,8 @@ xcodebuild test \
 ```
 
 Review the UI suite's selectors and tvOS interactions for the installed SDK, and configure its required catalog, Continue Watching and watchlist data before using it as a regression gate. A declared target is not evidence of passing UI coverage. The existing CI unit-test job does not automatically run this scheme.
+
+See [UI suite validation notes](./tvosApp/NuvioTVUITests/README.md) for remote-focus helpers, explicit skips and outstanding fixture limitations. Maintainer build-for-testing and runtime validation are required before merging the UI-target change.
 
 Some older verification scripts in `tvosApp/` still carry inherited iOS wording. Prefer the Xcode build/test commands above as the source of truth for the tvOS target.
 
