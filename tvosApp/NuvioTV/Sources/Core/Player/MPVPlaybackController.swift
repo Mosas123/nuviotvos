@@ -2485,12 +2485,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         MPVStreamProtocolBridge.shared.setHTTPHeaders(headers, isLiveStream: isLiveStream)
         let options = MPVHTTPHeaderOptions(headers: headers)
         setStringProperty("user-agent", options.userAgent)
-        if !options.referrer.isEmpty {
-            setStringProperty("referrer", options.referrer)
-        }
-        if !options.headerFields.isEmpty {
-            setStringProperty("http-header-fields", options.headerFields)
-        }
+        // This MPV instance is reused. Empty values clear the prior source's
+        // referrer and headers before the next load.
+        setStringProperty("referrer", options.referrer)
+        setStringProperty("http-header-fields", options.headerFields)
     }
 
     private func setDoubleProperty(_ name: String, _ value: Double) {
