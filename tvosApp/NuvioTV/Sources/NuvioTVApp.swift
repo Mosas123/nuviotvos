@@ -1250,17 +1250,16 @@ struct ContentView: View {
             ? (TraktProgressService.currentContinueWatchingItem(for: item.meta) ?? item)
             : item
 
-        // Read the active profile directly at tap time. ContentView's own
-        // @AppStorage would use the standard store before the descendant
-        // defaultAppStorage environment is applied.
-        let smartStreamSelection = ProfileSettings.store(
-            for: profileViewModel.activeProfile?.id
-        ).bool(forKey: SettingsKey.smartStreamSelection)
+        let profileId = profileViewModel.activeProfile?.id
+        let profileStore = ProfileSettings.store(for: profileId)
+        let smartStreamSelection = profileStore.bool(forKey: SettingsKey.smartStreamSelection)
+        let reuseLastLink = profileStore.bool(forKey: SettingsKey.reuseLastLink)
 
         // Normal resume must let the viewer choose a source when Smart Playback
-        // is disabled. Start from beginning deliberately keeps its existing
+        // and Reuse Last Link are both disabled.
+        // Start from beginning deliberately keeps its existing
         // direct/resolve path so it still starts at zero.
-        if !startFromBeginning, !smartStreamSelection {
+        if !startFromBeginning, !smartStreamSelection, !reuseLastLink {
             playContinueWatchingManually(item)
             return
         }
@@ -1269,7 +1268,6 @@ struct ContentView: View {
         playbackEpisodes = context.episodes
         playbackCurrentEpisode = context.current
 
-        let profileId = profileViewModel.activeProfile?.id
         let storedStream = item.isUpNextEntry
             ? nil
             : LastPlaybackStreamStore.load(
@@ -1289,6 +1287,12 @@ struct ContentView: View {
                 resumeFrom: startFromBeginning ? nil : Self.resumePosition(for: item),
                 httpHeaders: httpHeaders
             )
+            return
+        }
+
+        // If no cached stream is available and Auto Select Stream is off, open manual picker
+        if !startFromBeginning, !smartStreamSelection {
+            playContinueWatchingManually(item)
             return
         }
 
@@ -3425,6 +3429,7 @@ private final class TVHomeFocusWork {
     /// shared FocusState can be updated before that callback, so it cannot be
     /// used as the restore-in-progress marker by itself.
     var restoringOverlayCardID: String?
+    var acknowledgedNativeOverlayFocusCardID: String?
     var restoreReleaseTask: Task<Void, Never>?
     var pendingFocusedMeta: NuvioMeta?
     var pendingFocusedFolder: TVCollectionFolderItem?
@@ -3462,6 +3467,7 @@ private final class TVHomeFocusWork {
         defersOverlayPreparation = false
         pendingOverlayRestoreCardID = nil
         restoringOverlayCardID = nil
+        acknowledgedNativeOverlayFocusCardID = nil
         lastFocusTransitionTime = 0
         focusedRowIndex = 0
     }
@@ -4045,6 +4051,32 @@ struct TVHomeView: View {
                                             }
                                         }
                                     }
+                                    .onChange(of: overlayRestoreCardID) { oldTarget, newTarget in
+                                        guard let target = oldTarget,
+                                              newTarget == nil,
+                                              isActive,
+                                              !isFullScreenOverlayPresented,
+                                              focusedCardID == target,
+                                              let sectionID = visibleSections
+                                                .filter({ target.hasPrefix("\($0.id)\u{1}") })
+                                                .max(by: { $0.id.count < $1.id.count })?.id
+                                        else { return }
+                                        let generation = overlayRestoreGeneration
+                                        DispatchQueue.main.async {
+                                            guard overlayRestoreGeneration == generation,
+                                                  isActive,
+                                                  !isFullScreenOverlayPresented,
+                                                  overlayRestoreCardID == nil,
+                                                  focusedCardID == target,
+                                                  visibleSections.contains(where: { $0.id == sectionID })
+                                            else { return }
+                                            var transaction = Transaction(animation: nil)
+                                            transaction.disablesAnimations = true
+                                            withTransaction(transaction) {
+                                                verticalScrollProxy.scrollTo(sectionID, anchor: .top)
+                                            }
+                                        }
+                                    }
 
                                     // The final row otherwise hits the
                                     // ScrollView's bottom limit before it can
@@ -4186,6 +4218,7 @@ struct TVHomeView: View {
                 if overlayRestoreCardID != nil {
                     overlayRestoreGeneration &+= 1
                     overlayRestoreCardID = nil
+                    focusWork.acknowledgedNativeOverlayFocusCardID = nil
                 }
                 // Usually armed while leaving Home. Re-arm here as a fallback
                 // for TabView implementations that recreate the selected tab.
@@ -4229,6 +4262,7 @@ struct TVHomeView: View {
                 // must never carry their one-card restoration lock back Home.
                 overlayRestoreGeneration &+= 1
                 overlayRestoreCardID = nil
+                focusWork.acknowledgedNativeOverlayFocusCardID = nil
                 // Screen-scoped work cancellation.
                 continueWatchingRefreshTask?.cancel()
                 continueWatchingRefreshTask = nil
@@ -4520,12 +4554,16 @@ struct TVHomeView: View {
                 focusedRowIndex = rowIndex
                 focusedSectionId = visibleSections[rowIndex].id
             }
-            focusedCardID = target
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                if overlayRestoreCardID != nil {
-                    completeOverlayFocusRestore(for: target)
-                }
-            }
+            // Re-acquire the one-card lock instead of assigning focus directly.
+            // On the first frames after Details fades out, the row has not
+            // re-rendered with its restriction yet, so a bare assignment lets
+            // the focus engine settle on a neighbouring card — and the restore
+            // then confirms that neighbour. Details, the card menu, and the
+            // player all return through this one locked path.
+            armReturnFocusAnimationSuppression()
+            overlayRestoreGeneration &+= 1
+            overlayRestoreCardID = target
+            restoreOverlayFocus(to: target, generation: overlayRestoreGeneration)
         }
         .onChange(of: focusRows) { _, _ in
             retargetMissingFocusIfNeeded()
@@ -4639,9 +4677,7 @@ struct TVHomeView: View {
                                     recordFocusTransition()
                                     let cardKey = TVHomeCardIdentity.folderKey(rowID: section.id, folder: folder)
                                     acknowledgeNativeProfileCardFocus(cardKey)
-                                    if focusWork.restoringOverlayCardID == cardKey {
-                                        completeOverlayFocusRestore(for: cardKey)
-                                    }
+                                    acknowledgeNativeOverlayFocusRestore(for: cardKey)
                                     focusedRowIndex = index
                                     focusedSectionId = section.id
                                     focusedCardID = cardKey
@@ -4687,9 +4723,7 @@ struct TVHomeView: View {
                                     recordFocusTransition()
                                     let cardKey = TVHomeCardIdentity.key(rowID: section.id, item: meta)
                                     acknowledgeNativeProfileCardFocus(cardKey)
-                                    if focusWork.restoringOverlayCardID == cardKey {
-                                        completeOverlayFocusRestore(for: cardKey)
-                                    }
+                                    acknowledgeNativeOverlayFocusRestore(for: cardKey)
                                     focusedRowIndex = index
                                     focusedSectionId = section.id
                                     focusedCardID = cardKey
@@ -4756,9 +4790,7 @@ struct TVHomeView: View {
                                 onFocus: { meta in
                                     let cardKey = TVHomeCardIdentity.key(rowID: section.id, item: meta)
                                     acknowledgeNativeProfileCardFocus(cardKey)
-                                    if focusWork.restoringOverlayCardID == cardKey {
-                                        completeOverlayFocusRestore(for: cardKey)
-                                    }
+                                    acknowledgeNativeOverlayFocusRestore(for: cardKey)
                                     focusedRowIndex = index
                                     focusedSectionId = section.id
                                     focusedCardID = cardKey
@@ -4904,6 +4936,7 @@ struct TVHomeView: View {
         let wasRestoring = overlayRestoreCardID != nil
         overlayRestoreCardID = nil
         focusWork.restoringOverlayCardID = nil
+        focusWork.acknowledgedNativeOverlayFocusCardID = nil
         guard let target else {
             focusedCardID = nil
             return
@@ -4926,6 +4959,7 @@ struct TVHomeView: View {
         guard isActive else {
             overlayRestoreGeneration &+= 1
             overlayRestoreCardID = nil
+            focusWork.acknowledgedNativeOverlayFocusCardID = nil
             return
         }
 
@@ -4950,13 +4984,18 @@ struct TVHomeView: View {
             TVHomeDebugTrace.log("home.overlay.presentation setting target=\(target ?? "nil")")
             overlayRestoreCardID = target
         } else if focusWork.defersOverlayPreparation {
-            let target = (focusWork.pendingOverlayRestoreCardID ?? store.lastFocusedCardID).flatMap(validRestoreTarget)
+            // A locked restore may already be running for this return (the
+            // Details onDisappear signal can arrive first); prefer the card it
+            // resolved over a possibly stale pending target.
+            let target = (overlayRestoreCardID ?? focusWork.pendingOverlayRestoreCardID ?? store.lastFocusedCardID)
+                .flatMap(validRestoreTarget)
             focusWork.defersOverlayPreparation = false
             focusWork.pendingOverlayRestoreCardID = nil
             guard let target else {
                 overlayRestoreGeneration &+= 1
                 overlayRestoreCardID = nil
                 focusWork.restoringOverlayCardID = nil
+                focusWork.acknowledgedNativeOverlayFocusCardID = nil
                 TVHomeDebugTrace.log("home.overlay.dismissal defersPrep with nil target")
                 return
             }
@@ -4976,6 +5015,7 @@ struct TVHomeView: View {
             guard let target = validRestoreTarget(saved) else {
                 overlayRestoreCardID = nil
                 focusWork.restoringOverlayCardID = nil
+                focusWork.acknowledgedNativeOverlayFocusCardID = nil
                 return
             }
             overlayRestoreCardID = target
@@ -4999,6 +5039,7 @@ struct TVHomeView: View {
             focusedSectionId = visibleSections[rowIndex].id
         }
         focusWork.restoringOverlayCardID = target
+        focusWork.acknowledgedNativeOverlayFocusCardID = nil
 
         focusedCardID = target
         // Home and the outgoing overlay can overlap briefly during the opacity
@@ -5013,24 +5054,40 @@ struct TVHomeView: View {
             }
         }
 
-        // Fast fallback completion to ensure all cards are unlocked even if focus callback was missed
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
-            if overlayRestoreGeneration == generation, overlayRestoreCardID == target {
-                completeOverlayFocusRestore(for: target)
-            }
-        }
-
         // Safety fallback if the lifecycle callback is lost. Normally the
-        // target card's focus callback clears the lock much earlier.
+        // target card's focus callback clears the lock much earlier. While the
+        // lock is still held this is the only eligible card, so re-assert it
+        // rather than only filling a nil focus — a neighbouring card that won
+        // the first frame would otherwise be left holding focus.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-            if overlayRestoreGeneration == generation {
+            if overlayRestoreGeneration == generation,
+               overlayRestoreCardID == target {
                 TVHomeDebugTrace.log("home.restoreOverlayFocus safety cleanup target=\(target)")
-                if focusedCardID == nil {
-                    focusedCardID = target
+                if focusedCardID != target {
+                    var transaction = Transaction()
+                    transaction.animation = nil
+                    withTransaction(transaction) {
+                        focusedCardID = target
+                    }
                 }
                 overlayRestoreCardID = nil
                 focusWork.restoringOverlayCardID = nil
+                focusWork.acknowledgedNativeOverlayFocusCardID = nil
             }
+        }
+    }
+
+    /// Records confirmation from a real card focus callback. Catalog rows
+    /// synchronize their horizontal index before calling this closure, so a
+    /// matching acknowledgement can safely release the one-card lock.
+    private func acknowledgeNativeOverlayFocusRestore(for cardKey: String) {
+        guard focusWork.restoringOverlayCardID == cardKey,
+              overlayRestoreCardID == cardKey else { return }
+        focusWork.acknowledgedNativeOverlayFocusCardID = cardKey
+        // A programmatic FocusState request may already contain the target,
+        // in which case assigning it again will not emit another onChange.
+        if focusedCardID == cardKey {
+            completeOverlayFocusRestore(for: cardKey)
         }
     }
 
@@ -5040,7 +5097,17 @@ struct TVHomeView: View {
     /// eligible; unlocking inside the callback let tvOS jump to the first row
     /// in the six-row focus window (two rows above).
     private func completeOverlayFocusRestore(for cardKey: String) {
-        guard focusWork.restoringOverlayCardID == cardKey || overlayRestoreCardID == cardKey || overlayRestoreCardID != nil else { return }
+        // Only the card this restore is waiting for may complete it. A
+        // neighbouring card can report native focus while the return
+        // transition is still settling; accepting it used to commit that
+        // neighbour as the restored focus and cancel the retries that would
+        // have re-asserted the real target.
+        guard TVHomeOverlayFocusRestore.canComplete(
+            cardKey,
+            restoringCardID: focusWork.restoringOverlayCardID,
+            lockedCardID: overlayRestoreCardID,
+            acknowledgedNativeCardID: focusWork.acknowledgedNativeOverlayFocusCardID
+        ) else { return }
         focusWork.restoringOverlayCardID = nil
         let generation = overlayRestoreGeneration
         TVHomeDebugTrace.log("home.completeOverlayFocusRestore start cardKey=\(cardKey) gen=\(generation)")
@@ -5053,6 +5120,7 @@ struct TVHomeView: View {
             withTransaction(transaction) {
                 overlayRestoreCardID = nil
                 focusedCardID = cardKey
+                focusWork.acknowledgedNativeOverlayFocusCardID = nil
             }
         }
     }
@@ -5611,9 +5679,7 @@ struct TVHomeView: View {
                         )
                         return
                     }
-                    if focusWork.restoringOverlayCardID == cardKey {
-                        completeOverlayFocusRestore(for: cardKey)
-                    }
+                    acknowledgeNativeOverlayFocusRestore(for: cardKey)
                     let changedRow = focusedSectionId != section.id || focusedRowIndex != index
                     TVHomeDebugTrace.log(
                         "🎯 [FOLDER_ROW_FOCUS] section=\(section.id) targetRow=\(index) currentRow=\(focusedRowIndex) changedRow=\(changedRow) isFastScrolling=\(isFastScrolling)"
@@ -5704,9 +5770,7 @@ struct TVHomeView: View {
                         )
                         return
                     }
-                    if focusWork.restoringOverlayCardID == cardKey {
-                        completeOverlayFocusRestore(for: cardKey)
-                    }
+                    acknowledgeNativeOverlayFocusRestore(for: cardKey)
                     let changedRow = focusedSectionId != section.id || focusedRowIndex != index
                     TVHomeDebugTrace.log(
                         "home.focus.begin section=\(section.id) meta=\(meta.id) changedRow=\(changedRow) fromRow=\(focusedRowIndex) toRow=\(index)"

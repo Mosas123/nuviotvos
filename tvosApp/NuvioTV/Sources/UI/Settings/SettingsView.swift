@@ -268,6 +268,8 @@ enum SettingsKey {
     static let trickplayServer = "nuvio.tv.settings.playback.trickplayServer"
     static let externalPlayer = "nuvio.tv.settings.playback.externalPlayer"
     static let smartStreamSelection = "nuvio.tv.settings.playback.smartStreamSelection"
+    static let reuseLastLink = "nuvio.tv.settings.playback.reuseLastLink"
+    static let reuseLastLinkCacheHours = "nuvio.tv.settings.playback.reuseLastLinkCacheHours"
     static let smartStreamUseTopResult = "nuvio.tv.settings.playback.smartStreamUseTopResult"
     static let smartStreamQuality = "nuvio.tv.settings.playback.smartStreamQuality"
     static let smartSubtitleMatching = "nuvio.tv.settings.playback.smartSubtitleMatching"
@@ -370,7 +372,7 @@ enum SettingsKey {
         cinemetaDisabled, deletedLocalAddons,
         smbServers, smbLibraryIndex, smbLocalRowEnabled,
         jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
-        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         backgroundStreamPreFetch,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
@@ -7605,6 +7607,8 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.externalPlayer) private var externalPlayer = ExternalPlayer.builtIn.rawValue
     @AppStorage(SettingsKey.externalPlayerForwardSubtitles) private var externalPlayerForwardSubtitles = true
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
+    @AppStorage(SettingsKey.reuseLastLink) private var reuseLastLink = false
+    @AppStorage(SettingsKey.reuseLastLinkCacheHours) private var reuseLastLinkCacheHours = 24
     @AppStorage(SettingsKey.smartStreamUseTopResult) private var smartStreamUseTopResult = false
     @AppStorage(SettingsKey.backgroundStreamPreFetch) private var backgroundStreamPreFetch = true
     @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
@@ -7659,6 +7663,38 @@ private struct PlaybackSettingsView: View {
     private let assModes = ["Off", "Strip", "Scale", "Force"]
     private let diskCacheLimitOptions = ["5 GB", "10 GB", "20 GB", "30 GB", "50 GB"]
     private let streamSortModes = StreamSortOption.allCases.map(\.rawValue)
+    private let lastLinkCacheOptions = ["1 Hour", "6 Hours", "12 Hours", "1 Day", "2 Days", "3 Days", "7 Days"]
+
+    private func lastLinkCacheLabel(for hours: Int) -> String {
+        switch hours {
+        case 1: return "1 Hour"
+        case 6: return "6 Hours"
+        case 12: return "12 Hours"
+        case 24: return "1 Day"
+        case 48: return "2 Days"
+        case 72: return "3 Days"
+        case 168: return "7 Days"
+        default:
+            if hours > 0 && hours % 24 == 0 {
+                let days = hours / 24
+                return "\(days) \(days == 1 ? "Day" : "Days")"
+            }
+            return "\(hours) \(hours == 1 ? "Hour" : "Hours")"
+        }
+    }
+
+    private func lastLinkCacheHours(from label: String) -> Int {
+        switch label.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "1 hour", "1 hr": return 1
+        case "6 hours", "6 hrs": return 6
+        case "12 hours", "12 hrs": return 12
+        case "1 day", "24 hours", "24 hrs": return 24
+        case "2 days", "48 hours", "48 hrs": return 48
+        case "3 days", "72 hours", "72 hrs": return 72
+        case "7 days", "168 hours", "168 hrs", "1 week": return 168
+        default: return 24
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -7890,6 +7926,32 @@ private struct PlaybackSettingsView: View {
                     isOn: $smartStreamSelection,
                     accentColor: accentColor
                 )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_reuse_last_link", fallback: "Reuse Last Link"),
+                    subtitle: L10n.string(
+                        "tvos_settings_reuse_last_link_subtitle",
+                        fallback: "Auto-play your last working stream for this same movie/episode when cache is still valid"
+                    ),
+                    isOn: $reuseLastLink,
+                    accentColor: accentColor
+                )
+
+                SettingsOptionRow(
+                    title: L10n.string("tvos_settings_last_link_cache", fallback: "Last Link Cache"),
+                    subtitle: L10n.string(
+                        "tvos_settings_last_link_cache_subtitle",
+                        fallback: "How long to keep the last played link for a movie or episode before re-resolving"
+                    ),
+                    selection: Binding(
+                        get: { lastLinkCacheLabel(for: reuseLastLinkCacheHours) },
+                        set: { reuseLastLinkCacheHours = lastLinkCacheHours(from: $0) }
+                    ),
+                    options: lastLinkCacheOptions,
+                    accentColor: accentColor
+                )
+                .opacity(reuseLastLink ? 1 : 0.46)
+                .disabled(!reuseLastLink)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_background_prefetch", fallback: "Background Pre-fetch"),

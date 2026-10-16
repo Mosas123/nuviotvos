@@ -110,6 +110,31 @@ enum TVHomeFocusRestoration {
     }
 }
 
+/// Which card may conclude an overlay return. While the one-card lock is
+/// held, only the restored card is an eligible focus target, so a neighbouring
+/// card that wins native focus during the return transition must never be
+/// accepted as the restored card.
+enum TVHomeOverlayFocusRestore {
+    static func isTarget(
+        _ cardKey: String,
+        restoringCardID: String?,
+        lockedCardID: String?
+    ) -> Bool {
+        restoringCardID == cardKey || lockedCardID == cardKey
+    }
+
+    static func canComplete(
+        _ cardKey: String,
+        restoringCardID: String?,
+        lockedCardID: String?,
+        acknowledgedNativeCardID: String? = nil
+    ) -> Bool {
+        restoringCardID == cardKey
+            && acknowledgedNativeCardID == cardKey
+            && isTarget(cardKey, restoringCardID: restoringCardID, lockedCardID: lockedCardID)
+    }
+}
+
 enum TVHomeBackAction: Equatable {
     case returnToRowBeginning(sectionID: String, cardKey: String)
     case moveToContinueWatchingOrTop(sectionID: String, cardKey: String)

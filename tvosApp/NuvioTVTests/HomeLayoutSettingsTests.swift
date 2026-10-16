@@ -229,6 +229,59 @@ final class HomeLayoutSettingsTests: XCTestCase {
         XCTAssertEqual(TVHomeFocusRestoration.target(saved: "row\u{1}nested\u{1}removed", rows: [other, row], preferredIndex: 0), row.keys[0])
     }
 
+    func testOverlayReturnCompletesOnlyForTheCardTheRestoreTargets() {
+        let rowID = "popular-movies"
+        let target = "\(rowID)\u{1}title:movie:m5"
+        let neighbour = "\(rowID)\u{1}title:movie:m4"
+
+        // The restored card may complete the return through either marker.
+        XCTAssertTrue(TVHomeOverlayFocusRestore.isTarget(target, restoringCardID: target, lockedCardID: target))
+        XCTAssertTrue(TVHomeOverlayFocusRestore.isTarget(target, restoringCardID: target, lockedCardID: nil))
+        XCTAssertTrue(TVHomeOverlayFocusRestore.isTarget(target, restoringCardID: nil, lockedCardID: target))
+
+        // A neighbouring card that wins native focus mid-transition must not
+        // be accepted while the lock is held, or the return lands on it and the
+        // retries that would re-assert the target are cancelled.
+        XCTAssertFalse(TVHomeOverlayFocusRestore.isTarget(neighbour, restoringCardID: target, lockedCardID: target))
+        XCTAssertFalse(TVHomeOverlayFocusRestore.isTarget(target, restoringCardID: nil, lockedCardID: nil))
+        XCTAssertFalse(TVHomeOverlayFocusRestore.isTarget(neighbour, restoringCardID: nil, lockedCardID: nil))
+    }
+
+    func testOverlayReturnRequiresNativeFocusAcknowledgementToComplete() {
+        let target = "popular-movies\u{1}title:movie:m5"
+        let neighbour = "popular-movies\u{1}title:movie:m4"
+
+        XCTAssertFalse(TVHomeOverlayFocusRestore.canComplete(
+            target,
+            restoringCardID: target,
+            lockedCardID: target
+        ))
+        XCTAssertFalse(TVHomeOverlayFocusRestore.canComplete(
+            target,
+            restoringCardID: target,
+            lockedCardID: target,
+            acknowledgedNativeCardID: neighbour
+        ))
+        XCTAssertFalse(TVHomeOverlayFocusRestore.canComplete(
+            neighbour,
+            restoringCardID: target,
+            lockedCardID: target,
+            acknowledgedNativeCardID: neighbour
+        ))
+        XCTAssertTrue(TVHomeOverlayFocusRestore.canComplete(
+            target,
+            restoringCardID: target,
+            lockedCardID: target,
+            acknowledgedNativeCardID: target
+        ))
+        XCTAssertFalse(TVHomeOverlayFocusRestore.canComplete(
+            target,
+            restoringCardID: nil,
+            lockedCardID: nil,
+            acknowledgedNativeCardID: target
+        ))
+    }
+
     func testTwoStepBackToggleReturnsToRowBeginningThenMovesToContinueWatchingWithoutAffectingHorizontalScroll() {
         let cwSectionID = TVHomeSection.continueWatchingId
         let cwFirstCardKey = "\(cwSectionID)\u{1}title:movie:cw0"
