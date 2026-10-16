@@ -88,7 +88,27 @@ final class PlaybackClock: ObservableObject {
 
 @MainActor
 class PlayerViewModel: ObservableObject {
-    @Published var status: PlayerStatus = .idle
+    @Published var status: PlayerStatus = .idle {
+        didSet {
+            guard case .error(let message) = status,
+                  ProfileSettings.current.bool(forKey: SettingsKey.playbackDiagnostics) else { return }
+            // Polling can assign the same error repeatedly. Bound diagnostic work
+            // independently of error text, which may contain signed URLs.
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastPlaybackIssueReportUptime >= 5 else { return }
+            lastPlaybackIssueReportUptime = now
+            PlaybackIssueReportStore.enqueue(PlaybackIssueReport(
+                message: message,
+                streamURL: activeStreamURL.flatMap(URL.init(string:)),
+                engine: activeEngineKind,
+                isLive: isLiveStream,
+                renderedFirstFrame: hasRenderedFirstFrame,
+                position: time.current,
+                duration: time.duration
+            ))
+        }
+    }
+    private var lastPlaybackIssueReportUptime = -Double.infinity
     var time: PlayerTime = PlayerTime()
     /// High-frequency time/scrub state for HUDs. Mirrors `time` on each tick.
     let clock = PlaybackClock()
