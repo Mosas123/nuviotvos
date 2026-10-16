@@ -75,26 +75,21 @@ final class NuvioTVUITests: XCTestCase {
     }
 
     func testNavigateToContentDetails() throws {
-        // Wait for home screen to load content
-        sleep(2)
+        let firstPosterCard = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "poster-card-")
+        ).firstMatch
+        let posterCardAppeared = firstPosterCard.waitForExistence(timeout: 10.0)
 
-        // Tap first content item if available
-        let images = app.images
-        if requireUICondition(images.count > 0) {
-            // Try to tap a content poster
-            let firstImage = images.element(boundBy: 0)
-            if requireUICondition(firstImage.exists) {
-                selectTVElement(firstImage, in: app)
+        if requireUICondition(posterCardAppeared && firstPosterCard.exists) {
+            selectTVElement(firstPosterCard, in: app)
 
-                // Wait for details screen to load
-                sleep(1)
-
-                // Verify we're on details screen (look for action buttons or metadata)
-                let detailsLoaded = app.buttons["Play"].waitForExistence(timeout: 3.0) ||
-                                   app.buttons["Watchlist"].waitForExistence(timeout: 3.0)
-
-                XCTAssertTrue(detailsLoaded, "Details screen should load with action buttons")
-            }
+            let detailsActions = app.buttons.matching(
+                NSPredicate(format: "label IN %@", ["Play", "Watchlist"])
+            )
+            XCTAssertTrue(
+                detailsActions.firstMatch.waitForExistence(timeout: 8.0),
+                "Details screen should load with action buttons"
+            )
         }
     }
 

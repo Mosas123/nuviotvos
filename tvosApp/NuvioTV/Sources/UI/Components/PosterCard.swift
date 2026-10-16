@@ -258,6 +258,7 @@ struct PosterCard: View {
             .buttonStyle(PosterCardButtonStyle(onNativeFocusChange: { focused in
                 if focused { onFocus?(meta) } else { onBlur?(meta) }
             }))
+            .accessibilityIdentifier("poster-card-\(externalFocusValue ?? meta.id)")
             .disabled(!allowsFocus)
             .focused($isFocused)
             .modifier(ExternalFocusBinding(binding: externalFocus, id: externalFocusValue ?? meta.id))
