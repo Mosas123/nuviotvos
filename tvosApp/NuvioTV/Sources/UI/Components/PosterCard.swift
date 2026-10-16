@@ -1552,33 +1552,47 @@ struct LiquidGlassSurface: ViewModifier {
     let cornerRadius: CGFloat
     var prominent: Bool = false
 
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.amoledSurfaces) private var amoledSurfaces = false
+
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     }
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        #if os(tvOS)
-        if #available(tvOS 26.0, *) {
+        if amoled && amoledSurfaces {
             content
-                .background(
-                    Color.white.opacity(prominent ? 0.16 : 0.08),
-                    in: shape
+                .background(Color.black, in: shape)
+                .overlay(
+                    shape.strokeBorder(
+                        Color.white.opacity(prominent ? 0.30 : 0.10),
+                        lineWidth: prominent ? 1.5 : 1
+                    )
                 )
-                .glassEffect(.regular, in: shape)
         } else {
+            #if os(tvOS)
+            if #available(tvOS 26.0, *) {
+                content
+                    .background(
+                        Color.white.opacity(prominent ? 0.16 : 0.08),
+                        in: shape
+                    )
+                    .glassEffect(.regular, in: shape)
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: shape)
+                    .background(
+                        Color.white.opacity(prominent ? 0.16 : 0.08),
+                        in: shape
+                    )
+            }
+            #else
             content
                 .background(.ultraThinMaterial, in: shape)
-                .background(
-                    Color.white.opacity(prominent ? 0.16 : 0.08),
-                    in: shape
-                )
+                .background(Color.white.opacity(prominent ? 0.16 : 0.08), in: shape)
+            #endif
         }
-        #else
-        content
-            .background(.ultraThinMaterial, in: shape)
-            .background(Color.white.opacity(prominent ? 0.16 : 0.08), in: shape)
-        #endif
     }
 }
 
@@ -1590,13 +1604,25 @@ struct LiquidGlassCardModifier: ViewModifier {
     var isFocused: Bool = false
     var isEnabled: Bool = true
 
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.amoledSurfaces) private var amoledSurfaces = false
+
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     }
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if isEnabled {
+        if amoled && amoledSurfaces {
+            content
+                .background(Color.black, in: shape)
+                .overlay {
+                    shape.strokeBorder(
+                        Color.white.opacity(isFocused ? 0.34 : 0.08),
+                        lineWidth: isFocused ? 1.5 : 1
+                    )
+                }
+        } else if isEnabled {
             content
                 .background {
                     #if os(tvOS)
