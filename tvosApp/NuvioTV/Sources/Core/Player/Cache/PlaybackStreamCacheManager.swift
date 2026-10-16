@@ -618,7 +618,7 @@ actor PlaybackStreamCacheManager {
         }
 
         let storedLimit = ProfileSettings.current.integer(forKey: SettingsKey.hybridDiskCacheLimitGB)
-        let limitGB = customLimitGB ?? (storedLimit > 0 ? storedLimit : 20)
+        let limitGB = min(50, max(5, customLimitGB ?? (storedLimit > 0 ? storedLimit : 20)))
         let limitBytes = Int64(limitGB) * 1024 * 1024 * 1024
 
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
