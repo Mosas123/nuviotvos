@@ -1408,7 +1408,8 @@ class PlayerViewModel: ObservableObject {
         let preferredLanguages = SubtitleLanguagePreferences.orderedFromDefaults()
         let hasActivePreferredSubtitle = Self.shouldPreserveBackendSubtitleSelection(
             subtitles.first(where: { $0.isSelected }),
-            preferredLanguages: preferredLanguages
+            preferredLanguages: preferredLanguages,
+            allowForcedSubtitles: Self.allowsAutomaticForcedSubtitles
         )
         let hasPendingOrAddedSubtitles = !pendingExternalSubtitles.isEmpty || !addedExternalSubtitleURLs.isEmpty
 
@@ -4261,10 +4262,12 @@ class PlayerViewModel: ObservableObject {
               SubtitleLanguagePreferences.smartMatchingEnabled() else {
             return []
         }
+        let allowForcedSubtitles = allowsAutomaticForcedSubtitles
         for language in SubtitleLanguagePreferences.orderedFromDefaults() {
             if let match = subtitles.first(where: { subtitle in
-                SubtitleLanguagePreferences.matches(subtitle.language, target: language) ||
-                SubtitleLanguagePreferences.matches(subtitle.label, target: language)
+                (allowForcedSubtitles || !isForcedSubtitleLabel(subtitle.label)) &&
+                (SubtitleLanguagePreferences.matches(subtitle.language, target: language) ||
+                 SubtitleLanguagePreferences.matches(subtitle.label, target: language))
             }) {
                 return [match]
             }
@@ -4360,6 +4363,7 @@ class PlayerViewModel: ObservableObject {
         guard !didApplySubtitlePreference else { return }
         guard pendingTrackSelection?.subtitle == nil else { return }
         guard SubtitleLanguagePreferences.smartMatchingEnabled() else { return }
+        let allowForcedSubtitles = Self.allowsAutomaticForcedSubtitles
 
         let preferredLanguages = SubtitleLanguagePreferences.orderedFromDefaults()
         guard !preferredLanguages.isEmpty else {
@@ -4372,7 +4376,8 @@ class PlayerViewModel: ObservableObject {
         // ranked choice deliberately prefers a full track over an empty forced one.
         if Self.shouldPreserveBackendSubtitleSelection(
             subtitles.first(where: { $0.isSelected }),
-            preferredLanguages: preferredLanguages
+            preferredLanguages: preferredLanguages,
+            allowForcedSubtitles: allowForcedSubtitles
         ) {
             didApplySubtitlePreference = true
             return
@@ -4381,7 +4386,7 @@ class PlayerViewModel: ObservableObject {
         let loadedExternalURLs = Set(subtitles.map(\.externalFilename).filter { !$0.isEmpty })
         for language in preferredLanguages {
             if let matchingTrack = subtitles.first(where: { track in
-                subtitleTrack(track, matches: language)
+                subtitleTrack(track, matches: language, allowForcedSubtitles: allowForcedSubtitles)
             }) {
                 didApplySubtitlePreference = true
                 selectSubtitle(matchingTrack, persist: false)
@@ -4390,13 +4395,16 @@ class PlayerViewModel: ObservableObject {
 
             let hasPendingMatch = pendingExternalSubtitles.contains { subtitle in
                 !loadedExternalURLs.contains(subtitle.url) &&
+                (allowForcedSubtitles || !Self.isForcedSubtitleLabel(subtitle.label)) &&
                 (SubtitleLanguagePreferences.matches(subtitle.language, target: language) ||
                  SubtitleLanguagePreferences.matches(subtitle.label, target: language))
             }
             if hasPendingMatch { return }
         }
 
-        let pendingPreferredURLs = Set(pendingExternalSubtitles.map(\.url))
+        let pendingPreferredURLs = Set(pendingExternalSubtitles.filter {
+            allowForcedSubtitles || !Self.isForcedSubtitleLabel($0.label)
+        }.map(\.url))
         guard pendingPreferredURLs.isSubset(of: loadedExternalURLs) else { return }
         guard subtitles.contains(where: { $0.id != "off" }) else { return }
         guard let off = subtitles.first(where: { $0.id == "off" }) else { return }
@@ -4406,11 +4414,13 @@ class PlayerViewModel: ObservableObject {
 
     static func shouldPreserveBackendSubtitleSelection(
         _ selectedTrack: SubtitleTrack?,
-        preferredLanguages: [String]
+        preferredLanguages: [String],
+        allowForcedSubtitles: Bool = true
     ) -> Bool {
         guard let selectedTrack,
               selectedTrack.id != "off",
-              selectedTrack.isSelected else {
+              selectedTrack.isSelected,
+              allowForcedSubtitles || !isForcedSubtitleLabel(selectedTrack.name) else {
             return false
         }
 
@@ -4679,10 +4689,26 @@ class PlayerViewModel: ObservableObject {
         SubtitleLanguagePreferences.matches(track.name, target: language)
     }
 
-    private func subtitleTrack(_ track: SubtitleTrack, matches language: String) -> Bool {
+    private func subtitleTrack(
+        _ track: SubtitleTrack,
+        matches language: String,
+        allowForcedSubtitles: Bool
+    ) -> Bool {
         track.id != "off" &&
+        (allowForcedSubtitles || !Self.isForcedSubtitleLabel(track.name)) &&
         (SubtitleLanguagePreferences.matches(track.language, target: language) ||
          SubtitleLanguagePreferences.matches(track.name, target: language))
+    }
+
+    private static var allowsAutomaticForcedSubtitles: Bool {
+        ProfileSettings.current.object(forKey: SettingsKey.forcedSubtitles) as? Bool ?? true
+    }
+
+    static func isForcedSubtitleLabel(_ label: String?) -> Bool {
+        let words = (label ?? "")
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        return words.contains("forced") || words.contains("forzado") || words.contains("forzados")
     }
 
     private static func sameTrackText(_ lhs: String?, _ rhs: String?) -> Bool {
