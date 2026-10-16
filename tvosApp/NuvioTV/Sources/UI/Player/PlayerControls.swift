@@ -1608,6 +1608,7 @@ struct PlayerSettingsPanel: View {
         case audio = "Audio"
         case speed = "Speed"
         case picture = "Picture"
+        case logs = "Logs"
     }
 
     private enum StyleControl: Hashable {
@@ -1626,6 +1627,7 @@ struct PlayerSettingsPanel: View {
     private enum AudioControl: Hashable {
         case delayMinus, delayPlus
         case ampMinus, ampPlus
+        case persist
     }
 
     private enum Focus: Hashable {
@@ -1670,6 +1672,7 @@ struct PlayerSettingsPanel: View {
                 case .audio: audioPage
                 case .speed: speedPage
                 case .picture: picturePage
+                case .logs: PlaybackLogsPage()
                 }
             }
             .padding(.horizontal, 90)
@@ -1698,6 +1701,11 @@ struct PlayerSettingsPanel: View {
                 selectedLanguage = language
             }
         }
+        .onChange(of: tab) { _, newTab in
+            if newTab == .audio && orderedAudioTracks.isEmpty {
+                focus = .audioControl(.delayMinus)
+            }
+        }
         .focusSection()
         .onExitCommand { onClose() }
     }
@@ -1711,6 +1719,9 @@ struct PlayerSettingsPanel: View {
                 let isSelected = tab == item
                 Button {
                     tab = item
+                    if item == .audio && orderedAudioTracks.isEmpty {
+                        focus = .audioControl(.delayMinus)
+                    }
                 } label: {
                     Text(item.rawValue)
                         .font(.system(size: 30, weight: .semibold))
@@ -2223,7 +2234,7 @@ struct PlayerSettingsPanel: View {
 
     private var audioTracksColumn: some View {
         VStack(alignment: .leading, spacing: 18) {
-            columnHeader("Audio Tracks")
+            columnHeader(L10n.string("player_audio_tracks", fallback: "Audio Tracks"))
             if viewModel.audioTracks.isEmpty {
                 Text(L10n.string("player_no_audio_tracks_available", fallback: "No audio tracks available"))
                     .font(.system(size: 23, weight: .medium))
@@ -2316,44 +2327,53 @@ struct PlayerSettingsPanel: View {
 
     private var audioAdjustmentsColumn: some View {
         let aetherAmplificationUnavailable = viewModel.activeEngineKind == .aether
-        return VStack(alignment: .leading, spacing: 28) {
-            audioOutputSection
+        return VStack(alignment: .leading, spacing: 18) {
+            columnHeader(L10n.string("player_audio_adjustments", fallback: "Audio Adjustments"))
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 28) {
+                    audioStepper(
+                        title: L10n.string("player_audio_delay", fallback: "Audio Delay"),
+                        value: String(format: "%.3fs", Double(viewModel.audioDelayMs) / 1000.0),
+                        caption: L10n.string("player_audio_delay_range", fallback: "Range: -3.00s to 3.00s"),
+                        minusKey: .delayMinus,
+                        plusKey: .delayPlus,
+                        minusDisabled: viewModel.audioDelayMs <= -3000,
+                        plusDisabled: viewModel.audioDelayMs >= 3000,
+                        onMinus: { viewModel.setAudioDelayMs(viewModel.audioDelayMs - 50) },
+                        onPlus: { viewModel.setAudioDelayMs(viewModel.audioDelayMs + 50) }
+                    )
 
-            audioStepper(
-                title: L10n.string("player_audio_delay", fallback: "Audio Delay"),
-                value: String(format: "%.3fs", Double(viewModel.audioDelayMs) / 1000.0),
-                caption: L10n.string("player_audio_delay_range", fallback: "Range: -3.00s to 3.00s"),
-                minusKey: .delayMinus,
-                plusKey: .delayPlus,
-                minusDisabled: viewModel.audioDelayMs <= -3000,
-                plusDisabled: viewModel.audioDelayMs >= 3000,
-                onMinus: { viewModel.setAudioDelayMs(viewModel.audioDelayMs - 50) },
-                onPlus: { viewModel.setAudioDelayMs(viewModel.audioDelayMs + 50) }
-            )
+                    audioStepper(
+                        title: L10n.string("player_audio_amplification", fallback: "Amplification (PCM)"),
+                        value: "\(viewModel.audioAmplificationDb) dB",
+                        caption: aetherAmplificationUnavailable
+                            ? L10n.string("player_unavailable_with_aether", fallback: "Unavailable with Aether")
+                            : L10n.string("player_amplification_range", fallback: "Range: 0 dB to 10 dB"),
+                        minusKey: .ampMinus,
+                        plusKey: .ampPlus,
+                        minusDisabled: aetherAmplificationUnavailable || viewModel.audioAmplificationDb <= 0,
+                        plusDisabled: aetherAmplificationUnavailable || viewModel.audioAmplificationDb >= 10,
+                        onMinus: { viewModel.setAudioAmplificationDb(viewModel.audioAmplificationDb - 1) },
+                        onPlus: { viewModel.setAudioAmplificationDb(viewModel.audioAmplificationDb + 1) }
+                    )
 
-            audioStepper(
-                title: L10n.string("player_audio_amplification", fallback: "Amplification (PCM)"),
-                value: "\(viewModel.audioAmplificationDb) dB",
-                caption: aetherAmplificationUnavailable
-                    ? L10n.string("player_unavailable_with_aether", fallback: "Unavailable with Aether")
-                    : L10n.string("player_amplification_range", fallback: "Range: 0 dB to 10 dB"),
-                minusKey: .ampMinus,
-                plusKey: .ampPlus,
-                minusDisabled: aetherAmplificationUnavailable || viewModel.audioAmplificationDb <= 0,
-                plusDisabled: aetherAmplificationUnavailable || viewModel.audioAmplificationDb >= 10,
-                onMinus: { viewModel.setAudioAmplificationDb(viewModel.audioAmplificationDb - 1) },
-                onPlus: { viewModel.setAudioAmplificationDb(viewModel.audioAmplificationDb + 1) }
-            )
+                    toggleRow(
+                        title: L10n.string("player_persist_between_sessions", fallback: "Persist between sessions"),
+                        isOn: viewModel.isAudioDelayPersistEnabled,
+                        focusKey: .audioControl(.persist)
+                    ) {
+                        viewModel.setAudioDelayPersistEnabled(!viewModel.isAudioDelayPersistEnabled)
+                    }
 
-            Text(L10n.string("player_persist_between_sessions_off", fallback: "Persist between sessions: OFF"))
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(.white.opacity(0.42))
-                .padding(.top, 4)
-
-            Spacer(minLength: 0)
+                    audioOutputSection
+                }
+                .padding(.vertical, 6)
+                .padding(.bottom, 26)
+            }
+            .focusSection()
+            .scrollClipDisabledIfAvailable()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .focusSection()
     }
 
     private var audioOutputSection: some View {
@@ -2625,7 +2645,9 @@ struct PlayerSettingsPanel: View {
                     .foregroundColor(isFocused ? .black : .white)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Text(isOn ? "On" : "Off")
+                Text(isOn
+                     ? L10n.string("subtitle_style_on", fallback: "On")
+                     : L10n.string("subtitle_style_off", fallback: "Off"))
                     .font(.system(size: 22, weight: .bold))
                     .foregroundColor(isFocused ? .black.opacity(0.85) : .white.opacity(0.75))
                 if isOn {
@@ -2675,5 +2697,77 @@ struct SystemAudioRoutePicker: UIViewRepresentable {
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {
         uiView.tintColor = tintColor
         uiView.activeTintColor = activeTintColor
+    }
+}
+
+private struct PlaybackLogsPage: View {
+    @State private var entries: [PlaybackDiagnosticLogEntry] = []
+    @State private var isRefreshPaused = false
+    @State private var didScrollToLatest = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 20) {
+                Text("Recent playback events · \(entries.count)")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.78))
+
+                Button(isRefreshPaused ? "Resume refresh" : "Pause refresh") {
+                    isRefreshPaused.toggle()
+                }
+                .buttonStyle(PosterCardButtonStyle())
+
+                Button("Clear logs") {
+                    PlaybackDiagnosticLogStore.shared.clear()
+                    entries = []
+                }
+                .buttonStyle(PosterCardButtonStyle())
+            }
+
+            Text("Reproduce the issue, then read the latest events. The log keeps recent player and network diagnostics in memory.")
+                .font(.system(size: 20))
+                .foregroundColor(.white.opacity(0.55))
+
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        if entries.isEmpty {
+                            Text("No playback events captured yet.")
+                                .font(.system(size: 20, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.55))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        ForEach(entries) { entry in
+                            Text("[\(entry.timestamp.formatted(date: .omitted, time: .standard))] [\(entry.source)] \(entry.message)")
+                                .font(.system(size: 19, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.88))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 6)
+                                .id(entry.id)
+                        }
+                    }
+                    .padding(18)
+                }
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
+                .focusable()
+                .focusSection()
+                .accessibilityLabel("Playback event log")
+                .onChange(of: entries.count) { _, _ in
+                    guard !didScrollToLatest, let latestID = entries.last?.id else { return }
+                    didScrollToLatest = true
+                    proxy.scrollTo(latestID, anchor: .bottom)
+                }
+                .task {
+                    while !Task.isCancelled {
+                        if !isRefreshPaused {
+                            entries = PlaybackDiagnosticLogStore.shared.snapshot()
+                        }
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }

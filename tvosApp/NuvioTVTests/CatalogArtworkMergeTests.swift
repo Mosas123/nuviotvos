@@ -564,6 +564,94 @@ final class CatalogArtworkMergeTests: XCTestCase {
         XCTAssertEqual(deduplicated.first?.isFromAddon, true)
     }
 
+    func testPictoriumTemplateResolvesPosterAndLandscapeArtwork() {
+        let meta = makeMeta(id: "tmdb:1396", imdbId: nil, tmdbId: nil, type: "movie")
+        let pattern = "https://pictorium.elfhosted.com/api/poster/{type}/{tmdb_id|imdb_id}?u=test-space&live=1&rv=b719767aca&shape={shape}"
+
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: meta, shape: "poster"),
+            "https://pictorium.elfhosted.com/api/poster/movie/1396?u=test-space&live=1&rv=b719767aca&shape=poster"
+        )
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: meta, shape: "landscape"),
+            "https://pictorium.elfhosted.com/api/poster/movie/1396?u=test-space&live=1&rv=b719767aca&shape=landscape"
+        )
+    }
+
+    func testPictoriumTemplateUsesOrderedTMDBThenIMDbFallback() {
+        let withBothIDs = makeMeta(id: "tt0137523", imdbId: "tt0137523", tmdbId: 550, type: "movie")
+        let imdbOnly = makeMeta(id: "tt0137523", imdbId: "tt0137523", tmdbId: nil, type: "movie")
+        let namespacedTMDB = makeMeta(id: "tmdb:movie:1396", imdbId: nil, tmdbId: nil, type: "movie")
+        let pattern = "https://pictorium.elfhosted.com/api/poster/{type}/{tmdb_id|imdb_id}?u=test-space&shape={shape}"
+
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: withBothIDs),
+            "https://pictorium.elfhosted.com/api/poster/movie/550?u=test-space&shape=poster"
+        )
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: imdbOnly),
+            "https://pictorium.elfhosted.com/api/poster/movie/tt0137523?u=test-space&shape=poster"
+        )
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: pattern, meta: namespacedTMDB),
+            "https://pictorium.elfhosted.com/api/poster/movie/1396?u=test-space&shape=poster"
+        )
+    }
+
+    func testCustomPosterResolverPreservesOriginalWhenRequiredIDIsMissing() {
+        let original = "https://catalog.example/original.jpg"
+        let meta = makeMeta(id: "catalog:unknown", imdbId: nil, tmdbId: nil, type: "movie", posterUrl: original)
+        let pattern = "https://pictorium.elfhosted.com/api/poster/{type}/{tmdb_id|imdb_id}?u=test-space&shape={shape}"
+
+        XCTAssertNil(CustomPosterURLResolver.resolve(pattern: pattern, meta: meta))
+        XCTAssertEqual(CustomPosterURLResolver.resolve(pattern: pattern, meta: meta) ?? meta.posterUrl, original)
+        XCTAssertNil(CustomPosterURLResolver.resolve(pattern: "https://example.com/{tmdb_id}", meta: meta, shape: "landscape"))
+    }
+
+    func testCustomPosterResolverSupportsEncodedTokensAndRejectsUnresolvedOrNonHTTPURLs() {
+        let meta = makeMeta(id: "tmdb:1396", imdbId: nil, tmdbId: nil, type: "movie")
+        let encodedPattern = "https://pictorium.elfhosted.com/api/poster/%7Btype%7D/%7Btmdb_id%7Cimdb_id%7D?shape=%7Bshape%7D"
+
+        XCTAssertEqual(
+            CustomPosterURLResolver.resolve(pattern: encodedPattern, meta: meta, shape: "square"),
+            "https://pictorium.elfhosted.com/api/poster/movie/1396?shape=square"
+        )
+        XCTAssertNil(CustomPosterURLResolver.resolve(pattern: "https://example.com/{unknown}", meta: meta))
+        XCTAssertNil(CustomPosterURLResolver.resolve(pattern: "file://example.com/{tmdb_id}", meta: meta))
+    }
+
+    func testCustomPosterScreenFilterDefaultsToAllAndSupportsExplicitNone() {
+        let allScreens = Set(CustomPosterScreen.allCases)
+        let pattern = "https://example.com/{tmdb_id}?shape={shape}"
+        let meta = makeMeta(id: "tmdb:1396", imdbId: nil, tmdbId: nil)
+
+        XCTAssertEqual(CustomPosterScreen.fromStorageValue(nil), allScreens)
+        XCTAssertTrue(CustomPosterScreen.fromStorageValue("none").isEmpty)
+        XCTAssertTrue(CustomPosterScreen.fromStorageValue("").isEmpty)
+        XCTAssertEqual(
+            CustomPosterScreen.storageValue(for: allScreens),
+            "home,continue_watching,collections,library,search,details,tv_recommendations"
+        )
+        XCTAssertNotNil(CustomPosterURLResolver.resolve(
+            pattern: pattern,
+            meta: meta,
+            screen: .search,
+            enabledScreens: "home,search"
+        ))
+        XCTAssertNil(CustomPosterURLResolver.resolve(
+            pattern: pattern,
+            meta: meta,
+            screen: .library,
+            enabledScreens: "home,search"
+        ))
+        XCTAssertNil(CustomPosterURLResolver.resolve(
+            pattern: pattern,
+            meta: meta,
+            screen: .home,
+            enabledScreens: "none"
+        ))
+    }
+
     private func makeMeta(
         id: String,
         imdbId: String?,

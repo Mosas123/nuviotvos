@@ -23,9 +23,12 @@ struct NuvioTVApp: App {
         let diskCapacity = isLegacyDevice ? (60 * 1024 * 1024) : (150 * 1024 * 1024)
         URLCache.shared.memoryCapacity = memCapacity
         URLCache.shared.diskCapacity = diskCapacity
-        if HomeCatalogPayloadStore.migrateAllKnownPreferences() {
+        let payloadMigrationKey = "nuvio.tv.migrations.largePayloadPreferences.v1"
+        if !UserDefaults.standard.bool(forKey: payloadMigrationKey),
+           HomeCatalogPayloadStore.migrateAllKnownPreferences() {
             LargePayloadStore.purgeAllKnownPreferences()
             UserDefaults.standard.set(true, forKey: SettingsKey.smoothFocus)
+            UserDefaults.standard.set(true, forKey: payloadMigrationKey)
         }
 
         #if canImport(AetherEngine)
@@ -999,10 +1002,14 @@ struct ContentView: View {
                 episode: session.episode
             )
         } else if let duration, progress > 0 {
+            let position = duration * progress
+            if position >= WatchProgressLedger.minimumTrackableSeconds {
+                ContinueWatchingDismissStore.clear(contentId: session.meta.id)
+            }
             ContinueWatchingStore.save(
                 meta: session.meta,
                 streamUrl: session.sourceURL,
-                position: duration * progress,
+                position: position,
                 duration: duration,
                 season: session.season,
                 episode: session.episode
@@ -2629,12 +2636,6 @@ struct ContentView: View {
             }
         ) {
             dismissPlayer(meta: meta, subtitle: subtitle)
-        }
-        .onAppear {
-            Task {
-                await PosterArtworkCache.shared.purge()
-                await BackdropImageCache.shared.purge()
-            }
         }
     }
 
@@ -4649,6 +4650,7 @@ struct TVHomeView: View {
                         } else if section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId {
                             TVCatalogRow(
                                 id: section.id,
+                                customPosterScreen: .continueWatching,
                                 title: section.title,
                                 addonName: section.addonName,
                                 showAddonName: catalogAddonNames,
@@ -4730,6 +4732,7 @@ struct TVHomeView: View {
                         } else {
                             TVHomeCatalogGridSection(
                                 section: section,
+                                customPosterScreen: .home,
                                 watchedTitleKeys: watchedTitleKeys,
                                 initialFocusCardKey: initialFocusCardKey,
                                 externalFocus: $focusedCardID,
@@ -5651,6 +5654,7 @@ struct TVHomeView: View {
         } else {
             TVCatalogRow(
                 id: section.id,
+                customPosterScreen: .home,
                 title: section.title,
                 addonName: section.addonName,
                 showAddonName: catalogAddonNames,
@@ -9733,11 +9737,11 @@ private struct TVGridHeroSlideshowView: View {
             #if os(tvOS)
             let previewIdentity = currentTrailerPreviewIdentity ?? trailerPreviewIdentity(for: item)
             if isTrailerPreviewEligible,
-               activeTrailerPreviewIdentity == previewIdentity,
+               currentTrailerPreviewIdentity == previewIdentity,
                finishedTrailerPreviewIdentity != previewIdentity {
                 TrailerPreviewPlayer(
                     meta: item,
-                    isActive: true,
+                    isActive: activeTrailerPreviewIdentity == previewIdentity,
                     onPlaybackReady: {
                         guard isTrailerPreviewEligible,
                               currentTrailerPreviewIdentity == previewIdentity,
@@ -9767,7 +9771,7 @@ private struct TVGridHeroSlideshowView: View {
                     }
                 )
                 .id(previewIdentity)
-                .task(id: "\(previewIdentity)|\(readyTrailerPreviewIdentity == previewIdentity)") {
+                .task(id: "\(previewIdentity)|\(activeTrailerPreviewIdentity == previewIdentity)|\(readyTrailerPreviewIdentity == previewIdentity)") {
                     await enforceTrailerRenderReadinessTimeout(for: previewIdentity)
                 }
             }

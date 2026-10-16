@@ -574,4 +574,54 @@ final class DetailsViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.uiState.isInWatchlist)
         XCTAssertTrue(viewModel.uiState.isWatched)
     }
+
+    func testWithCertificationUpdatesCertification() {
+        let meta = NuvioMeta(
+            id: "tt10986410",
+            name: "Ted Lasso",
+            type: "series",
+            certification: nil
+        )
+        XCTAssertNil(meta.certification)
+
+        let updated = meta.withCertification("TV-MA")
+        XCTAssertEqual(updated.certification, "TV-MA")
+        XCTAssertEqual(updated.name, "Ted Lasso")
+    }
+
+    func testPreservingEnrichmentRetainsExistingCertification() {
+        let existing = NuvioMeta(
+            id: "tt10986410",
+            name: "Ted Lasso",
+            type: "series",
+            certification: "TV-MA"
+        )
+        let incomingWithoutCert = NuvioMeta(
+            id: "tt10986410",
+            name: "Ted Lasso",
+            type: "series",
+            certification: nil
+        )
+
+        let resolved = incomingWithoutCert.preservingEnrichment(from: existing)
+        XCTAssertEqual(resolved.certification, "TV-MA")
+    }
+
+    func testPreservingEnrichmentPrefersResolvedCertification() {
+        let existing = NuvioMeta(
+            id: "tt10986410",
+            name: "Ted Lasso",
+            type: "series",
+            certification: "TV-14"
+        )
+        let incomingWithNewCert = NuvioMeta(
+            id: "tt10986410",
+            name: "Ted Lasso",
+            type: "series",
+            certification: "TV-MA"
+        )
+
+        let resolved = incomingWithNewCert.preservingEnrichment(from: existing)
+        XCTAssertEqual(resolved.certification, "TV-MA")
+    }
 }

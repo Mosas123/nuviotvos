@@ -843,6 +843,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// constants that did not know about each other, and it was never reset.
     var rateLimitReviveGate = RefusingSourceReviveBudget()
 
+    /// Consecutive automatic VOD provider re-anchors are a separate failure mode from read-error
+    /// revives and origin throttling. Mutated only under restartLock; never reset by producer rebuilds.
+    var vodAutomaticRestartBudget = VODAutomaticRestartBudget()
+
     /// AE#169 round 2 (under `restartLock`): the demuxer's last read threw, so the next
     /// performRestart replaces it via the #79 fresh-demuxer path instead of seeking a connection
     /// that just failed (a sticky pb error would burn the revive gate without one fresh attempt).
@@ -1232,6 +1236,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     public func start() throws -> URL {
         guard demuxer == nil else { throw HLSVideoEngineError.alreadyStarted }
+        restartLock.lock()
+        vodAutomaticRestartBudget.resetForSession()
+        restartLock.unlock()
 
         // 1. Open the source; reuse the pre-opened demuxer when available (saves ~1-3 s on slow CDN).
         let dem: Demuxer
@@ -2040,6 +2047,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 self?.recordSegmentDelivery(index: idx, delivered: delivered)
             }
         }
+        let providerSessionEpoch = sessionEpochSnapshot()
         let prov = VideoSegmentProvider(
             cache: segmentCache,
             segments: plan,
@@ -2077,7 +2085,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             blockingReloadOverride: blockingReloadOverride,
             liveCadencePolicy: liveCadencePolicy,
             restartHandler: isLiveSession ? nil : { [weak self] idx in
-                self?.requestRestart(at: idx)
+                guard let self else { return .superseded }
+                return self.requestRestart(
+                    at: idx,
+                    automatic: true,
+                    expectedSessionEpoch: providerSessionEpoch
+                )
             },
             // #358: a plan index no keyframe can open, asked for twice. Nothing downstream recovers
             // from it, so the session ends with an error the host can act on instead of a picture
@@ -2154,7 +2167,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Priming here (inside the detached background task that runs start()) ensures init.mp4 and seg{N}
         // are already on disk; AVPlayer then receives them in <1ms via send200File with no slow-serve stall.
         if !isLiveSession, initialProducerBaseIndex > 0, !sequentialOriginPinsProducerToZero {
-            primeInitialSegment(index: initialProducerBaseIndex, timeout: 10.0)
+            primeInitialSegments(
+                startIndex: initialProducerBaseIndex,
+                count: 2,
+                totalPlanned: plan.count,
+                timeout: 10.0
+            )
         } else if !isLiveSession,
                   !sequentialOriginPinsProducerToZero,
                   initialProducerBaseIndex == 0 {
@@ -2242,38 +2260,61 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return url
     }
 
-    /// Prime the initial HLS segment (and init.mp4) before handing the playlist to AVPlayer.
-    /// Returns true if both init.mp4 and segment `index` are ready on disk.
+    /// Prime initial HLS segments (and init.mp4) before handing the playlist to AVPlayer.
+    /// A single deadline keeps subsequent cuts from extending startup by another full timeout.
     @discardableResult
-    func primeInitialSegment(index: Int, timeout: TimeInterval = 10.0) -> Bool {
+    func primeInitialSegments(
+        startIndex: Int,
+        count: Int = 2,
+        totalPlanned: Int,
+        timeout: TimeInterval = 10.0
+    ) -> Bool {
         guard let c = cache else { return false }
-        let startTime = CFAbsoluteTimeGetCurrent()
-        c.declareTarget(index)
+        let segmentCount = min(count, max(0, totalPlanned - startIndex))
+        guard segmentCount > 0 else { return true }
+
+        let start = Date()
+        let deadline = start.addingTimeInterval(max(0, timeout))
+        c.declareTarget(startIndex)
 
         // 1. Wait for init.mp4
-        guard c.awaitInit(timeout: timeout) else {
-            EngineLog.emit("[HLSVideoEngine] priming initial segment \(index): timed out awaiting init.mp4",
-                           category: .session)
+        let initRemaining = max(0, deadline.timeIntervalSinceNow)
+        guard c.awaitInit(timeout: initRemaining) else {
+            EngineLog.emit(
+                "[HLSVideoEngine] priming initial segments \(startIndex)..<\(startIndex + segmentCount): timed out awaiting init.mp4",
+                category: .session
+            )
             return false
         }
 
-        // 2. Wait for the initial segment itself
-        let elapsedSoFar = CFAbsoluteTimeGetCurrent() - startTime
-        let remainingTimeout = max(0.5, timeout - elapsedSoFar)
-        guard c.awaitSegment(index: index, timeout: remainingTimeout) else {
-            EngineLog.emit("[HLSVideoEngine] priming initial segment \(index): timed out awaiting segment file",
-                           category: .session)
-            return false
+        // 2. Wait for each initial segment
+        for offset in 0..<segmentCount {
+            let index = startIndex + offset
+            let remaining = max(0.5, deadline.timeIntervalSinceNow)
+            guard c.awaitSegment(index: index, timeout: remaining) else {
+                EngineLog.emit(
+                    "[HLSVideoEngine] priming initial segments: timed out awaiting seg\(index) within shared \(timeout)s deadline",
+                    category: .session
+                )
+                return false
+            }
         }
 
-        let totalElapsed = CFAbsoluteTimeGetCurrent() - startTime
+        let elapsed = Date().timeIntervalSince(start)
         EngineLog.emit(
-            "[HLSVideoEngine] primed initial segment \(index) in \(String(format: "%.2f", totalElapsed))s "
-            + "(init + seg\(index) ready on disk)",
+            "[HLSVideoEngine] primed initial init + seg\(startIndex)..seg\(startIndex + segmentCount - 1) in \(String(format: "%.2f", elapsed))s",
             category: .session
         )
         return true
     }
+
+    /// Prime the initial HLS segment (and init.mp4) before handing the playlist to AVPlayer.
+    /// Returns true if both init.mp4 and segment `index` are ready on disk.
+    @discardableResult
+    func primeInitialSegment(index: Int, timeout: TimeInterval = 10.0) -> Bool {
+        primeInitialSegments(startIndex: index, count: 1, totalPlanned: index + 1, timeout: timeout)
+    }
+
 
     /// Cold VOD starts need the init section and the first two finalized media
     /// segments before AVPlayer sees the playlist. A single deadline keeps a
@@ -2568,6 +2609,7 @@ hasIFrameRendition: Bool = false,
     var demuxerBytesFetched: Int64 {
         (subsystemSnapshot().demuxer?.avioBytesFetched ?? 0) + retiredTotals().demuxerBytes
     }
+    public var segmentCacheCount: Int { subsystemSnapshot().cache?.count ?? 0 }
     var segmentCacheTotalBytes: Int { subsystemSnapshot().cache?.totalBytes ?? 0 }
     /// On-disk segment bytes (freshly stat-ed). Used by `aetherctl live --report-cache-bytes`.
     var segmentCacheDiskBytes: Int64 { subsystemSnapshot().cache?.diskBytes() ?? 0 }
@@ -2764,6 +2806,7 @@ hasIFrameRendition: Bool = false,
         // while the pump exits a parked HTTP byte-range read).
         restartLock.lock()
         sessionEpoch &+= 1
+        vodAutomaticRestartBudget.resetForSession()
         retentionClaim?.release()
         retentionClaim = nil
         let p = producer
@@ -4254,10 +4297,23 @@ hasIFrameRendition: Bool = false,
     func releaseSupersededAuthoritativeRestart() {
         restartLock.lock()
         restartCoalescer.clearSupersededAuthoritativePending()
+        vodAutomaticRestartBudget.resetForUserSeek()
         restartLock.unlock()
     }
 
-    func requestRestart(at idx: Int, authoritative: Bool = false) {
+    @discardableResult
+    func requestRestart(
+        at idx: Int,
+        authoritative: Bool = false,
+        automatic: Bool = false,
+        expectedSessionEpoch: UInt64? = nil
+    ) -> VODProviderRestartResult {
+        restartLock.lock()
+        let requestEpoch = expectedSessionEpoch ?? sessionEpoch
+        let sessionMatches = requestEpoch == sessionEpoch
+        restartLock.unlock()
+        guard sessionMatches else { return .superseded }
+
         // A sequential origin has no restart. performRestart's demuxer seek has nowhere to land
         // on a non-seekable pb, and it ignores that failure: the new producer would keep reading
         // wherever the stream stands (or from byte 0 after a fresh reopen) and label those bytes
@@ -4271,36 +4327,85 @@ hasIFrameRendition: Bool = false,
                 category: .session
             )
             surfaceVODSourceFailure(FFmpegErr.eio, "Source cannot be repositioned")
-            return
+            return .exhausted(firstReport: true)
         }
+
+        let request = RestartCoalescer.Request(
+            index: idx,
+            authoritative: authoritative,
+            automatic: automatic,
+            sessionEpoch: requestEpoch
+        )
         restartLock.lock()
-        let shouldRun = restartCoalescer.begin(idx, authoritative: authoritative)
-        let seekTime = segmentStartSecondsLocked(idx) // under lock; segmentPlan guarded by restartLock (#38)
+        guard sessionEpoch == requestEpoch else {
+            restartLock.unlock()
+            return .superseded
+        }
+        let shouldRun = restartCoalescer.begin(request)
         restartLock.unlock()
         guard shouldRun else {
             EngineLog.emit(
                 "[HLSVideoEngine] restart at idx=\(idx) coalesced behind in-flight restart",
                 category: .session
             )
-            return
+            return .coalesced
         }
-        onSeekStateChanged?(true, seekTime) // publish seek in-flight until coalesced run drains (#38)
-        var target = idx
+
+        var targetRequest = request
+        var publishedSeekInFlight = false
+        var runOutcome = VODRestartRunOutcome()
         while true {
-            performRestart(at: target)
+            if !targetRequest.automatic {
+                let seekTime: Double?
+                restartLock.lock()
+                seekTime = segmentStartSecondsLocked(targetRequest.index)
+                restartLock.unlock()
+                onSeekStateChanged?(true, seekTime) // authoritative/scrub restarts keep existing behavior
+                publishedSeekInFlight = true
+            }
+
+            let result = performRestart(targetRequest)
+            runOutcome.record(result)
+            switch result {
+            case .restarted:
+                if targetRequest.automatic { publishedSeekInFlight = true }
+            case .failed:
+                if targetRequest.automatic { publishedSeekInFlight = true }
+            case .deferred:
+                break
+            case .exhausted(let firstReport):
+                _ = firstReport // Policy owns the one-time diagnostic; keep the current reader/session alive.
+            case .coalesced:
+                break
+            case .superseded:
+                break
+            }
+
             restartLock.lock()
-            let nextTarget = restartCoalescer.next(justRan: target)
-            let nextSeekTime = nextTarget.flatMap { segmentStartSecondsLocked($0) }
+            let destructiveStarted: Bool
+            switch result {
+            case .restarted, .failed: destructiveStarted = true
+            default: destructiveStarted = false
+            }
+            let nextRequest = restartCoalescer.next(
+                justRan: targetRequest,
+                destructiveStarted: destructiveStarted
+            )
             restartLock.unlock()
-            guard let nextTarget else { break }
+
+            guard let nextRequest else { break }
             EngineLog.emit(
-                "[HLSVideoEngine] coalesced restart advancing to settled target idx=\(nextTarget)",
+                "[HLSVideoEngine] coalesced restart advancing to settled target idx=\(nextRequest.index)",
                 category: .session
             )
-            onSeekStateChanged?(true, nextSeekTime)
-            target = nextTarget
+            targetRequest = nextRequest
         }
-        onSeekStateChanged?(false, nil) // run settled; hand the falling edge to the landing watch (#38)
+
+        if publishedSeekInFlight, isSessionEpochCurrent(requestEpoch) {
+            onSeekStateChanged?(false, nil) // run settled; hand the falling edge to the landing watch (#38)
+        }
+        guard isSessionEpochCurrent(requestEpoch) else { return .superseded }
+        return runOutcome.providerResult
     }
 
     /// `segmentPlan[idx].startSeconds` on the AVPlayer/playlist axis, or nil
@@ -4366,18 +4471,57 @@ hasIFrameRendition: Bool = false,
         restartLock.unlock()
     }
 
-    // Driven exclusively through requestRestart(at:) so bursts coalesce (#35).
-    private func performRestart(at idx: Int) {
+    // Driven exclusively through requestRestart so bursts coalesce (#35).
+    private func performRestart(_ request: RestartCoalescer.Request) -> VODProviderRestartResult {
+        let idx = request.index
         restartGate.lock()
         defer { restartGate.unlock() }
 
+        // The rendered clock is a thread-safe mirror. Read it before restartLock; never nest its lock
+        // beneath session state or the producer/cache locks.
+        let renderedPosition = request.automatic ? currentPlaybackPositionProvider?() : nil
         restartLock.lock()
-        guard idx >= 0, idx < segmentPlan.count, let dem = demuxer else {
+        guard sessionEpoch == request.sessionEpoch,
+              idx >= 0, idx < segmentPlan.count,
+              let dem = demuxer else {
             restartLock.unlock()
-            return
+            return .superseded
         }
-        let epoch = sessionEpoch
+
+        var automaticAdmission: VODAutomaticRestartBudget.Admission?
+        if request.automatic {
+            let admission = vodAutomaticRestartBudget.admit(
+                now: ProcessInfo.processInfo.systemUptime,
+                renderedPosition: renderedPosition
+            )
+            switch admission {
+            case .restart:
+                automaticAdmission = admission
+            case .deferred(let remaining, let shouldLog):
+                restartLock.unlock()
+                if shouldLog {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] VOD automatic restart target=\(idx) deferred; "
+                        + "fresh-reader cooldown remaining=\(String(format: "%.1f", remaining))s",
+                        category: .session
+                    )
+                }
+                return .deferred(remaining: remaining)
+            case .exhausted(let firstReport, let attempts, let elapsed):
+                restartLock.unlock()
+                if firstReport {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] VOD automatic restart budget exhausted at target=\(idx) "
+                        + "attempts=\(attempts) elapsed=\(String(format: "%.1f", elapsed))s",
+                        category: .session
+                    )
+                }
+                return .exhausted(firstReport: firstReport)
+            }
+        }
+        let epoch = request.sessionEpoch
         let old = producer
+        let targetSeekSeconds = segmentStartSecondsLocked(idx)
         producer = nil
         let ab = audioBridge
         let targetStartPts = segmentPlan[idx].startPts
@@ -4388,6 +4532,24 @@ hasIFrameRendition: Bool = false,
         let demuxerSuspectDead = mainDemuxerSuspectDead
         mainDemuxerSuspectDead = false
         restartLock.unlock()
+
+        if case let .restart(attempt, elapsed, remaining, progressReset)? = automaticAdmission {
+            let progressLabel = renderedPosition.map { String(format: "%.2f", $0) } ?? "unknown"
+            if progressReset {
+                EngineLog.emit(
+                    "[HLSVideoEngine] VOD automatic restart budget reset after rendered progress=\(progressLabel)s",
+                    category: .session
+                )
+            }
+            EngineLog.emit(
+                "[HLSVideoEngine] VOD automatic restart admitted target=\(idx) "
+                + "renderedSeconds=\(progressLabel) attempt=\(attempt)/\(VODAutomaticRestartBudget.maximumRestarts) "
+                + "elapsed=\(String(format: "%.1f", elapsed))s episodeRemaining=\(String(format: "%.1f", remaining))s "
+                + "readerGrace=\(Int(VODAutomaticRestartBudget.freshReaderGrace))s",
+                category: .session
+            )
+            onSeekStateChanged?(true, targetSeekSeconds)
+        }
 
         // AE#443: off `restartLock`, and before `old.stop()` releases the muxer its byte total is read
         // from.
@@ -4493,7 +4655,7 @@ hasIFrameRendition: Bool = false,
                 "[HLSVideoEngine] restart at idx=\(idx): superseded by stop(), unwinding",
                 category: .session
             )
-            return
+            return .superseded
         }
         // #79: install the reopened demuxer only inside the validated section so makeProducer reads it and a
         // concurrent teardown can't race a resurrected demuxer into a torn-down session.
@@ -4523,8 +4685,18 @@ hasIFrameRendition: Bool = false,
                 "[HLSVideoEngine] restart at idx=\(idx) failed: \(error)",
                 category: .session
             )
-            return
+            return .failed
         }
+
+        restartLock.lock()
+        guard sessionEpoch == epoch else {
+            restartLock.unlock()
+            return .superseded
+        }
+        if !isLiveSession {
+            vodAutomaticRestartBudget.markReplacementStarted(at: ProcessInfo.processInfo.systemUptime)
+        }
+        restartLock.unlock()
 
         let elapsedMs = msSince(restartStart)
         let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
@@ -4539,6 +4711,7 @@ hasIFrameRendition: Bool = false,
             + Self.restartPhaseSummary(stopWaitMs: stopWaitMs, reopenMs: reopenMs, seekMs: seekMs, buildMs: buildMs) + ")",
             category: .session
         )
+        return .restarted(at: idx)
     }
 
 }

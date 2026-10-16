@@ -42,6 +42,7 @@ struct Issue169DeadProducerEscalationTests {
                 if storeOnRestart {
                     cache?.store(index: idx, data: Data(repeating: 0x41, count: 8))
                 }
+                return .restarted(at: idx)
             },
             restartActivity: { false },
             activeProducerBase: { producerBase },
@@ -145,7 +146,10 @@ struct Issue169DeadProducerEscalationTests {
             cache: cache, segments: segments(200), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (3840, 2160), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 60_000_000, isLive: true,
-            restartHandler: { recorder.record($0) },
+            restartHandler: { idx in
+                recorder.record(idx)
+                return .restarted(at: idx)
+            },
             restartActivity: { false },
             activeProducerBase: { 40 },
             producerFinished: { true },

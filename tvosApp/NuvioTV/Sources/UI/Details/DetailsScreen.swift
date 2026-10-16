@@ -68,7 +68,6 @@ struct DetailsScreen: View {
     @State private var didHandleInitialStreamPicker = false
     @State private var expandedComment: TraktCommentReview?
     @State private var showingMdbListRating = false
-    @State private var isAudioLanguagePickerPresented = false
     /// Set while an episode card's context menu is up. tvOS hands the Menu press
     /// that dismisses the menu to this screen as well, and without this the
     /// screen would treat it as Back and return to Home.
@@ -87,6 +86,17 @@ struct DetailsScreen: View {
     @AppStorage(SettingsKey.tmdbApiKey) private var tmdbApiKey = ""
     @AppStorage(SettingsKey.debridProvider) private var debridProvider = "None"
     @AppStorage(SettingsKey.debridApiKey) private var debridApiKey = ""
+    @AppStorage(SettingsKey.backgroundStreamPreFetch) private var backgroundStreamPreFetch = true
+    @State private var preResolvedStream: NuvioStream? = nil
+    @State private var preResolvedURL: URL? = nil
+    @State private var preResolvedFilename: String? = nil
+    @State private var preResolvedVideoSize: Int64? = nil
+    @State private var preResolvedStreamId: String? = nil
+    @State private var preResolvedEpisode: NuvioVideo? = nil
+    @State private var preResolvedEpisodeSubtitle: String = ""
+    @State private var preFetchDebridTask: Task<Void, Never>? = nil
+    @State private var preResolvedDuration: TimeInterval? = nil
+    @State private var streamDiscoveryDuration: TimeInterval? = nil
     /// True while a torrent stream is being resolved through the debrid provider,
     /// so the picker can keep its spinner up instead of appearing to hang.
     @State private var isResolvingDebrid = false
@@ -204,13 +214,15 @@ struct DetailsScreen: View {
                         pendingEpisodeSubtitle = "S\(video.season) · E\(video.episode) · \(video.title)"
                         pendingEpisode = video
                         let streamId = canonicalEpisodeStreamId(for: video, meta: viewModel.uiState.meta)
-                        startStreamFlow(streamId: streamId, type: "series", reload: true)
+                        let isPreFetched = (viewModel.prefetchedStreamId == streamId && !viewModel.uiState.streams.isEmpty)
+                        startStreamFlow(streamId: streamId, type: "series", reload: !isPreFetched)
                     },
                     onEpisodePlayManually: { video in
                         pendingEpisodeSubtitle = "S\(video.season) · E\(video.episode) · \(video.title)"
                         pendingEpisode = video
                         let streamId = canonicalEpisodeStreamId(for: video, meta: viewModel.uiState.meta)
-                        startStreamFlow(streamId: streamId, type: "series", reload: true, forceManualPicker: true)
+                        let isPreFetched = (viewModel.prefetchedStreamId == streamId && !viewModel.uiState.streams.isEmpty)
+                        startStreamFlow(streamId: streamId, type: "series", reload: !isPreFetched, forceManualPicker: true)
                     },
                     onEpisodeMenuPresented: { isPresented in
                         isEpisodeMenuPresented = isPresented
@@ -236,15 +248,12 @@ struct DetailsScreen: View {
                     onCommentSelect: { comment in
                         expandedComment = comment
                     },
-                    onAudioLanguageClick: {
-                        isAudioLanguagePickerPresented = true
-                    },
                     onBack: handleBack
                 )
                 // While the stream picker is open it sits on top as a full-screen
                 // overlay; disable the details content so the focus engine can't
                 // route focus to the (hidden) buttons behind it.
-                .disabled(isStreamPickerPresented || expandedComment != nil || isAudioLanguagePickerPresented || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
+                .disabled(isStreamPickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
                 #else
                 MobileDetailsContent(
                     uiState: viewModel.uiState,
@@ -272,37 +281,8 @@ struct DetailsScreen: View {
                 .zIndex(20)
             }
 
-            if isAudioLanguagePickerPresented, let meta = viewModel.uiState.meta {
-                ShowAudioLanguageOverlay(
-                    meta: meta,
-                    onDismiss: {
-                        isAudioLanguagePickerPresented = false
-                    }
-                )
-                .transition(.opacity)
-                .zIndex(20)
-            }
 
-            if let meta = viewModel.uiState.meta,
-               (isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback) && !isStreamPickerPresented {
-                PlayerLoadingOverlay(
-                    backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
-                    logoUrl: meta.logoUrl,
-                    title: meta.name,
-                    message: detailsLoadingMessage,
-                    onDismiss: {
-                        cancelStartupRequest()
-                        isSmartPlaybackPending = false
-                        isResolvingDebrid = false
-                        isPreparingPlayback = false
-                        if let requestID = pendingInitialPlaybackRequestID {
-                            finishInitialPlaybackRequest(requestID)
-                        }
-                    }
-                )
-                .transition(.opacity)
-                .zIndex(25)
-            }
+            playerLoadingOverlayView
             #endif
         }
         .animation(.easeInOut(duration: 0.18), value: isStreamPickerPresented)
@@ -382,8 +362,6 @@ struct DetailsScreen: View {
                 isPreparingPlayback = false
             } else if isStreamPickerPresented {
                 isStreamPickerPresented = false
-            } else if isAudioLanguagePickerPresented {
-                isAudioLanguagePickerPresented = false
             } else {
                 handleBack()
             }
@@ -393,9 +371,11 @@ struct DetailsScreen: View {
             if !isLoading {
                 finishSmartPlaybackIfPossible()
             }
+            performBackgroundAutoSelectionAndPreResolution()
         }
         .onChange(of: viewModel.uiState.streamsRevision) { _, _ in
             finishSmartPlaybackIfPossible()
+            performBackgroundAutoSelectionAndPreResolution()
         }
         .onChange(of: viewModel.uiState.isLoading) { _, isLoading in
             if !isLoading {
@@ -435,6 +415,7 @@ struct DetailsScreen: View {
         .onDisappear {
             TVHomeDebugTrace.log("details.disappear id=\(id) type=\(type)")
             cancelStartupRequest()
+            cleanupPreFetchedResources()
             if let requestID = pendingInitialPlaybackRequestID {
                 finishInitialPlaybackRequest(requestID)
             } else {
@@ -451,6 +432,7 @@ struct DetailsScreen: View {
     /// updates while the opacity transition is trying to tear Details down.
     private func handleBack() {
         cancelStartupRequest()
+        cleanupPreFetchedResources()
         TVHomeDebugTrace.log("details.back.cancelTasks id=\(id)")
         if let requestID = pendingInitialPlaybackRequestID {
             finishInitialPlaybackRequest(requestID)
@@ -598,7 +580,65 @@ struct DetailsScreen: View {
             if reload {
                 viewModel.prepareStreams(forId: streamId, type: type)
             }
+            if !viewModel.uiState.streams.isEmpty {
+                let saved = streamDiscoveryDuration ?? (viewModel.prefetchStartTime.map { Date().timeIntervalSince($0) } ?? 0)
+                print("[PreFetch] ⏱ Stream picker opened instantly with \(viewModel.uiState.streams.count) pre-fetched sources! Saved \(String(format: "%.3fs", saved)) of add-on search wait time.")
+            }
             isStreamPickerPresented = true
+            return
+        }
+
+        // Instant launch if pre-resolved in background!
+        if !forceManualPicker,
+           let preStream = preResolvedStream,
+           let preURL = preResolvedURL,
+           preResolvedStreamId == streamId {
+            let discoverySaved = streamDiscoveryDuration ?? 0
+            let debridSaved = preResolvedDuration ?? 0
+            let totalSaved = discoverySaved + debridSaved
+
+            print("\n============================================================")
+            print("[PreFetch] 🚀 INSTANT PLAYBACK TRIGGERED (ZERO-WAIT LAUNCH):")
+            print("  • Title:              \(meta.name)")
+            let cleanStreamName = (preStream.name ?? preStream.description ?? "").replacingOccurrences(of: "\n", with: " ")
+            print("  • Source:             \(preStream.addonName ?? "Unknown") · \(cleanStreamName)")
+            print("  • Stream Discovery:   Saved \(String(format: "%.3fs", discoverySaved)) (bypassed)")
+            print("  • Debrid Resolution:  Saved \(String(format: "%.3fs", debridSaved)) (bypassed)")
+            print("  ⏱ TOTAL TIME SAVED:   \(String(format: "%.3fs", totalSaved))")
+            print("============================================================\n")
+
+            let startupToken = ensureStartupRequest(title: meta.name)
+            PlaybackStartupTiming.markSourcePicked(stream: preStream, token: startupToken)
+            if debridSaved > 0 {
+                PlaybackStartupTiming.markDebridResolved(token: startupToken)
+            }
+
+            isStreamPickerPresented = false
+            isPreparingPlayback = true
+            isSmartPlaybackPending = false
+
+            let activeProfileId = ProfileSettings.activeProfileID
+            if !preStream.isNotPlayable {
+                LastStreamQualityStore.save(metaId: meta.id, stream: preStream, profileId: activeProfileId)
+                BingeGroupStore.save(seriesId: meta.id, stream: preStream, profileId: activeProfileId)
+            }
+
+            onPlayClick(
+                preURL.absoluteString,
+                preStream.httpHeaders ?? [:],
+                meta,
+                pendingEpisodeSubtitle.isEmpty ? preResolvedEpisodeSubtitle : pendingEpisodeSubtitle,
+                preStream.subtitles,
+                pendingEpisode ?? preResolvedEpisode,
+                orderedEpisodes(for: meta),
+                nil,
+                PlaybackCacheFileIdentity(infoHash: preStream.effectiveInfoHash, fileIndex: preStream.effectiveFileIdx),
+                preResolvedFilename ?? preStream.filename,
+                preResolvedVideoSize ?? preStream.videoSize,
+                preStream.videoHash,
+                nil,
+                startupToken
+            )
             return
         }
 
@@ -745,6 +785,228 @@ struct DetailsScreen: View {
         }
     }
 
+    private func cleanupPreFetchedResources() {
+        if preFetchDebridTask != nil || preResolvedURL != nil {
+            print("[PreFetch] 🛑 Details view dismissed — cancelled pending background pre-resolution tasks and cleaned up pre-loaded resources.")
+        }
+        preFetchDebridTask?.cancel()
+        preFetchDebridTask = nil
+        preResolvedStream = nil
+        preResolvedURL = nil
+        preResolvedFilename = nil
+        preResolvedVideoSize = nil
+        preResolvedStreamId = nil
+        preResolvedEpisode = nil
+        preResolvedEpisodeSubtitle = ""
+        preResolvedDuration = nil
+        streamDiscoveryDuration = nil
+    }
+
+    @ViewBuilder
+    private var playerLoadingOverlayView: some View {
+        if let meta = viewModel.uiState.meta,
+           (isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback) && !isStreamPickerPresented {
+            PlayerLoadingOverlay(
+                backdropUrl: meta.backgroundUrl ?? meta.posterUrl,
+                logoUrl: meta.logoUrl,
+                title: meta.name,
+                message: detailsLoadingMessage,
+                onDismiss: {
+                    cancelStartupRequest()
+                    isSmartPlaybackPending = false
+                    isResolvingDebrid = false
+                    isPreparingPlayback = false
+                    if let requestID = pendingInitialPlaybackRequestID {
+                        finishInitialPlaybackRequest(requestID)
+                    }
+                }
+            )
+            .transition(.opacity)
+            .zIndex(25)
+        }
+    }
+
+    private func performBackgroundAutoSelectionAndPreResolution() {
+        let prefetchEnabled = (ProfileSettings.current.object(forKey: SettingsKey.backgroundStreamPreFetch) as? Bool) ?? true
+        guard prefetchEnabled else { return }
+        guard let meta = viewModel.uiState.meta else { return }
+        let streams = viewModel.uiState.streams
+        guard !streams.isEmpty else { return }
+
+        let currentStreamId = viewModel.prefetchedStreamId ?? meta.streamId
+        let currentEpisode = viewModel.prefetchedEpisode
+
+        if streamDiscoveryDuration == nil, let start = viewModel.prefetchStartTime {
+            streamDiscoveryDuration = Date().timeIntervalSince(start)
+        }
+
+        let debrid = DebridResolver(store: ProfileSettings.current)
+        let cachedOnlyPreference = (ProfileSettings.current.object(forKey: SettingsKey.cachedOnlyStreams) as? Bool) ?? false
+        let cachedOnly = SmartPlaybackSelector.effectiveCachedOnly(
+            cachedOnlyPreference,
+            contentType: meta.type
+        )
+
+        let activeProfileId = ProfileSettings.activeProfileID
+        let preferredTags = LastStreamQualityStore.load(metaId: meta.id, profileId: activeProfileId)
+        let preserveAddonOrder = (ProfileSettings.current.object(forKey: SettingsKey.preserveAddonStreamOrder) as? Bool) ?? false
+
+        let candidateStream: NuvioStream?
+        if smartStreamUseTopResult || preserveAddonOrder {
+            let sortRaw = ProfileSettings.current.string(forKey: SettingsKey.streamSortOption)
+            let sortOption = sortRaw.flatMap(StreamSortOption.init(rawValueOrSync:)) ?? .quality
+            let displayed = StreamPickerListBuilder.displayedStreams(
+                streams: streams,
+                groups: viewModel.uiState.streamGroups,
+                selectedAddonId: nil,
+                sortOption: sortOption,
+                includeDebrid: debrid.isEnabled || TorrentSettings.isEnabled(),
+                cachedOnly: cachedOnly,
+                preserveAddonStreams: preserveAddonOrder
+            )
+            let available = displayed.filter { $0.unavailabilityReason == nil && !$0.isNotPlayable }
+            let pool: [NuvioStream]
+            if preserveAddonOrder {
+                pool = available
+            } else {
+                let valid = available.filter {
+                    !SmartPlaybackSelector.isLowQualityOrTicketStream($0) && StreamPickerListBuilder.resolution(for: $0) >= 720
+                }
+                pool = valid.isEmpty ? available : valid
+            }
+            let preferBingeGroup = (ProfileSettings.current.object(forKey: SettingsKey.streamAutoPlayPreferBingeGroup) as? Bool) ?? true
+            let reuseBingeGroup = (ProfileSettings.current.object(forKey: SettingsKey.streamAutoPlayReuseBingeGroup) as? Bool) ?? true
+            if (preferBingeGroup || reuseBingeGroup), let preferredTags, preferredTags.bingeGroup != nil || preferredTags.releaseFingerprint != nil {
+                let matching = pool.first { stream in
+                    let tags = StreamQualityTags.parse(stream: stream)
+                    if let pbg = preferredTags.bingeGroup, let sbg = tags.bingeGroup,
+                       pbg.compare(sbg, options: .caseInsensitive) == .orderedSame {
+                        return true
+                    }
+                    if let pfp = preferredTags.releaseFingerprint, let sfp = tags.releaseFingerprint,
+                       pfp.compare(sfp, options: .caseInsensitive) == .orderedSame {
+                        return true
+                    }
+                    return false
+                }
+                candidateStream = matching ?? pool.first
+            } else {
+                candidateStream = pool.first
+            }
+        } else {
+            candidateStream = SmartPlaybackSelector.bestStream(
+                from: streams,
+                qualityPreference: smartStreamQuality,
+                subtitleLanguages: subtitleLanguagePreferences,
+                shouldMatchSubtitles: smartSubtitleMatching,
+                includeDebrid: debrid.isEnabled || TorrentSettings.isEnabled(),
+                preferredTags: preferredTags,
+                cachedOnly: cachedOnly
+            )
+        }
+
+        guard let candidate = candidateStream else { return }
+
+        let isIdealMatch: Bool = {
+            if candidate.isNotPlayable { return false }
+            if !viewModel.uiState.isLoadingStreams { return true }
+            if preserveAddonOrder {
+                if debrid.isEnabled, cachedOnly {
+                    return candidate.isLikelyCached
+                }
+                return true
+            }
+            if SmartPlaybackSelector.isLowQualityOrTicketStream(candidate) { return false }
+            let tags = StreamQualityTags.parse(stream: candidate)
+            let res = tags.resolution > 0 ? tags.resolution : SmartPlaybackSelector.inferredResolution(for: candidate)
+            let targetRes = (smartStreamQuality == "720p") ? 720 : 1080
+
+            if let preferredTags, preferredTags.bingeGroup != nil || preferredTags.releaseFingerprint != nil {
+                let matchesBingeGroup = (preferredTags.bingeGroup != nil && tags.bingeGroup?.compare(preferredTags.bingeGroup!, options: .caseInsensitive) == .orderedSame)
+                let matchesFingerprint = (preferredTags.releaseFingerprint != nil && tags.releaseFingerprint?.compare(preferredTags.releaseFingerprint!, options: .caseInsensitive) == .orderedSame)
+                guard matchesBingeGroup || matchesFingerprint else {
+                    return false
+                }
+            }
+
+            if debrid.isEnabled,
+               SmartPlaybackSelector.effectiveCachedOnly(true, contentType: meta.type) {
+                return (candidate.isLikelyCached || tags.isCached) && res >= targetRes
+            }
+            return res >= targetRes
+        }()
+
+        guard isIdealMatch else { return }
+
+        // If this stream was already selected and resolved, don't re-resolve
+        if preResolvedStream == candidate && preResolvedURL != nil && preResolvedStreamId == currentStreamId {
+            return
+        }
+
+        let discDuration = streamDiscoveryDuration ?? (viewModel.prefetchStartTime.map { Date().timeIntervalSince($0) } ?? 0)
+        streamDiscoveryDuration = discDuration
+        let cleanName = (candidate.name ?? candidate.description ?? "Direct Source").replacingOccurrences(of: "\n", with: " ")
+        print("[PreFetch] 🔍 Auto-selected candidate source in \(String(format: "%.3fs", discDuration)): \(candidate.addonName ?? "Unknown") · \(cleanName)")
+
+        if let direct = candidate.directURL, !direct.isEmpty, let url = URL(string: direct) {
+            preResolvedURL = url
+            preResolvedStream = candidate
+            preResolvedStreamId = currentStreamId
+            preResolvedEpisode = currentEpisode
+            preResolvedEpisodeSubtitle = currentEpisode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? ""
+            preResolvedFilename = candidate.filename
+            preResolvedVideoSize = candidate.videoSize
+            preResolvedDuration = 0.0
+            print("[PreFetch] ⚡️ Direct source ready (0ms resolution). Instant playback armed!")
+            return
+        }
+
+        guard candidate.isDebridResolvable && smartStreamSelection else { return }
+
+        preFetchDebridTask?.cancel()
+        preFetchDebridTask = Task { @MainActor in
+            let t0_debrid = Date()
+            let season = currentEpisode?.season
+            let episode = currentEpisode?.episode
+            let resolver = DebridResolver(store: ProfileSettings.current)
+            var resolvedURL: URL? = nil
+            var debridFilename: String? = nil
+            var debridVideoSize: Int64? = nil
+            if resolver.isEnabled {
+                let result = await resolver.resolvedURL(for: candidate, season: season, episode: episode)
+                if case let .success(url, filename, videoSize)? = result {
+                    resolvedURL = url
+                    debridFilename = filename
+                    debridVideoSize = videoSize
+                }
+            }
+            if resolvedURL == nil, TorrentSettings.isEnabled(), let infoHash = candidate.effectiveInfoHash, !infoHash.isEmpty {
+                do {
+                    resolvedURL = try await TorrentEngineManager.shared.startStream(
+                        infoHash: infoHash,
+                        fileIdx: candidate.effectiveFileIdx,
+                        trackers: candidate.sources,
+                        filename: candidate.filename
+                    )
+                } catch {
+                    print("[PreFetch] Torrent stream pre-resolve failed: \(error)")
+                }
+            }
+            guard !Task.isCancelled, let url = resolvedURL else { return }
+            let debridElapsed = Date().timeIntervalSince(t0_debrid)
+            self.preResolvedURL = url
+            self.preResolvedFilename = debridFilename
+            self.preResolvedVideoSize = debridVideoSize
+            self.preResolvedStream = candidate
+            self.preResolvedStreamId = currentStreamId
+            self.preResolvedEpisode = currentEpisode
+            self.preResolvedEpisodeSubtitle = currentEpisode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? ""
+            self.preResolvedDuration = debridElapsed
+            print("[PreFetch] ⚡️ Pre-resolved Debrid link in background in \(String(format: "%.3fs", debridElapsed))! URL: \(url.absoluteString)")
+            print("[PreFetch] ✅ Stream fully pre-loaded and ready for instant playback on Play click!")
+        }
+    }
+
     /// Plays a chosen stream. Direct URLs go straight to the player; torrent-only
     /// streams are resolved through the configured debrid provider first, keeping
     /// the picker's spinner up until a link comes back (or the attempt fails).
@@ -794,6 +1056,37 @@ struct DetailsScreen: View {
                 PlaybackCacheFileIdentity(infoHash: stream.effectiveInfoHash, fileIndex: stream.effectiveFileIdx),
                 stream.filename,
                 stream.videoSize,
+                stream.videoHash,
+                nil,
+                startupToken
+            )
+            return
+        }
+
+        if let preURL = preResolvedURL, preResolvedStream == stream {
+            let debridSaved = preResolvedDuration ?? 0
+            if debridSaved > 0 {
+                PlaybackStartupTiming.markDebridResolved(token: startupToken)
+            }
+            isStreamPickerPresented = false
+            isPreparingPlayback = true
+            isSmartPlaybackPending = false
+            armExternalPlayerTimeoutIfNeeded(player: player)
+            if self.startupBenchmarkToken == startupToken {
+                self.startupBenchmarkToken = nil
+            }
+            onPlayClick(
+                preURL.absoluteString,
+                stream.httpHeaders ?? [:],
+                meta,
+                pendingEpisodeSubtitle.isEmpty ? preResolvedEpisodeSubtitle : pendingEpisodeSubtitle,
+                stream.subtitles,
+                pendingEpisode ?? preResolvedEpisode,
+                orderedEpisodes(for: meta),
+                player,
+                PlaybackCacheFileIdentity(infoHash: stream.effectiveInfoHash, fileIndex: stream.effectiveFileIdx),
+                preResolvedFilename ?? stream.filename,
+                preResolvedVideoSize ?? stream.videoSize,
                 stream.videoHash,
                 nil,
                 startupToken
@@ -964,6 +1257,7 @@ struct DetailsScreen: View {
 actor YouTubeTrailerResolver {
     static let shared = YouTubeTrailerResolver()
     private var trailerIdCache: [String: String] = [:]
+    private var trailerIdFailureDates: [String: Date] = [:]
     private var trailerioCache: [String: TrailerPlaybackSource] = [:]
 
     private struct TrailerioResponse: Decodable {
@@ -1101,7 +1395,13 @@ actor YouTubeTrailerResolver {
     func preferredTrailerYouTubeId(for meta: NuvioMeta) async -> String? {
         let cacheKey = "\(meta.id)|\(meta.tmdbId ?? 0)"
         if let cached = trailerIdCache[cacheKey] {
-            return cached.isEmpty ? nil : cached
+            if !cached.isEmpty { return cached }
+            if let failedAt = trailerIdFailureDates[cacheKey],
+               Date().timeIntervalSince(failedAt) < 300 {
+                return nil
+            }
+            trailerIdCache.removeValue(forKey: cacheKey)
+            trailerIdFailureDates.removeValue(forKey: cacheKey)
         }
 
         var resolvedId: String? = nil
@@ -1122,7 +1422,17 @@ actor YouTubeTrailerResolver {
             resolvedId = ytId
         }
 
+        guard !Task.isCancelled else { return nil }
+        // An older failed lookup must not replace a concurrent success.
+        if resolvedId == nil, let cached = trailerIdCache[cacheKey], !cached.isEmpty {
+            return cached
+        }
         trailerIdCache[cacheKey] = resolvedId ?? ""
+        if resolvedId == nil {
+            trailerIdFailureDates[cacheKey] = Date()
+        } else {
+            trailerIdFailureDates.removeValue(forKey: cacheKey)
+        }
         return resolvedId
     }
     private struct Client {
@@ -1241,7 +1551,9 @@ actor YouTubeTrailerResolver {
     private var cachedConfig: WatchConfig?
     private var previewCache: [String: (source: TrailerPlaybackSource, date: Date)] = [:]
     private var probeResults: [String: Bool] = [:]
-    private var attemptStartedAt: Date?
+    private enum AttemptContext {
+        @TaskLocal static var startedAt: Date?
+    }
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 20
@@ -1344,9 +1656,22 @@ actor YouTubeTrailerResolver {
         forceRefreshConfig: Bool,
         preferIntegratedStream: Bool = false
     ) async -> TrailerPlaybackSource? {
+        await AttemptContext.$startedAt.withValue(Date()) {
+            await resolveInnertubeAttempt(
+                videoId: videoId,
+                forceRefreshConfig: forceRefreshConfig,
+                preferIntegratedStream: preferIntegratedStream
+            )
+        }
+    }
+
+    private func resolveInnertubeAttempt(
+        videoId: String,
+        forceRefreshConfig: Bool,
+        preferIntegratedStream: Bool
+    ) async -> TrailerPlaybackSource? {
         guard !Task.isCancelled else { return nil }
         probeResults.removeAll(keepingCapacity: true)
-        attemptStartedAt = Date()
         guard let config = try? await watchConfig(forceRefresh: forceRefreshConfig),
               canContinueAttempt else { return nil }
         var hlsCandidates: [HlsCandidate] = []
@@ -1958,7 +2283,7 @@ actor YouTubeTrailerResolver {
     }
 
     private var attemptBudgetExceeded: Bool {
-        guard let attemptStartedAt else { return false }
+        guard let attemptStartedAt = AttemptContext.startedAt else { return false }
         return Date().timeIntervalSince(attemptStartedAt) >= Self.attemptBudget
     }
 
@@ -1968,7 +2293,7 @@ actor YouTubeTrailerResolver {
 
     private func requestTimeout(cap: TimeInterval) -> TimeInterval? {
         guard canContinueAttempt else { return nil }
-        guard let attemptStartedAt else { return cap }
+        guard let attemptStartedAt = AttemptContext.startedAt else { return cap }
         let remaining = Self.attemptBudget - Date().timeIntervalSince(attemptStartedAt)
         guard remaining > 0 else { return nil }
         return min(cap, remaining)
@@ -2590,23 +2915,44 @@ enum StreamPickerListBuilder {
         by option: StreamSortOption,
         preserveAddonStreams: Bool = false
     ) -> [NuvioStream] {
+        // Parse sort facts once per stream, not on every O(n log n) comparison.
+        // Keep mode-specific work out of modes that do not use it.
+        let needsResolution = !preserveAddonStreams || option == .quality || option == .default
+        let needsHardwareCheck = option == .quality && !AppleTVCapability.current.supportsAV1HardwareDecode
+        let entries = streams.enumerated().map { entry in
+            let stream = entry.element
+            let resolutionValue = needsResolution ? resolution(for: stream) : 0
+            let isBad = (!preserveAddonStreams || option == .default)
+                && (SmartPlaybackSelector.isLowQualityOrTicketStream(stream) || resolutionValue == 0)
+            return (
+                offset: entry.offset,
+                element: stream,
+                resolution: resolutionValue,
+                isBad: isBad,
+                quality: option == .quality ? streamQuality(for: stream) : DebridStreamQuality.unknown,
+                size: option == .quality || option == .size ? sizeBytes(for: stream) : 0,
+                hardwareAccelerated: needsHardwareCheck && resolutionValue >= 2160
+                    ? StreamQualityTags.parse(stream: stream).isHardwareAccelerated() : false
+            )
+        }
+
         switch option {
         case .default:
-            return streams.enumerated().sorted {
-                let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || resolution(for: $0.element) == 0
-                let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || resolution(for: $1.element) == 0
+            return entries.sorted {
+                let bad0 = $0.isBad
+                let bad1 = $1.isBad
                 if bad0 != bad1 {
                     return !bad0 && bad1
                 }
                 return $0.offset < $1.offset
             }.map(\.element)
         case .quality:
-            return streams.enumerated().sorted {
-                let res0 = resolution(for: $0.element)
-                let res1 = resolution(for: $1.element)
+            return entries.sorted {
+                let res0 = $0.resolution
+                let res1 = $1.resolution
                 if !preserveAddonStreams {
-                    let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || res0 == 0
-                    let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || res1 == 0
+                    let bad0 = $0.isBad
+                    let bad1 = $1.isBad
                     if bad0 != bad1 {
                         return !bad0 && bad1
                     }
@@ -2616,21 +2962,21 @@ enum StreamPickerListBuilder {
                     return res0 > res1
                 }
                 // Tier 2: Release Quality DESC (Android DebridStreamSortKey.QUALITY)
-                let q0 = streamQuality(for: $0.element)
-                let q1 = streamQuality(for: $1.element)
+                let q0 = $0.quality
+                let q1 = $1.quality
                 if q0 != q1 {
                     return q0 > q1
                 }
                 // Tier 3: Size bytes DESC (Android DebridStreamSortKey.SIZE)
-                let s0 = sizeBytes(for: $0.element)
-                let s1 = sizeBytes(for: $1.element)
+                let s0 = $0.size
+                let s1 = $1.size
                 if s0 != s1 {
                     return s0 > s1
                 }
                 // Tier 4: Hardware decode capability check (Apple TV AV1 decode at 4K)
-                if res0 >= 2160, !AppleTVCapability.current.supportsAV1HardwareDecode {
-                    let hw0 = StreamQualityTags.parse(stream: $0.element).isHardwareAccelerated()
-                    let hw1 = StreamQualityTags.parse(stream: $1.element).isHardwareAccelerated()
+                if res0 >= 2160, needsHardwareCheck {
+                    let hw0 = $0.hardwareAccelerated
+                    let hw1 = $1.hardwareAccelerated
                     if hw0 != hw1 {
                         return hw0 && !hw1
                     }
@@ -2639,30 +2985,26 @@ enum StreamPickerListBuilder {
                 return $0.offset < $1.offset
             }.map(\.element)
         case .size:
-            return streams.enumerated().sorted {
-                let res0 = resolution(for: $0.element)
-                let res1 = resolution(for: $1.element)
+            return entries.sorted {
                 if !preserveAddonStreams {
-                    let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || res0 == 0
-                    let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || res1 == 0
+                    let bad0 = $0.isBad
+                    let bad1 = $1.isBad
                     if bad0 != bad1 {
                         return !bad0 && bad1
                     }
                 }
-                let s0 = sizeBytes(for: $0.element)
-                let s1 = sizeBytes(for: $1.element)
+                let s0 = $0.size
+                let s1 = $1.size
                 if s0 != s1 {
                     return s0 > s1
                 }
                 return $0.offset < $1.offset
             }.map(\.element)
         case .name:
-            return streams.enumerated().sorted {
-                let res0 = resolution(for: $0.element)
-                let res1 = resolution(for: $1.element)
+            return entries.sorted {
                 if !preserveAddonStreams {
-                    let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || res0 == 0
-                    let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || res1 == 0
+                    let bad0 = $0.isBad
+                    let bad1 = $1.isBad
                     if bad0 != bad1 {
                         return !bad0 && bad1
                     }
@@ -2757,7 +3099,6 @@ struct TvDetailsContent: View {
     var onOpenProduction: ((MetaCompany) -> Void)? = nil
     var onOpenPerson: ((TmdbPersonMetadata) -> Void)? = nil
     var onCommentSelect: ((TraktCommentReview) -> Void)? = nil
-    var onAudioLanguageClick: (() -> Void)? = nil
     let onBack: () -> Void
 
     @FocusState private var actionFocus: DetailsActionFocus?
@@ -2795,7 +3136,6 @@ struct TvDetailsContent: View {
     /// without this the episode strip keeps drawing the bar it rendered with —
     /// marking an episode watched cleared the stores but nothing re-read them.
     @State private var progressRevision = 0
-    @State private var audioLanguageRevision = 0
     @State private var scrollOffset: CGFloat = 0
     @State private var hasAppearedBefore = false
     @State private var reentryProgressRefreshPending = false
@@ -3027,11 +3367,6 @@ struct TvDetailsContent: View {
                 stopBackgroundTrailer(manual: false)
                 onRateClick?()
             } : nil,
-            onAudioLanguageClick: onAudioLanguageClick != nil ? {
-                stopBackgroundTrailer(manual: false)
-                onAudioLanguageClick?()
-            } : nil,
-            audioLanguageLabel: audioLanguageRevision >= 0 ? ShowAudioLanguageStore.getLanguage(for: meta.id) : nil,
             onTrailerClick: {
                 presentFullscreenTrailer()
             },
@@ -3535,9 +3870,6 @@ struct TvDetailsContent: View {
             ) { _ in
                 progressRevision &+= 1
             }
-            .onReceive(NotificationCenter.default.publisher(for: .showAudioLanguageDidChange).receive(on: RunLoop.main)) { _ in
-                audioLanguageRevision &+= 1
-            }
             #if os(tvOS)
             .onChange(of: initialPlayRequestID, initial: true) { _, requestID in
                 guard let requestID,
@@ -3847,7 +4179,7 @@ private struct TvDetailsLogo: View {
 /// (tvOS doesn't auto-focus the primary button when the details content swaps in
 /// after the async load — see `TvDetailsContent`).
 private enum DetailsActionFocus: Hashable {
-    case play, watchlist, watched, rate, audioLanguage, trailer
+    case play, watchlist, watched, rate, trailer
 }
 
 private enum DetailsCastHeaderFocus: Hashable {
@@ -3866,8 +4198,6 @@ private struct TvDetailsActionRow: View {
     var mdbListUserRating: Int? = nil
     var showMdbListRating: Bool = false
     var onRateClick: (() -> Void)? = nil
-    var onAudioLanguageClick: (() -> Void)? = nil
-    var audioLanguageLabel: String? = nil
     let onTrailerClick: () -> Void
     var onBack: (() -> Void)? = nil
     var focus: FocusState<DetailsActionFocus?>.Binding
@@ -3944,20 +4274,6 @@ private struct TvDetailsActionRow: View {
 
             TvDetailsActionButton(
                 title: nil,
-                systemName: "speaker.wave.2.fill",
-                accessibilityLabel: audioLanguageAccessibilityLabel,
-                accessibilityHint: L10n.string("details_audio_language_hint", fallback: "Change audio playback language for this show"),
-                isPrimary: false,
-                focus: focus,
-                tag: .audioLanguage,
-                action: { onAudioLanguageClick?() },
-                onFocus: onFocus,
-                onBack: onBack
-            )
-            .disabled(entryLocked)
-
-            TvDetailsActionButton(
-                title: nil,
                 systemName: "play.rectangle.fill",
                 accessibilityLabel: L10n.string("details_trailer", fallback: "Trailer"),
                 accessibilityHint: L10n.string("details_trailer_hint", fallback: "Plays the trailer when available"),
@@ -3974,11 +4290,6 @@ private struct TvDetailsActionRow: View {
         .onExitCommand {
             onBack?()
         }
-    }
-
-    private var audioLanguageAccessibilityLabel: String {
-        let lang = audioLanguageLabel ?? L10n.string("details_audio_language_default", fallback: "Default")
-        return "\(L10n.string("details_audio_language", fallback: "Audio Language")): \(lang)"
     }
 }
 
@@ -4638,6 +4949,7 @@ private struct TvDetailsRelatedRow: View {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     PosterCard(
                         meta: item.asMeta,
+                        customPosterScreen: .details,
                         onFocus: { _ in
                             if scrollIndex != index { scrollIndex = index }
                             onFocus()

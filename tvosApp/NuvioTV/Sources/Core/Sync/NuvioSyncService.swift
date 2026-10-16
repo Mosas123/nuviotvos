@@ -7,6 +7,7 @@
 //
 
 import Combine
+import CoreFoundation
 import Foundation
 import UIKit
 
@@ -28,12 +29,72 @@ enum NuvioDeviceRegistrationCapability {
     }
 }
 
+/// Lossless snapshots for UserDefaults settings observed by the sync manager.
+/// UserDefaults accepts property-list values, including Data whose description
+/// may omit bytes from the middle of a large value.
+enum ProfileSettingsSnapshot {
+    static func capture(for profileId: String?) -> [String: Any] {
+        let defaults = profileId.map { ProfileSettings.store(for: $0) } ?? ProfileSettings.current
+        var snapshot: [String: Any] = [:]
+        for key in SettingsKey.all {
+            guard key != SettingsKey.accountSyncWatchState,
+                  !SettingsKey.deviceLocal.contains(key),
+                  key != SettingsKey.streamBadgeRules else { continue }
+            if let value = defaults.object(forKey: key) {
+                snapshot[key] = value
+            }
+        }
+        return snapshot
+    }
+
+    static func areEqual(_ lhs: [String: Any], _ rhs: [String: Any]) -> Bool {
+        guard lhs.keys.count == rhs.keys.count else { return false }
+        return lhs.allSatisfy { key, value in
+            guard let other = rhs[key] else { return false }
+            return valuesAreEqual(value, other)
+        }
+    }
+
+    private static func valuesAreEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+        if let left = lhs as? Data {
+            guard let right = rhs as? Data else { return false }
+            return left == right
+        }
+        if let left = lhs as? [Any] {
+            guard let right = rhs as? [Any], left.count == right.count else { return false }
+            return zip(left, right).allSatisfy { valuesAreEqual($0.0, $0.1) }
+        }
+        if let left = lhs as? [String: Any] {
+            guard let right = rhs as? [String: Any] else { return false }
+            return areEqual(left, right)
+        }
+        if let left = lhs as? String {
+            guard let right = rhs as? String else { return false }
+            return left == right
+        }
+        if let left = lhs as? Date {
+            guard let right = rhs as? Date else { return false }
+            return left == right
+        }
+        if let left = lhs as? NSNumber, let right = rhs as? NSNumber {
+            let leftIsBoolean = CFGetTypeID(left) == CFBooleanGetTypeID()
+            let rightIsBoolean = CFGetTypeID(right) == CFBooleanGetTypeID()
+            return leftIsBoolean == rightIsBoolean && left == right
+        }
+        if let left = lhs as? NSObject, let right = rhs as? NSObject {
+            return type(of: left) == type(of: right) && left.isEqual(right)
+        }
+        return false
+    }
+}
+
 @MainActor
 final class NuvioSyncManager: ObservableObject {
     /// Posted by the Settings add-on list after an order/enabled-state change.
     /// The object is `[StreamAddonPreference]`, with `[String]` accepted for the
-    /// old reorder-only path.
+    /// old reorder-only path. Producers must include the profile that was edited.
     nonisolated static let addonOrderChangedNotification = Notification.Name("nuvio.tv.addons.orderChanged")
+    nonisolated static let addonEditedProfileIdUserInfoKey = "profileId"
     /// Posted after an account pull has applied every profile-scoped Home input.
     /// Revision counters publish individual changes, while this completion
     /// signal guarantees one final catalog rebuild on slower physical devices.
@@ -102,7 +163,9 @@ final class NuvioSyncManager: ObservableObject {
     private var pushTask: Task<Void, Never>?
     private var pushTaskDeadline: Date?
     private var homeCatalogPushTask: Task<Void, Never>?
+    private var profileEditSyncEpoch: UInt = 0
     private var profileSelectionRefreshTask: Task<Void, Never>?
+    private var profileSelectionRefreshGeneration: UInt = 0
     var completedInitialPullKeys: Set<String> = []
     /// When each account+profile last finished a pull, so a screen re-entry can
     /// tell "the user came back" from "the data is old".
@@ -138,6 +201,11 @@ final class NuvioSyncManager: ObservableObject {
     /// a (potentially long) remote-data pull is in progress.
     private var isApplyingRemoteProfiles = false
     private var didAttach = false
+    private var lastKnownSettingsSnapshot: [String: Any] = [:]
+
+    private func snapshotSettingsKeys(for profileId: String?) -> [String: Any] {
+        ProfileSettingsSnapshot.capture(for: profileId)
+    }
 
     deinit {
         pullTask?.cancel()
@@ -223,6 +291,9 @@ final class NuvioSyncManager: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.isApplyingRemote else { return }
+                let currentSnapshot = self.snapshotSettingsKeys(for: self.observedActiveProfileId)
+                guard !ProfileSettingsSnapshot.areEqual(currentSnapshot, self.lastKnownSettingsSnapshot) else { return }
+                self.lastKnownSettingsSnapshot = currentSnapshot
                 self.schedulePush(scope: .settings)
             }
         })
@@ -231,6 +302,7 @@ final class NuvioSyncManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            guard let profileId = notification.userInfo?[Self.addonEditedProfileIdUserInfoKey] as? String else { return }
             let preferences: [StreamAddonPreference]
             if let postedPreferences = notification.object as? [StreamAddonPreference] {
                 preferences = postedPreferences
@@ -239,9 +311,11 @@ final class NuvioSyncManager: ObservableObject {
                 preferences = urls.map { StreamAddonPreference(url: $0, enabled: true) }
             }
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self,
+                      self.profileViewModel?.activeProfile?.id == profileId,
+                      ProfileSettings.activeProfileID == profileId else { return }
                 self.homeCatalogRevision &+= 1
-                self.pushAddonPreferences(preferences)
+                self.pushAddonPreferences(preferences, originatingProfileId: profileId)
             }
         })
         observers.append(center.addObserver(
@@ -260,7 +334,10 @@ final class NuvioSyncManager: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             let raw = notification.object as? [[String: Any]] ?? []
-            Task { @MainActor in self?.pushCollectionsEdit(raw) }
+            guard let profileId = notification.userInfo?[CollectionsStore.editedProfileIdUserInfoKey] as? String else { return }
+            Task { @MainActor in
+                self?.pushCollectionsEdit(raw, originatingProfileId: profileId)
+            }
         })
 
         // `AuthManager` restores its persisted session synchronously in init.
@@ -269,6 +346,7 @@ final class NuvioSyncManager: ObservableObject {
         // snapshots now so a restored account cannot miss its only startup
         // pull and leave Home showing local defaults until auth changes again.
         observedActiveProfileId = profileViewModel.activeProfile?.id
+        lastKnownSettingsSnapshot = snapshotSettingsKeys(for: observedActiveProfileId)
         authStateChanged(authManager.authState)
     }
 
@@ -353,6 +431,9 @@ final class NuvioSyncManager: ObservableObject {
                 ContinueWatchingBuilder.cancelScheduledRebuild()
                 lastDeviceRegistrationAt = nil
                 unsupportedDeviceRegistrationKey = nil
+                profileSelectionRefreshTask?.cancel()
+                profileSelectionRefreshGeneration &+= 1
+                profileSelectionRefreshTask = nil
             }
             Self.accountSyncDiagnostic = "scheduled"
             if AuthConfig.isConfigured {
@@ -363,6 +444,7 @@ final class NuvioSyncManager: ObservableObject {
             // starts the missing pull without cancelling any valid same-user work.
             schedulePull(force: !isSameAccount)
         case .signedOut:
+            profileEditSyncEpoch &+= 1
             Self.accountSyncDiagnostic = "signed out"
             ContinueWatchingBuilder.cancelScheduledRebuild()
             pullGeneration &+= 1
@@ -374,6 +456,7 @@ final class NuvioSyncManager: ObservableObject {
             isPushExecuting = false
             homeCatalogPushTask?.cancel()
             profileSelectionRefreshTask?.cancel()
+            profileSelectionRefreshGeneration &+= 1
             profileSelectionRefreshTask = nil
             completedInitialPullKeys.removeAll()
             lastCompletedPullAt.removeAll()
@@ -459,6 +542,7 @@ final class NuvioSyncManager: ObservableObject {
         let profileId = profile?.id
         guard profileId != observedActiveProfileId else { return }
         observedActiveProfileId = profileId
+        lastKnownSettingsSnapshot = snapshotSettingsKeys(for: profileId)
         guard profile != nil, !isApplyingRemoteProfiles else { return }
         ContinueWatchingBuilder.cancelScheduledRebuild()
         // A delayed snapshot captured the previous profile and must not resume
@@ -571,16 +655,24 @@ final class NuvioSyncManager: ObservableObject {
             return
         }
 
+        let editEpoch = profileEditSyncEpoch
         Task { @MainActor [weak self] in
             guard let self,
                   let authManager = self.authManager,
                   let session = await authManager.validSessionForSync(),
-                  authManager.isAuthenticated else { return }
+                  authManager.isAuthenticated,
+                  self.profileEditSyncEpoch == editEpoch,
+                  self.currentSyncKey() == syncKey else { return }
             do {
-                try self.ensureStillSyncing()
+                try self.ensureStillSyncing(accountId: session.userId)
                 try await self.client.pushProfiles(session: session, profiles: profiles)
-                try self.ensureStillSyncing()
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
+                try self.ensureStillSyncing(accountId: session.userId)
                 let remoteProfiles = try await self.client.pullProfiles(session: session)
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
+                try self.ensureStillSyncing(accountId: session.userId)
                 guard !remoteProfiles.isEmpty else {
                     throw AuthError(message: "The server did not return the saved profiles.")
                 }
@@ -608,9 +700,13 @@ final class NuvioSyncManager: ObservableObject {
                 self.profileSyncError = nil
                 print("Nuvio sync saved and confirmed \(remoteProfiles.count) profile(s).")
             } catch is CancellationError {
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
                 self.isApplyingRemoteProfiles = false
                 self.isApplyingRemote = false
             } catch {
+                guard self.profileEditSyncEpoch == editEpoch,
+                      self.currentSyncKey() == syncKey else { return }
                 self.isApplyingRemoteProfiles = false
                 self.isApplyingRemote = false
                 self.profileSyncError = "Couldn't save profiles: \(error.localizedDescription)"
@@ -652,21 +748,26 @@ final class NuvioSyncManager: ObservableObject {
 
         profileSyncError = nil
         isPullingAccountProfiles = true
+        profileSelectionRefreshGeneration &+= 1
+        let generation = profileSelectionRefreshGeneration
         profileSelectionRefreshTask = Task(priority: .utility) { @MainActor [weak self] in
-            await self?.refreshProfilesForSelection()
+            await self?.refreshProfilesForSelection(generation: generation)
         }
     }
 
-    private func refreshProfilesForSelection() async {
+    private func refreshProfilesForSelection(generation: UInt) async {
         var shouldPullFullAccount = false
         defer {
-            isPullingAccountProfiles = false
-            profileSelectionRefreshTask = nil
-            if shouldPullFullAccount {
-                retryInitialAccountPull()
+            if generation == profileSelectionRefreshGeneration {
+                isPullingAccountProfiles = false
+                profileSelectionRefreshTask = nil
+                if shouldPullFullAccount {
+                    retryInitialAccountPull()
+                }
             }
         }
         guard let authManager, let profileViewModel else { return }
+        guard case let .fullAccount(recoveryAccountId, _) = authManager.authState else { return }
 
         var lastError: Error?
         let delays: [UInt64] = [0, 1, 2, 4]
@@ -678,14 +779,17 @@ final class NuvioSyncManager: ObservableObject {
                     return
                 }
             }
-            guard !Task.isCancelled, authManager.isAuthenticated else { return }
+            guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
 
             guard let session = await authManager.validSessionForSync(validateWithServer: true) else {
                 lastError = AuthError(message: "Your account session could not be restored.")
                 continue
             }
+            guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId),
+                  session.userId == recoveryAccountId else { return }
             do {
                 var remoteProfiles = try await client.pullProfiles(session: session)
+                guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                 if remoteProfiles.isEmpty {
                     if attempt == 0 {
                         lastError = nil
@@ -693,7 +797,9 @@ final class NuvioSyncManager: ObservableObject {
                     }
                     let initialProfiles = defaultInitialProfiles()
                     try await client.pushProfiles(session: session, profiles: initialProfiles)
+                    guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                     remoteProfiles = try await client.pullProfiles(session: session)
+                    guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                     guard !remoteProfiles.isEmpty else {
                         lastError = nil
                         continue
@@ -721,15 +827,18 @@ final class NuvioSyncManager: ObservableObject {
                 print("Nuvio profile picker refreshed \(remoteProfiles.count) account profile(s).")
                 return
             } catch {
+                guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                 lastError = error
                 // Match the Android client: if the first authenticated request
                 // is rejected, refresh the JWT before retrying the RPC.
                 if attempt == 0 {
                     _ = await authManager.refreshSessionForSync()
+                    guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
                 }
             }
         }
 
+        guard profileRecoveryIsCurrent(generation: generation, accountId: recoveryAccountId) else { return }
         isApplyingRemoteProfiles = false
         isApplyingRemote = false
         if let lastError {
@@ -737,6 +846,11 @@ final class NuvioSyncManager: ObservableObject {
         } else {
             profileSyncError = "No synced profiles were returned for this account."
         }
+    }
+
+    private func profileRecoveryIsCurrent(generation: UInt, accountId: String) -> Bool {
+        guard generation == profileSelectionRefreshGeneration else { return false }
+        return (try? ensureStillSyncing(accountId: accountId)) != nil
     }
 
     private func schedulePull(force: Bool = false) {
@@ -1508,6 +1622,7 @@ final class NuvioSyncManager: ObservableObject {
                 print("Nuvio watch progress sync failed: \(error.localizedDescription)")
             }
             isApplyingRemote = false
+            self.lastKnownSettingsSnapshot = self.snapshotSettingsKeys(for: activeProfile.id)
 
             // Keep a successful progress snapshot's derived row rebuild even
             // when a later retry fails; a subsequent success coalesces it.
@@ -1664,11 +1779,15 @@ final class NuvioSyncManager: ObservableObject {
     /// wipe collections that only exist on Android (created after the last
     /// full pull, or never decoded locally). Intentional deletes of ids that
     /// were present in the last pull still go through.
-    private func pushCollectionsEdit(_ raw: [[String: Any]]) {
+    private func pushCollectionsEdit(_ raw: [[String: Any]], originatingProfileId: String) {
         guard AuthConfig.isConfigured else { return }
         guard let authManager, authManager.isAuthenticated else { return }
         guard let profileViewModel,
               let activeProfile = profileViewModel.activeProfile ?? profileViewModel.profiles.first else { return }
+
+        guard activeProfile.id == originatingProfileId,
+              CollectionsStore.activeProfileId == originatingProfileId,
+              let editSyncKey = currentSyncKey() else { return }
 
         let remoteProfileId = ProfileSyncIndexStore.remoteId(
             for: activeProfile,
@@ -1679,12 +1798,16 @@ final class NuvioSyncManager: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self, let session = await authManager.validSessionForSync() else { return }
             do {
+                guard self.currentSyncKey() == editSyncKey else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 var payload = raw
                 if let remoteBlob = try await self.client.pullCollections(
                     session: session,
                     remoteProfileId: remoteProfileId
                 ),
                    let remoteRows = Self.collectionsArray(from: remoteBlob) {
+                    guard self.currentSyncKey() == editSyncKey else { return }
+                    try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                     payload = CollectionsStore.mergeLocalEdit(
                         local: raw,
                         remote: remoteRows,
@@ -1692,11 +1815,15 @@ final class NuvioSyncManager: ObservableObject {
                     )
                 }
 
+                guard self.currentSyncKey() == editSyncKey else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 try await self.client.pushCollections(
                     session: session,
                     remoteProfileId: remoteProfileId,
                     rawCollections: payload
                 )
+                guard self.currentSyncKey() == editSyncKey else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 // Keep local cache aligned with what we uploaded (includes
                 // remote-only rows we preserved).
                 if let data = try? JSONSerialization.data(withJSONObject: payload) {
@@ -1742,6 +1869,7 @@ final class NuvioSyncManager: ObservableObject {
                     remoteProfileId: remoteProfileId,
                     localProfileId: activeProfile.id
                 )
+                self.lastKnownSettingsSnapshot = self.snapshotSettingsKeys(for: activeProfile.id)
             }
 
             guard Self.watchStateSyncEnabled(for: activeProfile.id) else { return }
@@ -1809,12 +1937,15 @@ final class NuvioSyncManager: ObservableObject {
     /// Pushes the complete local add-on list to the account. The public RPC is
     /// full-replace, so omitted rows (including an entirely empty list) must be
     /// allowed to delete their remote counterparts.
-    private func pushAddonPreferences(_ preferences: [StreamAddonPreference]) {
+    private func pushAddonPreferences(_ preferences: [StreamAddonPreference], originatingProfileId: String) {
         let normalizedPreferences = Self.normalizedAddonPreferences(preferences)
         guard AuthConfig.isConfigured else { return }
         guard let authManager, authManager.isAuthenticated else { return }
         guard let profileViewModel,
               let activeProfile = profileViewModel.activeProfile ?? profileViewModel.profiles.first else { return }
+        guard activeProfile.id == originatingProfileId,
+              ProfileSettings.activeProfileID == originatingProfileId,
+              let editSyncKey = currentSyncKey() else { return }
 
         let remoteProfileId = ProfileSyncIndexStore.remoteId(
             for: activeProfile,
@@ -1844,6 +1975,9 @@ final class NuvioSyncManager: ObservableObject {
             }
 
             do {
+                guard self.currentSyncKey() == editSyncKey,
+                      ProfileSettings.activeProfileID == originatingProfileId else { return }
+                try self.ensureStillSyncing(profileId: originatingProfileId, accountId: session.userId)
                 try await self.client.pushAddons(
                     session: session,
                     remoteProfileId: remoteProfileId,
@@ -2075,6 +2209,59 @@ private enum SyncClientIdentity {
         return value.allSatisfy { character in
             character.isLetter || character.isNumber || character == "-" || character == "_"
         }
+    }
+}
+
+enum CustomPosterSettingsSyncMapper {
+    static let featureKey = "layout_settings"
+    static let patternKey = "custom_poster_url_pattern"
+    static let enabledScreensKey = "custom_poster_enabled_screens"
+
+    struct Values: Equatable {
+        var pattern: String?
+        var enabledScreens: String?
+    }
+
+    static func export(
+        pattern: String,
+        enabledScreens: String?,
+        existing: [String: Any]?
+    ) -> [String: Any] {
+        var feature = existing ?? [:]
+        feature[patternKey] = ["type": "string", "value": pattern]
+        if let enabledScreens {
+            let canonicalScreens = enabledScreens == "all"
+                ? CustomPosterScreen.storageValue(for: Set(CustomPosterScreen.allCases))
+                : enabledScreens
+            feature[enabledScreensKey] = ["type": "string", "value": canonicalScreens]
+        } else {
+            feature.removeValue(forKey: enabledScreensKey)
+        }
+        return feature
+    }
+
+    static func importing(_ remote: Any?, preserving current: Values) -> Values {
+        guard let feature = remote as? [String: Any] else { return current }
+        let remotePattern = stringValue(feature[patternKey])
+        let remoteScreens = stringValue(feature[enabledScreensKey])
+        guard remotePattern != nil || remoteScreens != nil else { return current }
+
+        var result = current
+        if let remotePattern { result.pattern = remotePattern }
+        if let remoteScreens {
+            result.enabledScreens = remoteScreens
+        } else {
+            result.enabledScreens = CustomPosterScreen.storageValue(for: Set(CustomPosterScreen.allCases))
+        }
+        return result
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        guard let encoded = value as? [String: Any],
+              encoded["type"] as? String == "string" else {
+            return nil
+        }
+        return encoded["value"] as? String
     }
 }
 
@@ -2679,7 +2866,7 @@ enum ThemeSettingsSyncMapper {
     }
 }
 
-fileprivate final class NuvioAPIClient {
+final class NuvioAPIClient {
     private static let pullPageSize = 500
     private static let settingsPlatform = "tv"
     private static let mobileSettingsPlatform = "mobile"
@@ -2691,6 +2878,7 @@ fileprivate final class NuvioAPIClient {
     private static let tmdbSettingsFeature = "tmdb_settings"
     /// Shared with Android TV's PosterCardStyleRepository.
     private static let posterCardStyleSettingsFeature = "poster_card_style_settings_payload"
+    private static let layoutSettingsFeature = CustomPosterSettingsSyncMapper.featureKey
     /// Shared with Android TV's PlayerSettingsStorage.
     private static let playerSettingsFeature = "player_settings"
     /// Shared with Android TV's ContinueWatchingPreferencesRepository.
@@ -2700,7 +2888,11 @@ fileprivate final class NuvioAPIClient {
     /// Shared with Android TV's ThemeSettingsStorage.
     private static let themeSettingsFeature = "theme_settings"
 
-    private let session: URLSession = .shared
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
     private static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -2744,7 +2936,7 @@ fileprivate final class NuvioAPIClient {
         )
     }
 
-    func pullProfiles(session: AuthSession) async throws -> [RemoteProfile] {
+    fileprivate func pullProfiles(session: AuthSession) async throws -> [RemoteProfile] {
         let rows: LossyRows<RemoteProfile> = try await rpcRows(
             "sync_pull_profiles",
             session: session,
@@ -2776,7 +2968,7 @@ fileprivate final class NuvioAPIClient {
         }
     }
 
-    func verifyProfilePin(
+    fileprivate func verifyProfilePin(
         session: AuthSession,
         remoteProfileId: Int,
         pin: String
@@ -2823,7 +3015,7 @@ fileprivate final class NuvioAPIClient {
         try await rpcVoid("clear_profile_pin", session: session, params: params)
     }
 
-    func pullAddons(session: AuthSession, remoteProfileId: Int) async throws -> [RemoteAddon] {
+    fileprivate func pullAddons(session: AuthSession, remoteProfileId: Int) async throws -> [RemoteAddon] {
         let rows: LossyRows<RemoteAddon> = try await rest(
             "addons?select=%2A&profile_id=eq.\(remoteProfileId)&order=sort_order",
             session: session
@@ -2862,7 +3054,7 @@ fileprivate final class NuvioAPIClient {
         return try JSONSerialization.data(withJSONObject: blob)
     }
 
-    func applyAddons(_ addons: [RemoteAddon], localProfileId: String) -> (appliedCount: Int, didChange: Bool) {
+    fileprivate func applyAddons(_ addons: [RemoteAddon], localProfileId: String) -> (appliedCount: Int, didChange: Bool) {
         let preferences = addons
             .sorted { $0.sortOrder < $1.sortOrder }
             .compactMap { addon -> StreamAddonPreference? in
@@ -3187,6 +3379,7 @@ fileprivate final class NuvioAPIClient {
         let mobileFeatures = mobileSettingsJSON?["features"] as? [String: Any] ?? [:]
         let androidTraktFeature = features[ContinueWatchingSyncMapper.androidTraktFeatureKey]
         let tvosFeature = features[Self.settingsFeature] as? [String: Any]
+        let layoutSettingsFeature = features[Self.layoutSettingsFeature]
         let debridFeature = features[Self.debridSettingsFeature] as? [String: Any]
         let tmdbFeature = features[Self.tmdbSettingsFeature] as? [String: Any]
         // Prefer mobile: Android TV writes there, while tvOS also mirrors the
@@ -3204,13 +3397,14 @@ fileprivate final class NuvioAPIClient {
         let themeFeature = (mobileFeatures[Self.themeSettingsFeature] as? [String: Any])
             ?? (features[Self.themeSettingsFeature] as? [String: Any])
 
-        guard tvosFeature != nil || debridFeature != nil || tmdbFeature != nil || streamBadgeFeature != nil || posterCardStyleFeature != nil || playerFeature != nil || continueWatchingFeature != nil || androidTraktFeature != nil || mdbListFeature != nil || themeFeature != nil else {
+        guard tvosFeature != nil || layoutSettingsFeature != nil || debridFeature != nil || tmdbFeature != nil || streamBadgeFeature != nil || posterCardStyleFeature != nil || playerFeature != nil || continueWatchingFeature != nil || androidTraktFeature != nil || mdbListFeature != nil || themeFeature != nil else {
             return false
         }
 
         if let tvosFeature {
             importSettings(tvosFeature, localProfileId: localProfileId)
         }
+        importCustomPosterLayoutSettings(layoutSettingsFeature, localProfileId: localProfileId)
         // Android TV stores debrid keys in a sibling feature on the same "tv" blob.
         importDebridSettings(debridFeature, localProfileId: localProfileId)
         importTmdbSettings(tmdbFeature, localProfileId: localProfileId)
@@ -3249,9 +3443,8 @@ fileprivate final class NuvioAPIClient {
         remoteProfileId: Int,
         localProfileId: String
     ) async throws {
-        // Refresh both independent blobs before replacing either. The tv fetch
-        // is required so Android Trakt preferences are never overwritten from
-        // a stale cache; mobile remains best-effort for its mirrored features.
+        // Refresh both independent blobs before replacing either. Each upload
+        // requires its own successful fresh read so unknown remote fields survive.
         async let latestTVSettingsRequest = pullProfileSettingsJSON(
             session: session,
             remoteProfileId: remoteProfileId,
@@ -3262,12 +3455,34 @@ fileprivate final class NuvioAPIClient {
             remoteProfileId: remoteProfileId,
             platform: Self.mobileSettingsPlatform
         )
-        let freshTVSettingsJSON = try await latestTVSettingsRequest
-        var latestMobileSettingsJSON = lastPulledMobileProfileSettingsJSON ?? [:]
-        if let fetched = try? await latestMobileSettingsRequest {
-            latestMobileSettingsJSON = fetched
-            lastPulledMobileProfileSettingsJSON = latestMobileSettingsJSON
+
+        var freshTVSettingsJSON: [String: Any]?
+        var tvError: Error?
+        do {
+            freshTVSettingsJSON = try await latestTVSettingsRequest
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            freshTVSettingsJSON = nil
+            tvError = error
         }
+
+        var freshMobileSettingsJSON: [String: Any]?
+        var mobileError: Error?
+        do {
+            freshMobileSettingsJSON = try await latestMobileSettingsRequest
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            freshMobileSettingsJSON = nil
+            mobileError = error
+        }
+
+        // Cached mobile data can help merge a fresh TV document, but it is not
+        // authority to replace the independent mobile document.
+        let latestMobileSettingsJSON = freshMobileSettingsJSON
+            ?? lastPulledMobileProfileSettingsJSON
+            ?? [:]
         let freshTVFeatures = freshTVSettingsJSON?["features"] as? [String: Any] ?? [:]
         let freshAndroidTraktFeature = freshTVFeatures[ContinueWatchingSyncMapper.androidTraktFeatureKey]
         let freshAndroidDismissals = ContinueWatchingSyncMapper.androidDismissalKeys(
@@ -3282,6 +3497,13 @@ fileprivate final class NuvioAPIClient {
         var settingsJSON = freshTVSettingsJSON ?? [:]
         var features = settingsJSON["features"] as? [String: Any] ?? [:]
         features[Self.settingsFeature] = exportSettings(localProfileId: localProfileId)
+        let profileDefaults = ProfileSettings.store(for: localProfileId)
+        let existingLayoutSettings = features[Self.layoutSettingsFeature] as? [String: Any]
+        features[Self.layoutSettingsFeature] = CustomPosterSettingsSyncMapper.export(
+            pattern: profileDefaults.string(forKey: SettingsKey.customPosterURLPattern) ?? "",
+            enabledScreens: profileDefaults.object(forKey: SettingsKey.customPosterEnabledScreens) as? String,
+            existing: existingLayoutSettings
+        )
         features[Self.streamBadgeSettingsFeature] = exportStreamBadgeSettings(localProfileId: localProfileId)
         let existingTraktSettings = features[ContinueWatchingSyncMapper.androidTraktFeatureKey] as? [String: Any]
         features[ContinueWatchingSyncMapper.androidTraktFeatureKey] =
@@ -3301,7 +3523,7 @@ fileprivate final class NuvioAPIClient {
             existing: existingTmdb
         )
         let existingPosterStyle = (features[Self.posterCardStyleSettingsFeature] as? String)
-            ?? (lastPulledMobileProfileSettingsJSON?["features"] as? [String: Any])?[Self.posterCardStyleSettingsFeature] as? String
+            ?? (latestMobileSettingsJSON["features"] as? [String: Any])?[Self.posterCardStyleSettingsFeature] as? String
         let posterStylePayload = exportPosterCardStyleSettings(
             localProfileId: localProfileId,
             existingPayload: existingPosterStyle
@@ -3318,7 +3540,7 @@ fileprivate final class NuvioAPIClient {
         features[Self.playerSettingsFeature] = playerPayload
 
         let existingCW = (features[Self.continueWatchingSettingsFeature] as? String)
-            ?? (lastPulledMobileProfileSettingsJSON?["features"] as? [String: Any])?[Self.continueWatchingSettingsFeature] as? String
+            ?? (latestMobileSettingsJSON["features"] as? [String: Any])?[Self.continueWatchingSettingsFeature] as? String
         let cwPayload = exportContinueWatchingSettings(
             localProfileId: localProfileId,
             existingPayload: existingCW
@@ -3326,7 +3548,7 @@ fileprivate final class NuvioAPIClient {
         features[Self.continueWatchingSettingsFeature] = cwPayload
 
         let existingMdbList = (features[Self.mdbListSettingsFeature] as? [String: Any])
-            ?? (lastPulledMobileProfileSettingsJSON?["features"] as? [String: Any])?[Self.mdbListSettingsFeature] as? [String: Any]
+            ?? (latestMobileSettingsJSON["features"] as? [String: Any])?[Self.mdbListSettingsFeature] as? [String: Any]
         let mdbListPayload = exportMdbListSettings(
             localProfileId: localProfileId,
             existing: existingMdbList
@@ -3334,7 +3556,7 @@ fileprivate final class NuvioAPIClient {
         features[Self.mdbListSettingsFeature] = mdbListPayload
 
         let existingTheme = (features[Self.themeSettingsFeature] as? [String: Any])
-            ?? (lastPulledMobileProfileSettingsJSON?["features"] as? [String: Any])?[Self.themeSettingsFeature] as? [String: Any]
+            ?? (latestMobileSettingsJSON["features"] as? [String: Any])?[Self.themeSettingsFeature] as? [String: Any]
         let themePayload = ThemeSettingsSyncMapper.exportPayload(
             localProfileId: localProfileId,
             existing: existingTheme
@@ -3343,58 +3565,109 @@ fileprivate final class NuvioAPIClient {
 
         settingsJSON["features"] = features
         if settingsJSON["version"] == nil { settingsJSON["version"] = 1 }
-        try await rpcVoid(
-            "sync_push_profile_settings_blob",
-            session: session,
-            params: [
-                "p_profile_id": remoteProfileId,
-                "p_platform": Self.settingsPlatform,
-                "p_settings_json": settingsJSON
-            ]
-        )
-        lastPulledProfileSettingsJSON = settingsJSON
+
         let sentAndroidDismissals = ContinueWatchingSyncMapper.androidDismissalKeys(
             from: features[ContinueWatchingSyncMapper.androidTraktFeatureKey]
         )
-        if let sentKeys = sentAndroidDismissals.keys {
-            ContinueWatchingDismissStore.acknowledgePushedKeys(
-                sentKeys,
-                profileId: localProfileId
-            )
+
+        let tvFeaturesMatch: Bool
+        if let freshRemoteTVFeatures = freshTVSettingsJSON?["features"] as? [String: Any],
+           let localData = try? JSONSerialization.data(withJSONObject: features, options: [.sortedKeys]),
+           let remoteData = try? JSONSerialization.data(withJSONObject: freshRemoteTVFeatures, options: [.sortedKeys]) {
+            tvFeaturesMatch = (localData == remoteData)
+        } else {
+            tvFeaturesMatch = false
+        }
+
+        if case nil = tvError {
+            do {
+                if !tvFeaturesMatch {
+                    try await rpcVoid(
+                        "sync_push_profile_settings_blob",
+                        session: session,
+                        params: [
+                            "p_profile_id": remoteProfileId,
+                            "p_platform": Self.settingsPlatform,
+                            "p_settings_json": settingsJSON
+                        ]
+                    )
+                }
+                lastPulledProfileSettingsJSON = settingsJSON
+                if let sentKeys = sentAndroidDismissals.keys {
+                    ContinueWatchingDismissStore.acknowledgePushedKeys(
+                        sentKeys,
+                        profileId: localProfileId
+                    )
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                tvError = error
+            }
         }
 
         // Keep the Android/mobile-compatible feature in its own blob as well.
         // Other mobile settings remain untouched by merging the latest remote
         // document before replacing stream_badge_settings, poster_card_style_settings_payload,
         // player_settings, continue_watching_settings_payload, mdblist_settings, and theme_settings.
-        do {
-            var mobileSettingsJSON = latestMobileSettingsJSON
-            var mobileFeatures = mobileSettingsJSON["features"] as? [String: Any] ?? [:]
-            mobileFeatures[Self.streamBadgeSettingsFeature] = exportStreamBadgeSettings(localProfileId: localProfileId)
-            mobileFeatures[Self.posterCardStyleSettingsFeature] = posterStylePayload
-            mobileFeatures[Self.playerSettingsFeature] = playerPayload
-            mobileFeatures[Self.continueWatchingSettingsFeature] = cwPayload
-            mobileFeatures[Self.mdbListSettingsFeature] = mdbListPayload
-            mobileFeatures[Self.themeSettingsFeature] = themePayload
-            mobileSettingsJSON["features"] = mobileFeatures
-            if mobileSettingsJSON["version"] == nil { mobileSettingsJSON["version"] = 1 }
-            try await rpcVoid(
-                "sync_push_profile_settings_blob",
-                session: session,
-                params: [
-                    "p_profile_id": remoteProfileId,
-                    "p_platform": Self.mobileSettingsPlatform,
-                    "p_settings_json": mobileSettingsJSON
-                ]
-            )
-            lastPulledMobileProfileSettingsJSON = mobileSettingsJSON
-        } catch is CancellationError {
-            return
-        } catch {
-            // tvOS settings sync remains successful if an older backend does
-            // not expose the mobile platform row/RPC yet.
-            print("Nuvio mobile settings sync skipped: \(error.localizedDescription)")
+        if case nil = mobileError {
+            do {
+                var mobileSettingsJSON = freshMobileSettingsJSON ?? [:]
+                var mobileFeatures = mobileSettingsJSON["features"] as? [String: Any] ?? [:]
+                mobileFeatures[Self.streamBadgeSettingsFeature] = exportStreamBadgeSettings(localProfileId: localProfileId)
+                mobileFeatures[Self.posterCardStyleSettingsFeature] = posterStylePayload
+                mobileFeatures[Self.playerSettingsFeature] = playerPayload
+                mobileFeatures[Self.continueWatchingSettingsFeature] = cwPayload
+                mobileFeatures[Self.mdbListSettingsFeature] = mdbListPayload
+                mobileFeatures[Self.themeSettingsFeature] = themePayload
+                mobileSettingsJSON["features"] = mobileFeatures
+                if mobileSettingsJSON["version"] == nil { mobileSettingsJSON["version"] = 1 }
+
+                let mobileFeaturesMatch: Bool
+                if let freshRemoteMobileFeatures = freshMobileSettingsJSON?["features"] as? [String: Any],
+                   let localData = try? JSONSerialization.data(withJSONObject: mobileFeatures, options: [.sortedKeys]),
+                   let remoteData = try? JSONSerialization.data(withJSONObject: freshRemoteMobileFeatures, options: [.sortedKeys]) {
+                    mobileFeaturesMatch = (localData == remoteData)
+                } else {
+                    mobileFeaturesMatch = false
+                }
+
+                if !mobileFeaturesMatch {
+                    try await rpcVoid(
+                        "sync_push_profile_settings_blob",
+                        session: session,
+                        params: [
+                            "p_profile_id": remoteProfileId,
+                            "p_platform": Self.mobileSettingsPlatform,
+                            "p_settings_json": mobileSettingsJSON
+                        ]
+                    )
+                }
+                lastPulledMobileProfileSettingsJSON = mobileSettingsJSON
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                mobileError = error
+            }
         }
+
+        if let tvError {
+            throw tvError
+        }
+        if let mobileError {
+            if Self.isUnsupportedMobileSettingsBackend(mobileError) {
+                print("Nuvio mobile settings sync skipped: \(mobileError.localizedDescription)")
+                return
+            }
+            throw mobileError
+        }
+    }
+
+    private static func isUnsupportedMobileSettingsBackend(_ error: Error) -> Bool {
+        guard let authError = error as? AuthError,
+              authError.statusCode == 404 else { return false }
+        return authError.message.localizedCaseInsensitiveContains("sync_pull_profile_settings_blob")
+            || authError.message.localizedCaseInsensitiveContains("sync_push_profile_settings_blob")
     }
 
     func pullLibrary(session: AuthSession, remoteProfileId: Int) async throws -> [LibraryStoreItem] {
@@ -3591,6 +3864,9 @@ fileprivate final class NuvioAPIClient {
     /// now happen only where the user actually removed something, via
     /// `deleteWatchProgress`.
     func pushWatchProgress(session: AuthSession, remoteProfileId: Int, profileId: String? = nil) async throws {
+        // Resolve the default scope before awaiting the upload. An empty ID
+        // explicitly selects the unscoped ledger even if a profile loads later.
+        let targetProfileId = profileId ?? WatchProgressLedger.activeProfileId ?? ""
         // Episode entries must use the phone's row conventions — video_id
         // "id:s:e" and progress_key "id_s{s}e{e}" — or each platform upserts
         // its own parallel row for the same episode and they fight over
@@ -3598,7 +3874,7 @@ fileprivate final class NuvioAPIClient {
         // Only rows this device changed. Everything else came from the server,
         // which already has it — echoing the whole ledger back would put a
         // few hundred kilobytes on the wire every sync for no benefit.
-        let records = WatchProgressLedger.records(profileId: profileId).filter(\.isPendingPush)
+        let records = WatchProgressLedger.records(profileId: targetProfileId).filter(\.isPendingPush)
         let payload = records.map { record -> [String: Any] in
             var entry: [String: Any] = [
                 "content_id": record.contentId,
@@ -3629,7 +3905,7 @@ fileprivate final class NuvioAPIClient {
             ]
         )
         print("[NuvioSync] pushWatchProgress: successfully pushed \(payload.count) records")
-        WatchProgressLedger.markPushed(keys: records.map(\.progressKey), profileId: profileId)
+        WatchProgressLedger.markPushed(records: records, profileId: targetProfileId)
     }
 
     /// Retires specific rows the user removed on this device.
@@ -3826,6 +4102,23 @@ fileprivate final class NuvioAPIClient {
             exported[key] = encoded
         }
         return exported
+    }
+
+    private func importCustomPosterLayoutSettings(_ remote: Any?, localProfileId: String) {
+        let defaults = ProfileSettings.store(for: localProfileId)
+        let imported = CustomPosterSettingsSyncMapper.importing(
+            remote,
+            preserving: .init(
+                pattern: defaults.object(forKey: SettingsKey.customPosterURLPattern) as? String,
+                enabledScreens: defaults.object(forKey: SettingsKey.customPosterEnabledScreens) as? String
+            )
+        )
+        if let pattern = imported.pattern {
+            defaults.set(pattern, forKey: SettingsKey.customPosterURLPattern)
+        }
+        if let screens = imported.enabledScreens {
+            defaults.set(screens, forKey: SettingsKey.customPosterEnabledScreens)
+        }
     }
 
     private func importSettings(_ remote: [String: Any], localProfileId: String) {

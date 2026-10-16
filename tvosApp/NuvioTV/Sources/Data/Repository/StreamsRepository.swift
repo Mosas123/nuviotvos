@@ -454,7 +454,8 @@ final class StreamsRepository: ObservableObject {
     enum StreamRequestRetryPolicy {
         static func shouldRetry(_ error: Error) -> Bool {
             guard let urlError = error as? URLError else { return false }
-            return [.timedOut, .networkConnectionLost, .cannotConnectToHost].contains(urlError.code)
+            // A timed-out request has already spent its wait; do not start a second one.
+            return [.networkConnectionLost, .cannotConnectToHost].contains(urlError.code)
         }
     }
 

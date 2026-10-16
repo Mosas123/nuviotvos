@@ -218,6 +218,7 @@ enum WeTrakrAuthStore {
     static let changedNotification = Notification.Name("nuvio.tv.wetrakr.auth.changed")
 
     private enum Key {
+        static let accountBindingID = "nuvio.tv.wetrakr.auth.accountBindingID"
         static let hasAccessToken = "nuvio.tv.wetrakr.auth.hasAccessToken"
         static let username = "nuvio.tv.wetrakr.auth.username"
         static let displayName = "nuvio.tv.wetrakr.auth.displayName"
@@ -282,6 +283,14 @@ enum WeTrakrAuthStore {
         defaults.set(clientID, forKey: Key.credentialClientID)
     }
 
+    /// Stable across refresh, replaced on every new login (including same-account relinks).
+    static func accountBindingID(in defaults: UserDefaults) -> String {
+        if let value = defaults.string(forKey: Key.accountBindingID) { return value }
+        let value = UUID().uuidString
+        defaults.set(value, forKey: Key.accountBindingID)
+        return value
+    }
+
     static func saveToken(
         _ accessToken: String,
         refreshToken: String? = nil,
@@ -289,8 +298,14 @@ enum WeTrakrAuthStore {
         clientID: String,
         profileScope: String,
         store defaults: UserDefaults,
-        tokenStorage: WeTrakrTokenStorage
+        tokenStorage: WeTrakrTokenStorage,
+        isNewLogin: Bool = true
     ) {
+        if isNewLogin {
+            defaults.set(UUID().uuidString, forKey: Key.accountBindingID)
+        } else {
+            _ = accountBindingID(in: defaults)
+        }
         tokenStorage.setAccessToken(accessToken, for: profileScope)
         if let refreshToken {
             tokenStorage.setRefreshToken(refreshToken, for: profileScope)
@@ -351,7 +366,7 @@ enum WeTrakrAuthStore {
         tokenStorage.setAccessToken(nil, for: profileScope)
         tokenStorage.setRefreshToken(nil, for: profileScope)
         [
-            Key.username, Key.displayName, Key.accountID, Key.accountPlan, Key.avatarURL,
+            Key.accountBindingID, Key.username, Key.displayName, Key.accountID, Key.accountPlan, Key.avatarURL,
             Key.deviceCode, Key.userCode, Key.verificationURI,
             Key.expiresAt, Key.pollInterval, Key.credentialClientID, Key.hasAccessToken,
             Key.cachedStats, Key.tokenExpiresAt
@@ -586,7 +601,8 @@ final class WeTrakrAuthService {
             clientID: clientID,
             profileScope: profileScope,
             store: store,
-            tokenStorage: tokenStorage
+            tokenStorage: tokenStorage,
+            isNewLogin: false
         )
         return response.accessToken
     }

@@ -1905,6 +1905,7 @@ enum SelectedLibraryService {
         }
     }
 
+    @MainActor
     static func setWatchlist(_ meta: NuvioMeta, isInWatchlist: Bool) async -> Bool {
         switch TraktSettingsStore.librarySourceMode {
         case .local:
@@ -2396,15 +2397,17 @@ struct SimklProgressService {
                   season > 0,
                   episode > 0 else { continue }
 
-            let key = item.meta.imdbId?.lowercased()
-                ?? item.meta.type.lowercased() + ":" + item.meta.id.lowercased()
+            let key = item.meta.type.lowercased() + ":" + item.meta.id.lowercased()
             let candidate = UpNextSeed(
                 meta: item.meta,
                 season: season,
                 episode: episode,
                 watchedAt: item.watchedAt
             )
-            guard let current = selectedByContentID[key] else {
+            let matchingKey = selectedByContentID.first {
+                WatchedStore.sameContent($0.value.meta, item.meta)
+            }?.key ?? key
+            guard let current = selectedByContentID[matchingKey] else {
                 selectedByContentID[key] = candidate
                 continue
             }
@@ -2417,7 +2420,7 @@ struct SimklProgressService {
                 currentWatchedAt: current.watchedAt,
                 preferFurthestEpisode: preferFurthestEpisode
             ) {
-                selectedByContentID[key] = candidate
+                selectedByContentID[matchingKey] = candidate
             }
         }
 

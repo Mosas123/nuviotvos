@@ -2879,3 +2879,328 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         }
     }
 }
+
+private final class ProfileSettingsSyncURLProtocol: URLProtocol {
+    struct CapturedRequest {
+        let rpc: String
+        let params: [String: Any]
+    }
+
+    private static let lock = NSLock()
+    private static var handler: ((CapturedRequest) -> (Int, Data))?
+    private static var requests: [CapturedRequest] = []
+
+    static func install(_ handler: @escaping (CapturedRequest) -> (Int, Data)) {
+        lock.lock()
+        self.handler = handler
+        requests = []
+        lock.unlock()
+    }
+
+    static func capturedRequests() -> [CapturedRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
+    }
+
+    static func reset() {
+        lock.lock()
+        handler = nil
+        requests = []
+        lock.unlock()
+    }
+
+    private static func bodyData(for request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while true {
+            let bytesRead = buffer.withUnsafeMutableBufferPointer { buffer in
+                guard let baseAddress = buffer.baseAddress else { return 0 }
+                return stream.read(baseAddress, maxLength: buffer.count)
+            }
+            if bytesRead < 0 { return nil }
+            if bytesRead == 0 { break }
+            data.append(contentsOf: buffer.prefix(bytesRead))
+        }
+        return data
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.path.contains("/rest/v1/rpc/") == true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let params = (Self.bodyData(for: request)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:]
+        let captured = CapturedRequest(rpc: request.url?.lastPathComponent ?? "", params: params)
+
+        Self.lock.lock()
+        Self.requests.append(captured)
+        let result = Self.handler?(captured) ?? (500, Data("{}".utf8))
+        Self.lock.unlock()
+
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: result.0,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: result.1)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+final class NuvioSyncProfileSettingsTests: XCTestCase {
+    private let profileId = "profile-settings-snapshot-\(UUID().uuidString)"
+    private var session: URLSession!
+    private let authSession = AuthSession(
+        accessToken: "test-access",
+        refreshToken: "test-refresh",
+        userId: "test-user",
+        email: nil,
+        expiresAt: nil
+    )
+
+    override func setUp() {
+        super.setUp()
+        eraseContinueWatchingTestSettingsSuite(profileId)
+        ProfileSettingsSyncURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ProfileSettingsSyncURLProtocol.self]
+        session = URLSession(configuration: configuration)
+    }
+
+    override func tearDown() {
+        ProfileSettingsSyncURLProtocol.reset()
+        session.invalidateAndCancel()
+        session = nil
+        eraseContinueWatchingTestSettingsSuite(profileId)
+        super.tearDown()
+    }
+
+    private func settingsRow(_ features: [String: Any]) -> (Int, Data) {
+        response([["settings_json": ["version": 1, "features": features]]])
+    }
+
+    private func response(_ value: Any) -> (Int, Data) {
+        (200, try! JSONSerialization.data(withJSONObject: value))
+    }
+
+    private func push(
+        with client: NuvioAPIClient,
+        remoteProfileId: Int = 7
+    ) async throws {
+        try await client.pushProfileSettings(
+            session: authSession,
+            remoteProfileId: remoteProfileId,
+            localProfileId: profileId
+        )
+    }
+
+    func testSnapshotComparesFullDataAndIgnoresTransientKeys() {
+        let defaults = ProfileSettings.store(for: profileId)
+        var originalData = Data(repeating: 0x41, count: 512)
+        defaults.set(originalData, forKey: SettingsKey.heroCatalogs)
+        let originalSnapshot = ProfileSettingsSnapshot.capture(for: profileId)
+
+        originalData[256] = 0x42
+        XCTAssertEqual(originalData.count, 512)
+        defaults.set(originalData, forKey: SettingsKey.heroCatalogs)
+        let changedSnapshot = ProfileSettingsSnapshot.capture(for: profileId)
+        XCTAssertFalse(ProfileSettingsSnapshot.areEqual(originalSnapshot, changedSnapshot))
+
+        defaults.set(Data(repeating: 0x41, count: 512), forKey: SettingsKey.heroCatalogs)
+        let unchangedSnapshot = ProfileSettingsSnapshot.capture(for: profileId)
+        XCTAssertTrue(ProfileSettingsSnapshot.areEqual(originalSnapshot, unchangedSnapshot))
+
+        defaults.set(false, forKey: SettingsKey.accountSyncWatchState)
+        defaults.set("local-device-value", forKey: SettingsKey.traktClientID)
+        defaults.set("legacy-transient", forKey: SettingsKey.streamBadgeRules)
+        let transientSnapshot = ProfileSettingsSnapshot.capture(for: profileId)
+        XCTAssertTrue(ProfileSettingsSnapshot.areEqual(unchangedSnapshot, transientSnapshot))
+    }
+
+    func testTVFetchFailureStillPushesFreshMobileSettingsAndPropagatesFailure() async throws {
+        ProfileSettingsSyncURLProtocol.install { request in
+            switch request.rpc {
+            case "sync_pull_profile_settings_blob":
+                if request.params["p_platform"] as? String == "tv" {
+                    return (503, try! JSONSerialization.data(withJSONObject: ["message": "TV fetch failed"]))
+                }
+                return self.settingsRow(["unknown_mobile_field": "fresh-mobile-value"])
+            case "sync_push_profile_settings_blob":
+                return self.response([])
+            default:
+                return (404, Data("{}".utf8))
+            }
+        }
+
+        let client = NuvioAPIClient(session: session)
+        do {
+            try await push(with: client)
+            XCTFail("A failed TV fetch should remain visible to the caller")
+        } catch let error as AuthError {
+            XCTAssertEqual(error.statusCode, 503)
+        }
+
+        let requests = ProfileSettingsSyncURLProtocol.capturedRequests()
+        let uploads = requests.filter { $0.rpc == "sync_push_profile_settings_blob" }
+        XCTAssertEqual(uploads.count, 1)
+        XCTAssertEqual(uploads.first?.params["p_platform"] as? String, "mobile")
+        let uploadedSettings = uploads.first?.params["p_settings_json"] as? [String: Any]
+        let uploadedFeatures = uploadedSettings?["features"] as? [String: Any]
+        XCTAssertEqual(uploadedFeatures?["unknown_mobile_field"] as? String, "fresh-mobile-value")
+    }
+
+    func testTVUploadFailureStillPushesMobileSettingsAndPropagatesFailure() async throws {
+        ProfileSettingsSyncURLProtocol.install { request in
+            switch request.rpc {
+            case "sync_pull_profile_settings_blob":
+                if request.params["p_platform"] as? String == "tv" {
+                    return self.settingsRow(["unknown_tv_field": "fresh-tv-value"])
+                }
+                return self.settingsRow(["unknown_mobile_field": "fresh-mobile-value"])
+            case "sync_push_profile_settings_blob":
+                if request.params["p_platform"] as? String == "tv" {
+                    return (503, try! JSONSerialization.data(withJSONObject: ["message": "TV upload failed"]))
+                }
+                return self.response([])
+            default:
+                return (404, Data("{}".utf8))
+            }
+        }
+
+        do {
+            try await push(with: NuvioAPIClient(session: session))
+            XCTFail("A failed TV upload should remain visible to the caller")
+        } catch let error as AuthError {
+            XCTAssertEqual(error.statusCode, 503)
+            XCTAssertEqual(error.message, "TV upload failed")
+        }
+
+        let uploads = ProfileSettingsSyncURLProtocol.capturedRequests().filter {
+            $0.rpc == "sync_push_profile_settings_blob"
+        }
+        XCTAssertEqual(uploads.count, 2)
+        XCTAssertEqual(Set(uploads.compactMap { $0.params["p_platform"] as? String }), Set(["tv", "mobile"]))
+        let mobileUpload = try XCTUnwrap(uploads.first { $0.params["p_platform"] as? String == "mobile" })
+        let mobileSettings = mobileUpload.params["p_settings_json"] as? [String: Any]
+        let mobileFeatures = mobileSettings?["features"] as? [String: Any]
+        XCTAssertEqual(mobileFeatures?["unknown_mobile_field"] as? String, "fresh-mobile-value")
+    }
+
+    func testMobileFetchFailureSkipsUploadAndRetryMergesFreshRemoteDocument() async throws {
+        var tvDocument: [String: Any] = ["version": 1, "features": ["remote_tv_field": "keep-tv"]]
+        var mobileFetchCount = 0
+        ProfileSettingsSyncURLProtocol.install { request in
+            switch request.rpc {
+            case "sync_pull_profile_settings_blob":
+                let platform = request.params["p_platform"] as? String
+                if platform == "tv" {
+                    return self.response([["settings_json": tvDocument]])
+                }
+                mobileFetchCount += 1
+                if mobileFetchCount == 1 {
+                    return self.settingsRow(["remote_mobile_field": "cached-A"])
+                }
+                if mobileFetchCount == 2 {
+                    return (503, try! JSONSerialization.data(withJSONObject: ["message": "mobile fetch failed"]))
+                }
+                return self.settingsRow(["remote_mobile_field": "remote-B"])
+            case "sync_push_profile_settings_blob":
+                let platform = request.params["p_platform"] as? String
+                let uploaded = request.params["p_settings_json"] as? [String: Any] ?? [:]
+                if platform == "tv" { tvDocument = uploaded }
+                return self.response([])
+            default:
+                return (404, Data("{}".utf8))
+            }
+        }
+
+        let client = NuvioAPIClient(session: session)
+        _ = try await client.pullProfileSettings(
+            session: authSession,
+            remoteProfileId: 7,
+            localProfileId: profileId
+        )
+
+        do {
+            try await push(with: client)
+            XCTFail("A failed mobile refresh should be reported after the TV attempt")
+        } catch let error as AuthError {
+            XCTAssertEqual(error.statusCode, 503)
+        }
+        XCTAssertFalse(ProfileSettingsSyncURLProtocol.capturedRequests().contains {
+            $0.rpc == "sync_push_profile_settings_blob" && $0.params["p_platform"] as? String == "mobile"
+        })
+
+        try await push(with: client)
+        let mobileUploads = ProfileSettingsSyncURLProtocol.capturedRequests().filter {
+            $0.rpc == "sync_push_profile_settings_blob" && $0.params["p_platform"] as? String == "mobile"
+        }
+        XCTAssertEqual(mobileUploads.count, 1)
+        let uploadedSettings = mobileUploads[0].params["p_settings_json"] as? [String: Any]
+        let uploadedFeatures = uploadedSettings?["features"] as? [String: Any]
+        XCTAssertEqual(uploadedFeatures?["remote_mobile_field"] as? String, "remote-B")
+    }
+
+    func testMissingPlatformRowsCreateBaselineBlobs() async throws {
+        ProfileSettingsSyncURLProtocol.install { request in
+            switch request.rpc {
+            case "sync_pull_profile_settings_blob": return self.response([])
+            case "sync_push_profile_settings_blob": return self.response([])
+            default: return (404, Data("{}".utf8))
+            }
+        }
+
+        try await push(with: NuvioAPIClient(session: session))
+
+        let uploads = ProfileSettingsSyncURLProtocol.capturedRequests().filter {
+            $0.rpc == "sync_push_profile_settings_blob"
+        }
+        XCTAssertEqual(Set(uploads.compactMap { $0.params["p_platform"] as? String }), Set(["tv", "mobile"]))
+    }
+
+    func testConfirmedMatchingDocumentsAreNotUploadedAgain() async throws {
+        var tvDocument: [String: Any] = ["version": 1, "features": ["unknown_tv": "preserve"]]
+        var mobileDocument: [String: Any] = ["version": 1, "features": ["unknown_mobile": "preserve"]]
+        ProfileSettingsSyncURLProtocol.install { request in
+            switch request.rpc {
+            case "sync_pull_profile_settings_blob":
+                let document = request.params["p_platform"] as? String == "tv" ? tvDocument : mobileDocument
+                return self.response([["settings_json": document]])
+            case "sync_push_profile_settings_blob":
+                let platform = request.params["p_platform"] as? String
+                let document = request.params["p_settings_json"] as? [String: Any] ?? [:]
+                if platform == "tv" { tvDocument = document }
+                if platform == "mobile" { mobileDocument = document }
+                return self.response([])
+            default:
+                return (404, Data("{}".utf8))
+            }
+        }
+
+        let client = NuvioAPIClient(session: session)
+        try await push(with: client)
+        let firstUploadCount = ProfileSettingsSyncURLProtocol.capturedRequests().filter {
+            $0.rpc == "sync_push_profile_settings_blob"
+        }.count
+        XCTAssertGreaterThan(firstUploadCount, 0)
+
+        try await push(with: client)
+        let totalUploadCount = ProfileSettingsSyncURLProtocol.capturedRequests().filter {
+            $0.rpc == "sync_push_profile_settings_blob"
+        }.count
+        XCTAssertEqual(totalUploadCount, firstUploadCount)
+    }
+}

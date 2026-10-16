@@ -173,6 +173,7 @@ enum TraktAuthStore {
         static let username = "nuvio.tv.trakt.auth.username"
         static let userSlug = "nuvio.tv.trakt.auth.userSlug"
         static let accountBindingID = "nuvio.tv.trakt.auth.accountBindingID"
+        static let deviceFlowRequestID = "nuvio.tv.trakt.auth.deviceFlowRequestID"
         static let deviceCode = "nuvio.tv.trakt.auth.deviceCode"
         static let userCode = "nuvio.tv.trakt.auth.userCode"
         static let verificationURL = "nuvio.tv.trakt.auth.verificationURL"
@@ -220,11 +221,22 @@ enum TraktAuthStore {
         )
     }
 
+    static func beginDeviceFlowRequest(store: UserDefaults) -> String {
+        let requestID = UUID().uuidString
+        store.set(requestID, forKey: Key.deviceFlowRequestID)
+        return requestID
+    }
+
+    static func isCurrentDeviceFlowRequest(_ requestID: String, store: UserDefaults) -> Bool {
+        store.string(forKey: Key.deviceFlowRequestID) == requestID
+    }
+
     static func saveDeviceFlow(
         _ response: TraktDeviceCodeResponse,
         clientID: String,
         store defaults: UserDefaults = ProfileSettings.current
     ) {
+        defaults.removeObject(forKey: Key.deviceFlowRequestID)
         if defaults.string(forKey: Key.credentialClientID) != clientID {
             [
                 Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt,
@@ -248,6 +260,7 @@ enum TraktAuthStore {
         isNewLogin: Bool = false
     ) {
         if isNewLogin {
+            defaults.removeObject(forKey: Key.deviceFlowRequestID)
             defaults.removeObject(forKey: Key.username)
             defaults.removeObject(forKey: Key.userSlug)
             defaults.set(UUID().uuidString, forKey: Key.accountBindingID)
@@ -302,7 +315,7 @@ enum TraktAuthStore {
     }
 
     static func clearDeviceFlow(store defaults: UserDefaults = ProfileSettings.current) {
-        [Key.deviceCode, Key.userCode, Key.verificationURL, Key.expiresAt, Key.pollInterval].forEach {
+        [Key.deviceFlowRequestID, Key.deviceCode, Key.userCode, Key.verificationURL, Key.expiresAt, Key.pollInterval].forEach {
             defaults.removeObject(forKey: $0)
         }
     }
@@ -310,7 +323,7 @@ enum TraktAuthStore {
     static func clearAuth(store defaults: UserDefaults = ProfileSettings.current) {
         [
             Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt, Key.expiresIn,
-            Key.username, Key.userSlug, Key.accountBindingID, Key.deviceCode, Key.userCode, Key.verificationURL,
+            Key.username, Key.userSlug, Key.accountBindingID, Key.deviceFlowRequestID, Key.deviceCode, Key.userCode, Key.verificationURL,
             Key.expiresAt, Key.pollInterval, Key.credentialClientID, Key.cachedStats
         ].forEach { defaults.removeObject(forKey: $0) }
         defaults.removeObject(forKey: SettingsKey.traktConnected)
@@ -782,7 +795,10 @@ final class TraktAuthService {
         TraktAuthStore.state(in: store)
     }
 
+    @MainActor
     func startDeviceAuth() async throws -> TraktDeviceCodeResponse {
+        try Task.checkCancellation()
+        guard ProfileSettings.isActiveStore(store) else { throw CancellationError() }
         guard hasRequiredCredentials() else {
             throw TraktServiceError.message("Enter your Trakt Client ID first.")
         }
@@ -802,17 +818,28 @@ final class TraktAuthService {
             return response
         }
 
+        let capturedProfileID = ProfileSettings.activeProfileID
+        let capturedClientID = clientID
+        let requestID = TraktAuthStore.beginDeviceFlowRequest(store: store)
         let response: TraktDeviceCodeResponse = try await post(
             path: "oauth/device/code",
-            body: TraktDeviceCodeRequest(clientID: clientID),
+            body: TraktDeviceCodeRequest(clientID: capturedClientID),
             authorized: false
         )
-        TraktAuthStore.saveDeviceFlow(response, clientID: clientID, store: store)
+        guard !Task.isCancelled,
+              ProfileSettings.isActiveStore(store),
+              ProfileSettings.activeProfileID == capturedProfileID,
+              clientID == capturedClientID,
+              TraktAuthStore.isCurrentDeviceFlowRequest(requestID, store: store) else {
+            throw CancellationError()
+        }
+        // Validation and persistence stay on MainActor with no suspension.
+        TraktAuthStore.saveDeviceFlow(response, clientID: capturedClientID, store: store)
         return response
     }
 
     func pollDeviceToken() async -> TraktPollResult {
-        guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else {
+        guard !Task.isCancelled, ProfileSettings.isActiveStore(store), hasRequiredCredentials() else {
             return .failed("Enter your Trakt Client ID first.")
         }
         let state = currentState()
@@ -830,50 +857,56 @@ final class TraktAuthService {
                 path: "oauth/device/token",
                 body: TraktDeviceTokenRequest(
                     code: deviceCode,
-                    clientID: clientID,
+                    clientID: capturedClientID,
                     clientSecret: clientSecretOrNil
                 ),
                 authorized: false
             )
-            if let token = response.value, (200..<300).contains(response.statusCode) {
-                guard ProfileSettings.isActiveStore(store),
+            // Cancel is handled on the main actor. Keep the ownership check and
+            // every response mutation together so it cannot interleave here.
+            let result: TraktPollResult = await MainActor.run {
+                guard !Task.isCancelled, ProfileSettings.isActiveStore(store),
                       ProfileSettings.activeProfileID == capturedProfileID,
                       currentState().deviceCode == capturedDeviceCode,
                       clientID == capturedClientID else {
                     return .failed("The active profile or Trakt account changed during login.")
                 }
-                TraktAuthStore.saveToken(
-                    token,
-                    clientID: capturedClientID,
-                    store: store,
-                    isNewLogin: true
-                )
-                TraktAuthStore.clearDeviceFlow(store: store)
-                // Same reasoning as the Simkl connect path: point watch progress
-                // at the tracker the user just linked, unless they have already
-                // chosen a source by hand.
-                TraktSettingsStore.selectWatchProgressSourceOnConnect(.trakt, in: store)
+                if let token = response.value, (200..<300).contains(response.statusCode) {
+                    TraktAuthStore.saveToken(
+                        token,
+                        clientID: capturedClientID,
+                        store: store,
+                        isNewLogin: true
+                    )
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    // Preserve the selected-source policy on a valid login.
+                    TraktSettingsStore.selectWatchProgressSourceOnConnect(.trakt, in: store)
+                    return .approved(nil)
+                }
+                switch response.statusCode {
+                case 400: return .pending
+                case 409:
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    return .alreadyUsed
+                case 410:
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    return .expired
+                case 418:
+                    TraktAuthStore.clearDeviceFlow(store: store)
+                    return .denied
+                case 429:
+                    let next = min((currentState().pollInterval ?? 5) + 5, 60)
+                    TraktAuthStore.updatePollInterval(next, store: store)
+                    return .slowDown(next)
+                default:
+                    return .failed("Trakt token polling failed (\(response.statusCode)).")
+                }
+            }
+            if case .approved = result {
                 let username = await fetchUserSettings()
                 return .approved(username)
             }
-            switch response.statusCode {
-            case 400: return .pending
-            case 409:
-                TraktAuthStore.clearDeviceFlow(store: store)
-                return .alreadyUsed
-            case 410:
-                TraktAuthStore.clearDeviceFlow(store: store)
-                return .expired
-            case 418:
-                TraktAuthStore.clearDeviceFlow(store: store)
-                return .denied
-            case 429:
-                let next = min((currentState().pollInterval ?? 5) + 5, 60)
-                TraktAuthStore.updatePollInterval(next, store: store)
-                return .slowDown(next)
-            default:
-                return .failed("Trakt token polling failed (\(response.statusCode)).")
-            }
+            return result
         } catch {
             return .failed("Network error. Retrying is safe.")
         }
@@ -1411,63 +1444,105 @@ struct TraktProgressService {
         }
     }
 
+    /// Ownership captured before provider I/O. A source override used for a
+    /// transfer may differ from Home's selected source when no snapshot is written.
+    struct ContinueWatchingFetchContext {
+        let profileId: String?
+        let settingsProfileId: String?
+        let store: UserDefaults
+        let profileScope: String
+        let source: TraktWatchProgressSource
+        let updateDisplayedSnapshot: Bool
+
+        @MainActor
+        init(source: TraktWatchProgressSource, updateDisplayedSnapshot: Bool) {
+            profileId = ContinueWatchingStore.activeProfileId
+            settingsProfileId = ProfileSettings.activeProfileID
+            store = ProfileSettings.current
+            profileScope = ProfileSettings.activeProfileScope
+            self.source = source
+            self.updateDisplayedSnapshot = updateDisplayedSnapshot
+        }
+    }
+
+    /// Revalidate before merging: reconciliation itself may remove checkpoints.
+    /// Keep the guard, merge and snapshot write together with no suspension so a
+    /// UI profile/source switch cannot interleave between those operations.
+    @MainActor
+    static func finalizeContinueWatchingFetch(
+        _ items: [ContinueWatchingItem],
+        context: ContinueWatchingFetchContext
+    ) -> [ContinueWatchingItem]? {
+        guard !Task.isCancelled,
+              context.profileId == ContinueWatchingStore.activeProfileId,
+              context.settingsProfileId == ProfileSettings.activeProfileID,
+              ProfileSettings.isActiveStore(context.store) else { return nil }
+        guard context.updateDisplayedSnapshot else { return items }
+        guard context.source == TraktSettingsStore.watchProgressSource else { return nil }
+
+        let resolvedItems = mergingLocalPlaybackCheckpoints(
+            into: items,
+            source: context.source,
+            profileId: context.profileId
+        )
+        replaceContinueWatchingSnapshot(
+            resolvedItems,
+            source: context.source,
+            profileId: context.profileId
+        )
+        return resolvedItems
+    }
+
     static func fetchContinueWatching(
         repository: CatalogRepository,
         source sourceOverride: TraktWatchProgressSource? = nil,
         updateDisplayedSnapshot: Bool = true
     ) async -> [ContinueWatchingItem]? {
-        let source = sourceOverride ?? TraktSettingsStore.watchProgressSource
+        let context = await MainActor.run {
+            ContinueWatchingFetchContext(
+                source: sourceOverride ?? TraktSettingsStore.watchProgressSource,
+                updateDisplayedSnapshot: updateDisplayedSnapshot
+            )
+        }
+        let source = context.source
         #if DEBUG
         print("[ContinueWatching] Provider fetch started source=\(source.rawValue)")
         #endif
         if source == .simkl {
-            guard SimklRuntimeSession.authenticatedState() != nil else { return [] }
+            guard SimklRuntimeSession.authenticatedState(store: context.store, profileScope: context.profileScope) != nil else { return [] }
             guard let items = await SimklProgressService.fetchContinueWatching(
-                repository: repository
+                repository: repository,
+                store: context.store,
+                profileScope: context.profileScope
             ) else { return nil }
-            let resolvedItems = updateDisplayedSnapshot
-                ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-                : items
-            if updateDisplayedSnapshot {
-                replaceContinueWatchingSnapshot(resolvedItems, source: source)
-            }
-            return resolvedItems
+            return await finalizeContinueWatchingFetch(items, context: context)
         }
 
         if source == .mdblist {
-            guard MdbListRuntimeSession.isAuthenticated() else { return [] }
+            guard MdbListRuntimeSession.isAuthenticated(in: context.store, profileScope: context.profileScope) else { return [] }
             guard let items = await MdbListProgressService.fetchContinueWatching(
-                repository: repository
+                repository: repository,
+                store: context.store,
+                profileScope: context.profileScope
             ) else { return nil }
-            let resolvedItems = updateDisplayedSnapshot
-                ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-                : items
-            if updateDisplayedSnapshot {
-                replaceContinueWatchingSnapshot(resolvedItems, source: source)
-            }
-            return resolvedItems
+            return await finalizeContinueWatchingFetch(items, context: context)
         }
 
         if source == .wetrakr {
-            guard WeTrakrRuntimeSession.authenticatedState() != nil else { return [] }
+            guard WeTrakrRuntimeSession.authenticatedState(store: context.store) != nil else { return [] }
             guard let items = await WeTrakrProgressService.fetchContinueWatching(
-                repository: repository
+                repository: repository,
+                store: context.store
             ) else { return nil }
-            let resolvedItems = updateDisplayedSnapshot
-                ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-                : items
-            if updateDisplayedSnapshot {
-                replaceContinueWatchingSnapshot(resolvedItems, source: source)
-            }
-            return resolvedItems
+            return await finalizeContinueWatchingFetch(items, context: context)
         }
 
         guard source == .trakt,
-              TraktAuthStore.isAuthenticated else {
+              TraktAuthStore.isAuthenticated(in: context.store) else {
             return []
         }
 
-        let service = TraktAuthService()
+        let service = TraktAuthService(store: context.store)
         guard await service.refreshTokenIfNeeded() else {
             #if DEBUG
             print("[ContinueWatching] Trakt token refresh failed")
@@ -1598,11 +1673,8 @@ struct TraktProgressService {
             }
         }
         let items = indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
-        let resolvedItems = updateDisplayedSnapshot
-            ? mergingLocalPlaybackCheckpoints(into: items, source: source)
-            : items
-        if updateDisplayedSnapshot {
-            replaceContinueWatchingSnapshot(resolvedItems, source: source)
+        guard let resolvedItems = await finalizeContinueWatchingFetch(items, context: context) else {
+            return nil
         }
         #if DEBUG
         print("[ContinueWatching] Trakt provider returning \(resolvedItems.count) items")
@@ -1639,11 +1711,10 @@ struct TraktProgressService {
 
     static func mergingLocalPlaybackCheckpoints(
         into remoteItems: [ContinueWatchingItem],
-        source: TraktWatchProgressSource
+        source: TraktWatchProgressSource,
+        profileId: String? = ContinueWatchingStore.activeProfileId
     ) -> [ContinueWatchingItem] {
         pruneExpiredLocalCheckpoints()
-
-        let profileId = ContinueWatchingStore.activeProfileId
         let checkpoints = localPlaybackCheckpoints.filter {
             $0.profileId == profileId && $0.source == source
         }
@@ -1738,9 +1809,9 @@ struct TraktProgressService {
 
     private static func replaceContinueWatchingSnapshot(
         _ items: [ContinueWatchingItem],
-        source: TraktWatchProgressSource
+        source: TraktWatchProgressSource,
+        profileId: String?
     ) {
-        let profileId = ContinueWatchingStore.activeProfileId
         continueWatchingSnapshots.removeAll {
             $0.profileId == profileId && $0.source == source
         }
@@ -3606,30 +3677,37 @@ struct TraktLibraryService {
     /// Trakt as the library source, add/remove the title from Trakt's watchlist
     /// instead of writing only to the hidden local library.
     static func setWatchlist(_ meta: NuvioMeta, isInWatchlist: Bool) async -> Bool {
-        guard TraktSettingsStore.librarySourceMode == .trakt,
-              TraktAuthStore.isAuthenticated,
-              let body = watchlistMutation(for: meta) else {
+        guard let body = watchlistMutation(for: meta),
+              let context = await MainActor.run(body: { TraktLibraryMutationContext() }) else {
             return false
         }
 
         do {
-            let response: TraktWatchlistMutationResponse = try await TraktAuthService().authorizedPost(
+            let response: TraktWatchlistMutationResponse = try await TraktAuthService(store: context.store).authorizedPost(
                 path: isInWatchlist ? "sync/watchlist" : "sync/watchlist/remove",
                 body: body
             )
             guard response.applied(isInWatchlist: isInWatchlist) else { return false }
-            NotificationCenter.default.post(
-                name: mutationNotification,
-                object: TraktLibraryMutation(meta: meta, isInWatchlist: isInWatchlist)
-            )
-            NotificationCenter.default.post(
-                name: TraktSettingsStore.libraryChangedNotification,
-                object: nil
-            )
+            await MainActor.run {
+                publishMutation(TraktLibraryMutation(
+                    meta: meta,
+                    isInWatchlist: isInWatchlist,
+                    context: context
+                ))
+            }
+            // A successful remote write must not be reported as a failure just
+            // because its local notification no longer belongs to this session.
             return true
         } catch {
             return false
         }
+    }
+
+    @MainActor
+    static func publishMutation(_ mutation: TraktLibraryMutation) {
+        guard !Task.isCancelled, mutation.context?.isCurrent == true else { return }
+        NotificationCenter.default.post(name: mutationNotification, object: mutation)
+        NotificationCenter.default.post(name: TraktSettingsStore.libraryChangedNotification, object: nil)
     }
 
     static func fetchLibrary(
@@ -3831,9 +3909,60 @@ private struct TraktWatchlistIDs: Encodable {
     let tmdb: Int?
 }
 
+/// Identifies the profile and Trakt account that started a watchlist write.
+/// Refresh rotation preserves accountBindingID; a new login replaces it.
+struct TraktLibraryMutationContext {
+    let store: UserDefaults
+    private let profileID: String?
+    private let settingsProfileID: String?
+    private let clientID: String
+    private let bindingID: String?
+    private let accessToken: String?
+    private let refreshToken: String?
+
+    @MainActor
+    init?() {
+        let store = ProfileSettings.current
+        guard TraktSettingsStore.librarySourceMode == .trakt,
+              TraktAuthStore.isAuthenticated(in: store) else { return nil }
+        self.store = store
+        profileID = LibraryStore.activeProfileId
+        settingsProfileID = ProfileSettings.activeProfileID
+        clientID = TraktConfig.clientID(in: store)
+        bindingID = TraktAuthStore.accountBindingID(in: store)
+        let state = TraktAuthStore.state(in: store)
+        accessToken = state.accessToken
+        refreshToken = state.refreshToken
+    }
+
+    @MainActor
+    var isCurrent: Bool {
+        guard profileID == LibraryStore.activeProfileId,
+              settingsProfileID == ProfileSettings.activeProfileID,
+              ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.librarySourceMode == .trakt,
+              TraktAuthStore.isAuthenticated(in: store),
+              TraktConfig.clientID(in: store) == clientID else { return false }
+        if let bindingID {
+            return TraktAuthStore.accountBindingID(in: store) == bindingID
+        }
+        let state = TraktAuthStore.state(in: store)
+        return state.accessToken == accessToken && state.refreshToken == refreshToken
+    }
+}
+
 struct TraktLibraryMutation {
     let meta: NuvioMeta
     let isInWatchlist: Bool
+    // Simkl and WeTrakr also use this legacy notification payload.
+    // Trakt always supplies its captured context; their call sites stay intact.
+    let context: TraktLibraryMutationContext?
+
+    init(meta: NuvioMeta, isInWatchlist: Bool, context: TraktLibraryMutationContext? = nil) {
+        self.meta = meta
+        self.isInWatchlist = isInWatchlist
+        self.context = context
+    }
 }
 
 private struct TraktWatchlistMutationResponse: Decodable {
@@ -3919,14 +4048,17 @@ final class TraktSettingsViewModel: ObservableObject {
     private let store: UserDefaults
     private let service: TraktAuthService
     private var pollTask: Task<Void, Never>?
+    private(set) var connectionTask: Task<Void, Never>?
+    private var connectionGeneration = 0
 
-    init(store: UserDefaults = ProfileSettings.current) {
+    init(store: UserDefaults = ProfileSettings.current, session: URLSession = .shared) {
         self.store = store
-        self.service = TraktAuthService(store: store)
+        self.service = TraktAuthService(session: session, store: store)
         reload()
     }
 
     deinit {
+        connectionTask?.cancel()
         pollTask?.cancel()
     }
 
@@ -3958,39 +4090,65 @@ final class TraktSettingsViewModel: ObservableObject {
     }
 
     func credentialsDidChange() {
+        invalidatePendingConnection()
         errorMessage = nil
         statusMessage = nil
         reload()
     }
 
+    private func invalidatePendingConnection() {
+        connectionGeneration &+= 1
+        connectionTask?.cancel()
+        connectionTask = nil
+        isLoading = false
+    }
+
     func connect() {
-        guard !isLoading else { return }
+        guard !isLoading, ProfileSettings.isActiveStore(store) else { return }
         guard credentialsConfigured else {
             errorMessage = "Enter your Trakt Client ID first."
             return
         }
+        invalidatePendingConnection()
+        let generation = connectionGeneration
         isLoading = true
         statusMessage = nil
         errorMessage = nil
-        Task {
+        connectionTask = Task { [weak self, service, store] in
+            defer {
+                if let self, generation == self.connectionGeneration {
+                    self.connectionTask = nil
+                    self.isLoading = false
+                }
+            }
             do {
                 let response = try await service.startDeviceAuth()
-                deviceUserCode = response.userCode
-                verificationURL = response.verificationURL
-                deviceCodeExpiresAtMillis = Date().timeIntervalSince1970 * 1000.0 + Double(response.expiresIn * 1000)
-                pollInterval = response.interval
-                mode = .awaitingApproval
-                statusMessage = "Waiting for approval…"
-                isLoading = false
-                startPolling()
+                guard let self, !Task.isCancelled,
+                      generation == self.connectionGeneration,
+                      ProfileSettings.isActiveStore(store),
+                      TraktAuthStore.state(in: store).deviceCode == response.deviceCode else { return }
+                self.deviceUserCode = response.userCode
+                self.verificationURL = response.verificationURL
+                self.deviceCodeExpiresAtMillis = Date().timeIntervalSince1970 * 1000.0 + Double(response.expiresIn * 1000)
+                self.pollInterval = response.interval
+                self.mode = .awaitingApproval
+                self.statusMessage = "Waiting for approval…"
+                self.isLoading = false
+                self.connectionTask = nil
+                self.startPolling()
             } catch {
-                errorMessage = error.localizedDescription
-                isLoading = false
+                guard let self, generation == self.connectionGeneration else { return }
+                self.connectionTask = nil
+                self.isLoading = false
+                guard !Task.isCancelled, !(error is CancellationError),
+                      ProfileSettings.isActiveStore(store) else { return }
+                self.errorMessage = error.localizedDescription
             }
         }
     }
 
     func cancelDeviceFlow() {
+        invalidatePendingConnection()
         pollTask?.cancel()
         TraktAuthStore.clearDeviceFlow(store: store)
         statusMessage = nil
@@ -4004,7 +4162,9 @@ final class TraktSettingsViewModel: ObservableObject {
     }
 
     func disconnect() {
+        invalidatePendingConnection()
         pollTask?.cancel()
+        TraktAuthStore.clearDeviceFlow(store: store)
         isLoading = true
         let profileId = WatchedStore.activeProfileId
         Task {
@@ -4116,7 +4276,9 @@ final class TraktSettingsViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
                 if Task.isCancelled { return }
 
-                switch await self.service.pollDeviceToken() {
+                let result = await self.service.pollDeviceToken()
+                guard !Task.isCancelled, ProfileSettings.isActiveStore(self.store) else { return }
+                switch result {
                 case .pending:
                     self.statusMessage = "Waiting for Trakt approval..."
                 case .alreadyUsed:

@@ -100,6 +100,67 @@ final class TraktPkceAuthTests: XCTestCase {
 
     // MARK: - Refresh
 
+    func testApprovalAfterDeviceFlowWasClearedDoesNotAuthenticate() async throws {
+        let store = try XCTUnwrap(self.store)
+        store.set("cancel-test-id", forKey: SettingsKey.traktClientID)
+        seedActiveDeviceFlow(clientID: "cancel-test-id")
+        TraktStubURLProtocol.responder = { _ in
+            TraktAuthStore.clearDeviceFlow(store: store)
+            return (200, Data("""
+                {"access_token":"late-access","token_type":"Bearer","expires_in":3600,"refresh_token":"late-refresh","created_at":2}
+                """.utf8))
+        }
+
+        let result = await TraktAuthService(session: stubbedSession(), store: store).pollDeviceToken()
+
+        guard case .failed = result else { return XCTFail("Expected obsolete approval to be rejected") }
+        XCTAssertNil(TraktAuthStore.state(in: store).accessToken)
+        XCTAssertFalse(TraktAuthStore.isAuthenticated(in: store))
+    }
+
+    func testLatePollResponsesCannotClearOrSlowDownReplacementFlow() async throws {
+        let store = try XCTUnwrap(self.store)
+        store.set("replacement-test-id", forKey: SettingsKey.traktClientID)
+        for status in [400, 409, 410, 418, 429] {
+            seedActiveDeviceFlow(clientID: "replacement-test-id")
+            TraktStubURLProtocol.responder = { _ in
+                TraktAuthStore.saveDeviceFlow(
+                    TraktDeviceCodeResponse(deviceCode: "NEWCODE", userCode: "NEWUSER",
+                                            verificationURL: "https://trakt.tv/activate",
+                                            expiresIn: 600, interval: 7),
+                    clientID: "replacement-test-id", store: store
+                )
+                return (status, Data("{}".utf8))
+            }
+
+            let result = await TraktAuthService(session: stubbedSession(), store: store).pollDeviceToken()
+
+            guard case .failed = result else { return XCTFail("Expected obsolete status \(status) to be rejected") }
+            let state = TraktAuthStore.state(in: store)
+            XCTAssertEqual(state.deviceCode, "NEWCODE", "status \(status)")
+            XCTAssertEqual(state.userCode, "NEWUSER")
+            XCTAssertEqual(state.pollInterval, 7)
+            XCTAssertNil(state.accessToken)
+        }
+    }
+
+    func testAlreadyCancelledPollDoesNotStartTokenRequest() async throws {
+        store.set("cancel-test-id", forKey: SettingsKey.traktClientID)
+        seedActiveDeviceFlow(clientID: "cancel-test-id")
+        stubTokenSuccess()
+        let service = TraktAuthService(session: stubbedSession(), store: store)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await service.pollDeviceToken()
+        }
+
+        let result = await task.value
+
+        guard case .failed = result else { return XCTFail("Expected cancelled polling to stop") }
+        XCTAssertTrue(TraktStubURLProtocol.captured.isEmpty)
+        XCTAssertNil(TraktAuthStore.state(in: store).accessToken)
+    }
+
     func testRefreshOmitsClientSecretForSecretlessApp() async throws {
         store.set("YcBz-test-id", forKey: SettingsKey.traktClientID)
         TraktAuthStore.saveToken(

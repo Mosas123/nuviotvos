@@ -120,25 +120,25 @@ struct PlaybackDebugHUDView: View {
                 .tracking(1.2)
 
             VStack(alignment: .leading, spacing: 3) {
-                hudRow(label: "Video", value: info.video.isEmpty ? "3840×2160 · 23.976 fps · dolby-vision" : info.video)
-                hudRow(label: "HDR", value: info.hdr.isEmpty ? "Dolby Vision" : info.hdr)
-                hudRow(label: "V bitrate", value: info.vBitrate.isEmpty ? "avg mux 72.9 Mbit/s · now 82.0 Mbit/s" : info.vBitrate)
+                hudRow(label: "Video", value: info.video.isEmpty ? "Unavailable" : info.video)
+                hudRow(label: "HDR", value: info.hdr.isEmpty ? "Unavailable" : info.hdr)
+                hudRow(label: "V bitrate", value: info.vBitrate.isEmpty ? "Unavailable" : info.vBitrate)
                 hudRow(
                     label: "DV",
                     value: info.dv.isEmpty ? "None" : info.dv,
                     hasDot: info.dv != "None" && !info.dv.isEmpty,
                     dotColor: .green
                 )
-                hudRow(label: "DV HDR", value: info.dvHdr.isEmpty ? "MaxCLL 617 · MaxFALL 496 · MDL peak ~1001 nits" : info.dvHdr)
-                hudRow(label: "Decoder", value: info.decoder.isEmpty ? "c2.amlogic.dolby-vision.dvhe.decoder" : info.decoder)
+                hudRow(label: "DV HDR", value: info.dvHdr.isEmpty ? "Unavailable" : info.dvHdr)
+                hudRow(label: "Decoder", value: info.decoder.isEmpty ? "Unavailable" : info.decoder)
                 hudRow(
                     label: "Dropped",
                     value: info.dropped.isEmpty ? "0 frames" : info.dropped,
                     hasDot: true,
                     dotColor: info.droppedCount > 10 ? .red : (info.droppedCount > 0 ? .yellow : .green)
                 )
-                hudRow(label: "Frame lead", value: info.frameLead.isEmpty ? "+44.9 ms" : info.frameLead, hasDot: true, dotColor: .green)
-                hudRow(label: "Display", value: info.display.isEmpty ? "23.98 Hz" : info.display, hasDot: true, dotColor: .green)
+                hudRow(label: "Frame lead", value: info.frameLead.isEmpty ? "Unavailable" : info.frameLead, hasDot: true, dotColor: info.frameLead == "Unavailable" ? .gray : .green)
+                hudRow(label: "Display", value: info.display.isEmpty ? "Unavailable" : info.display, hasDot: true, dotColor: info.display == "Unavailable" ? .gray : .green)
             }
         }
     }
@@ -153,11 +153,11 @@ struct PlaybackDebugHUDView: View {
                 .tracking(1.2)
 
             VStack(alignment: .leading, spacing: 3) {
-                hudRow(label: "Audio", value: info.audio.isEmpty ? "TrueHD · 8ch · 48 kHz · passthrough" : info.audio, hasDot: true, dotColor: .green)
-                hudRow(label: "A bitrate", value: info.aBitrate.isEmpty ? "meas 5.14 Mbit/s" : info.aBitrate)
+                hudRow(label: "Audio", value: info.audio.isEmpty ? "Unavailable" : info.audio, hasDot: true, dotColor: info.audio == "Unavailable" ? .gray : .green)
+                hudRow(label: "A bitrate", value: info.aBitrate.isEmpty ? "Unavailable" : info.aBitrate)
                 hudRow(label: "Underruns", value: info.underruns.isEmpty ? "0 · native 0" : info.underruns, hasDot: true, dotColor: info.underrunsCount > 0 ? .yellow : .green)
-                hudRow(label: "Route", value: info.route.isEmpty ? "HDMI · 0 changes" : info.route)
-                hudRow(label: "A jitter", value: info.aJitter.isEmpty ? "drift avg 32 ms/s · max 343 · 13 ev" : info.aJitter, hasDot: true, dotColor: .green)
+                hudRow(label: "Route", value: info.route.isEmpty ? "Unavailable" : info.route)
+                hudRow(label: "A jitter", value: info.aJitter.isEmpty ? "Unavailable" : info.aJitter, hasDot: true, dotColor: info.aJitter == "Unavailable" ? .gray : .green)
             }
         }
     }
@@ -184,9 +184,9 @@ struct PlaybackDebugHUDView: View {
                     hasDot: true,
                     dotColor: info.diskBufferSeconds >= 10.0 ? .green : (info.diskBufferSeconds > 0 ? .yellow : .gray)
                 )
-                hudRow(label: "Speed", value: info.speed.isEmpty ? "est 199.0 Mbit/s" : info.speed, hasDot: true, dotColor: .green)
-                hudRow(label: "Ping", value: info.ping.isEmpty ? "7 ms" : info.ping, hasDot: true, dotColor: .green)
-                hudRow(label: "Loaded", value: info.loaded.isEmpty ? "1021.6 MB" : info.loaded)
+                hudRow(label: "Speed", value: info.speed.isEmpty ? "Unavailable" : info.speed, hasDot: true, dotColor: info.speed == "Unavailable" ? .gray : .green)
+                hudRow(label: "Ping", value: info.ping.isEmpty ? "--" : info.ping, hasDot: true, dotColor: info.ping == "--" ? .gray : .green)
+                hudRow(label: "Loaded", value: info.loaded.isEmpty ? "Unavailable" : info.loaded)
                 hudRow(
                     label: "Stalls",
                     value: info.stalls.isEmpty ? "0" : info.stalls,
@@ -209,18 +209,18 @@ struct PlaybackDebugHUDView: View {
             VStack(alignment: .leading, spacing: 3) {
                 hudRow(
                     label: "App CPU",
-                    value: info.appCpu.isEmpty ? "27 %" : info.appCpu,
+                    value: info.appCpu.isEmpty ? "-- %" : info.appCpu,
                     hasDot: true,
                     dotColor: info.appCpuPercent > 85 ? .yellow : .green
                 )
-                hudRow(label: "Memory", value: info.memory.isEmpty ? "heap 57/384 MB · native 841 MB" : info.memory, hasDot: true, dotColor: .green)
+                hudRow(label: "Memory", value: info.memory.isEmpty ? "Unavailable" : info.memory, hasDot: true, dotColor: info.memory == "Unavailable" ? .gray : .green)
                 hudRow(
                     label: "SoC temp",
-                    value: info.socTemp.isEmpty ? "48.9 °C" : info.socTemp,
+                    value: info.socTemp.isEmpty ? "Unavailable" : info.socTemp,
                     hasDot: true,
                     dotColor: info.isThermalElevated ? .yellow : .green
                 )
-                hudRow(label: "CPU clock", value: info.cpuClock.isEmpty ? "2.40 GHz · cap 2.40 GHz" : info.cpuClock, hasDot: true, dotColor: .green)
+                hudRow(label: "CPU clock", value: info.cpuClock.isEmpty ? "Unavailable" : info.cpuClock, hasDot: true, dotColor: info.cpuClock == "Unavailable" ? .gray : .green)
             }
         }
     }
@@ -274,7 +274,7 @@ struct PlaybackDebugHUDView: View {
         dotColor: Color = .green
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
-            if hasDot {
+            if hasDot && value != "--" {
                 statusDot(dotColor)
             } else {
                 statusDotSpacer

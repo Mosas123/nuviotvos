@@ -134,8 +134,10 @@ class PlayerViewModel: ObservableObject {
     @Published private(set) var subtitleStyle = SubtitleStyle.current
     /// Session-only override used when AI Subtitle auto-select is disabled.
     @Published private(set) var isAISubtitleTranslationManuallyEnabled = false
-    /// Current mpv `audio-delay`, in milliseconds. Per-session, not persisted.
-    @Published var audioDelayMs: Int = 0
+    /// Current audio delay in milliseconds. Persisted across sessions when `isAudioDelayPersistEnabled` is true.
+    @Published var audioDelayMs: Int = ProfileSettings.current.bool(forKey: SettingsKey.audioDelayPersistEnabled)
+        ? ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs)
+        : 0
     /// PCM amplification in whole dB (0…10), applied as mpv software volume.
     /// Per-session, not persisted.
     @Published var audioAmplificationDb: Int = 0
@@ -278,6 +280,7 @@ class PlayerViewModel: ObservableObject {
     private var hasLoaded = false
     private var didShutdown = false
     private var isTrailerPlaybackSession = false
+    private var hasClearedDismissalsForCurrentPlaybackSession = false
     var activeMeta: NuvioMeta?
     private var activeStreamURL: String?
     private var activeHTTPHeaders: [String: String] = [:]
@@ -1100,7 +1103,7 @@ class PlayerViewModel: ObservableObject {
     /// Applies all per-stream state for a title/episode. Shared by the initial
     /// `load` and the in-place `replaceStream` used for a seamless next-episode
     /// advance, so both paths reset resume/track/subtitle state identically.
-    private func applyStreamState(
+    func applyStreamState(
         url: URL,
         meta: NuvioMeta,
         subtitle: String,
@@ -1249,9 +1252,10 @@ class PlayerViewModel: ObservableObject {
         self.addedExternalSubtitleURLs = []
         self.pendingSelectedExternalSubtitleURL = nil
         self.isAISubtitleTranslationManuallyEnabled = false
+        self.hasClearedDismissalsForCurrentPlaybackSession = false
         if !preserveSessionPreferences {
             self.subtitleDelayMs = 0
-            self.audioDelayMs = 0
+            self.audioDelayMs = isAudioDelayPersistEnabled ? persistentAudioDelayMs : 0
             self.audioAmplificationDb = 0
         }
         self.skipIntervals = []
@@ -1408,7 +1412,8 @@ class PlayerViewModel: ObservableObject {
         let preferredLanguages = SubtitleLanguagePreferences.orderedFromDefaults()
         let hasActivePreferredSubtitle = Self.shouldPreserveBackendSubtitleSelection(
             subtitles.first(where: { $0.isSelected }),
-            preferredLanguages: preferredLanguages
+            preferredLanguages: preferredLanguages,
+            allowForcedSubtitles: Self.allowsAutomaticForcedSubtitles
         )
         let hasPendingOrAddedSubtitles = !pendingExternalSubtitles.isEmpty || !addedExternalSubtitleURLs.isEmpty
 
@@ -4141,8 +4146,27 @@ class PlayerViewModel: ObservableObject {
     func setAudioDelayMs(_ ms: Int) {
         let clamped = min(max(ms, -3_000), 3_000)
         audioDelayMs = clamped
+        if isAudioDelayPersistEnabled {
+            ProfileSettings.current.set(clamped, forKey: SettingsKey.persistentAudioDelayMs)
+        }
         sessionCoordinator.updateAudioDelay(Double(clamped) / 1_000)
         engine.setAudioDelay(Double(clamped) / 1000.0)
+    }
+
+    var isAudioDelayPersistEnabled: Bool {
+        ProfileSettings.current.bool(forKey: SettingsKey.audioDelayPersistEnabled)
+    }
+
+    var persistentAudioDelayMs: Int {
+        ProfileSettings.current.integer(forKey: SettingsKey.persistentAudioDelayMs)
+    }
+
+    func setAudioDelayPersistEnabled(_ enabled: Bool) {
+        ProfileSettings.current.set(enabled, forKey: SettingsKey.audioDelayPersistEnabled)
+        if enabled {
+            ProfileSettings.current.set(audioDelayMs, forKey: SettingsKey.persistentAudioDelayMs)
+        }
+        objectWillChange.send()
     }
 
     /// PCM amplification in whole dB (0…10).
@@ -4261,10 +4285,12 @@ class PlayerViewModel: ObservableObject {
               SubtitleLanguagePreferences.smartMatchingEnabled() else {
             return []
         }
+        let allowForcedSubtitles = allowsAutomaticForcedSubtitles
         for language in SubtitleLanguagePreferences.orderedFromDefaults() {
             if let match = subtitles.first(where: { subtitle in
-                SubtitleLanguagePreferences.matches(subtitle.language, target: language) ||
-                SubtitleLanguagePreferences.matches(subtitle.label, target: language)
+                (allowForcedSubtitles || !isForcedSubtitleLabel(subtitle.label)) &&
+                (SubtitleLanguagePreferences.matches(subtitle.language, target: language) ||
+                 SubtitleLanguagePreferences.matches(subtitle.label, target: language))
             }) {
                 return [match]
             }
@@ -4360,6 +4386,7 @@ class PlayerViewModel: ObservableObject {
         guard !didApplySubtitlePreference else { return }
         guard pendingTrackSelection?.subtitle == nil else { return }
         guard SubtitleLanguagePreferences.smartMatchingEnabled() else { return }
+        let allowForcedSubtitles = Self.allowsAutomaticForcedSubtitles
 
         let preferredLanguages = SubtitleLanguagePreferences.orderedFromDefaults()
         guard !preferredLanguages.isEmpty else {
@@ -4372,7 +4399,8 @@ class PlayerViewModel: ObservableObject {
         // ranked choice deliberately prefers a full track over an empty forced one.
         if Self.shouldPreserveBackendSubtitleSelection(
             subtitles.first(where: { $0.isSelected }),
-            preferredLanguages: preferredLanguages
+            preferredLanguages: preferredLanguages,
+            allowForcedSubtitles: allowForcedSubtitles
         ) {
             didApplySubtitlePreference = true
             return
@@ -4381,7 +4409,7 @@ class PlayerViewModel: ObservableObject {
         let loadedExternalURLs = Set(subtitles.map(\.externalFilename).filter { !$0.isEmpty })
         for language in preferredLanguages {
             if let matchingTrack = subtitles.first(where: { track in
-                subtitleTrack(track, matches: language)
+                subtitleTrack(track, matches: language, allowForcedSubtitles: allowForcedSubtitles)
             }) {
                 didApplySubtitlePreference = true
                 selectSubtitle(matchingTrack, persist: false)
@@ -4390,13 +4418,16 @@ class PlayerViewModel: ObservableObject {
 
             let hasPendingMatch = pendingExternalSubtitles.contains { subtitle in
                 !loadedExternalURLs.contains(subtitle.url) &&
+                (allowForcedSubtitles || !Self.isForcedSubtitleLabel(subtitle.label)) &&
                 (SubtitleLanguagePreferences.matches(subtitle.language, target: language) ||
                  SubtitleLanguagePreferences.matches(subtitle.label, target: language))
             }
             if hasPendingMatch { return }
         }
 
-        let pendingPreferredURLs = Set(pendingExternalSubtitles.map(\.url))
+        let pendingPreferredURLs = Set(pendingExternalSubtitles.filter {
+            allowForcedSubtitles || !Self.isForcedSubtitleLabel($0.label)
+        }.map(\.url))
         guard pendingPreferredURLs.isSubset(of: loadedExternalURLs) else { return }
         guard subtitles.contains(where: { $0.id != "off" }) else { return }
         guard let off = subtitles.first(where: { $0.id == "off" }) else { return }
@@ -4406,11 +4437,13 @@ class PlayerViewModel: ObservableObject {
 
     static func shouldPreserveBackendSubtitleSelection(
         _ selectedTrack: SubtitleTrack?,
-        preferredLanguages: [String]
+        preferredLanguages: [String],
+        allowForcedSubtitles: Bool = true
     ) -> Bool {
         guard let selectedTrack,
               selectedTrack.id != "off",
-              selectedTrack.isSelected else {
+              selectedTrack.isSelected,
+              allowForcedSubtitles || !isForcedSubtitleLabel(selectedTrack.name) else {
             return false
         }
 
@@ -4679,10 +4712,26 @@ class PlayerViewModel: ObservableObject {
         SubtitleLanguagePreferences.matches(track.name, target: language)
     }
 
-    private func subtitleTrack(_ track: SubtitleTrack, matches language: String) -> Bool {
+    private func subtitleTrack(
+        _ track: SubtitleTrack,
+        matches language: String,
+        allowForcedSubtitles: Bool
+    ) -> Bool {
         track.id != "off" &&
+        (allowForcedSubtitles || !Self.isForcedSubtitleLabel(track.name)) &&
         (SubtitleLanguagePreferences.matches(track.language, target: language) ||
          SubtitleLanguagePreferences.matches(track.name, target: language))
+    }
+
+    private static var allowsAutomaticForcedSubtitles: Bool {
+        ProfileSettings.current.object(forKey: SettingsKey.forcedSubtitles) as? Bool ?? true
+    }
+
+    static func isForcedSubtitleLabel(_ label: String?) -> Bool {
+        let words = (label ?? "")
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+        return words.contains("forced") || words.contains("forzado") || words.contains("forzados")
     }
 
     private static func sameTrackText(_ lhs: String?, _ rhs: String?) -> Bool {
@@ -5544,7 +5593,7 @@ class PlayerViewModel: ObservableObject {
                 ? checkpoint.time
                 : nil
         }
-        let progressTime = checkpointTime ?? (force ? (lastStablePlaybackTime ?? time) : time)
+        let progressTime = checkpointTime ?? lastStablePlaybackTime ?? time
         if isPeriodicHeartbeat, !force {
             if let lastSavedProgressPosition,
                abs(progressTime.current - lastSavedProgressPosition) < 2.0 {
@@ -5554,7 +5603,7 @@ class PlayerViewModel: ObservableObject {
         // Nuvio Sync retains the 10-second accidental-playback safeguard. A
         // Trakt start scrobble is the source of its Continue Watching row, so
         // send it once playback has genuinely begun instead of waiting 10+ s.
-        let minimumProgressSeconds: Double = usesTraktProgress ? 1 : 10
+        let minimumProgressSeconds: Double = usesTraktProgress ? 1 : WatchProgressLedger.minimumTrackableSeconds
         guard let activeMeta,
               let activeStreamURL,
               progressTime.current.isFinite,
@@ -5567,12 +5616,19 @@ class PlayerViewModel: ObservableObject {
               !didDetectReplacementStream,
               !isAwaitingStreamStart || didApplyResume,
               progressTime.current >= minimumProgressSeconds || (force && didApplyResume && progressTime.current > 5) else {
-            print("[ContinueWatching][Player] saveProgress guard failed: meta=\(activeMeta?.id ?? "nil"), streamURL=\(activeStreamURL != nil), pos=\(progressTime.current), dur=\(progressTime.duration), trackable=\(isTrackablePlayback), isReplacement=\(loadedStreamLooksLikeReplacement()), didDetectReplacement=\(didDetectReplacementStream), awaitingStreamStart=\(isAwaitingStreamStart), didApplyResume=\(didApplyResume), minSec=\(minimumProgressSeconds), force=\(force)")
+            if !isPeriodicHeartbeat || progressTime.current >= minimumProgressSeconds {
+                print("[ContinueWatching][Player] saveProgress guard failed: meta=\(activeMeta?.id ?? "nil"), streamURL=\(activeStreamURL != nil), pos=\(progressTime.current), dur=\(progressTime.duration), trackable=\(isTrackablePlayback), isReplacement=\(loadedStreamLooksLikeReplacement()), didDetectReplacement=\(didDetectReplacementStream), awaitingStreamStart=\(isAwaitingStreamStart), didApplyResume=\(didApplyResume), minSec=\(minimumProgressSeconds), force=\(force)")
+            }
             return
         }
 
         let epString = resolvedEpisodeNumbers.map { "S\($0.season)E\($0.episode)" } ?? "movie"
         print("[ContinueWatching][Player] saveProgress executing: meta=\(activeMeta.id) (\(activeMeta.name)), ep=\(epString), pos=\(progressTime.current)/\(progressTime.duration) (\(String(format: "%.1f", (progressTime.current / progressTime.duration) * 100))%), force=\(force), heartbeat=\(isPeriodicHeartbeat), usesTraktProgress=\(usesTraktProgress)")
+
+        if !hasClearedDismissalsForCurrentPlaybackSession {
+            hasClearedDismissalsForCurrentPlaybackSession = true
+            ContinueWatchingDismissStore.clear(contentId: activeMeta.id)
+        }
 
         if shouldSaveNextUpProgress(at: progressTime), let nextEpisode {
             print("[ContinueWatching][Player] shouldSaveNextUpProgress triggered for nextEpisode: S\(nextEpisode.season)E\(nextEpisode.episode)")

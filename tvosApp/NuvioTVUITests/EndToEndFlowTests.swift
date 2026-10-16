@@ -7,6 +7,7 @@
 
 import XCTest
 
+@MainActor
 final class EndToEndFlowTests: XCTestCase {
 
     var app: XCUIApplication!
@@ -33,17 +34,17 @@ final class EndToEndFlowTests: XCTestCase {
 
         // 3. Scroll through categories
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
-            scrollView.swipeUp()
+        if requireUICondition(scrollView.exists) {
+            moveTVFocus(.down, in: app, within: scrollView)
             sleep(1)
         }
 
         // 4. Tap a content item
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
-                firstImage.tap()
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 // 5. View details screen
@@ -53,14 +54,14 @@ final class EndToEndFlowTests: XCTestCase {
 
                 // 6. Scroll details to see more info
                 let detailsScrollView = app.scrollViews.firstMatch
-                if detailsScrollView.exists {
-                    detailsScrollView.swipeUp()
-                    sleep(0.5)
+                if requireUICondition(detailsScrollView.exists) {
+                    moveTVFocus(.down, in: app, within: detailsScrollView)
+                    Thread.sleep(forTimeInterval: 0.5)
                 }
 
                 // 7. Navigate back to home
-                if app.navigationBars.buttons.firstMatch.exists {
-                    app.navigationBars.buttons.firstMatch.tap()
+                if requireUICondition(app.exists) {
+                    XCUIRemote.shared.press(.menu)
                     sleep(1)
                 }
 
@@ -80,34 +81,34 @@ final class EndToEndFlowTests: XCTestCase {
         // For now, we'll simulate browsing on home screen
 
         // 3. Apply genre filter
-        if app.buttons["action"].exists {
-            app.buttons["action"].tap()
+        if requireUICondition(app.buttons["action"].exists) {
+            selectTVElement(app.buttons["action"], in: app)
             sleep(1)
             XCTAssertTrue(app.exists, "Genre filter should apply")
         }
 
         // 4. Change sort option
-        if app.buttons["Popular"].exists {
-            app.buttons["Popular"].tap()
+        if requireUICondition(app.buttons["Popular"].exists) {
+            selectTVElement(app.buttons["Popular"], in: app)
             sleep(1)
             XCTAssertTrue(app.exists, "Sort should apply")
         }
 
         // 5. Scroll to load more items
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             for _ in 1...3 {
-                scrollView.swipeUp()
-                sleep(0.5)
+                moveTVFocus(.down, in: app, within: scrollView)
+                Thread.sleep(forTimeInterval: 0.5)
             }
         }
 
         // 6. Tap an item
         let images = app.images
-        if images.count > 5 {
+        if requireUICondition(images.count > 5) {
             let item = images.element(boundBy: 5)
-            if item.exists && item.isHittable {
-                item.tap()
+            if requireUICondition(item.exists && item.isHittable) {
+                selectTVElement(item, in: app)
                 sleep(1)
 
                 // 7. Verify details loaded
@@ -118,8 +119,8 @@ final class EndToEndFlowTests: XCTestCase {
         }
 
         // 8. Clear filters (if possible)
-        if app.buttons["Clear Filters"].exists {
-            app.buttons["Clear Filters"].tap()
+        if requireUICondition(app.buttons["Clear Filters"].exists) {
+            selectTVElement(app.buttons["Clear Filters"], in: app)
             sleep(1)
         }
     }
@@ -130,34 +131,36 @@ final class EndToEndFlowTests: XCTestCase {
         // 1. Navigate to content details
         sleep(2)
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
-                firstImage.tap()
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 // 2. Add to watchlist
-                if app.buttons["Watchlist"].exists {
-                    app.buttons["Watchlist"].tap()
-                    sleep(0.5)
+                if requireUICondition(app.buttons["Watchlist"].exists) {
+                    selectTVElement(app.buttons["Watchlist"], in: app)
+                    Thread.sleep(forTimeInterval: 0.5)
                     XCTAssertTrue(app.buttons["Watchlist"].exists, "Watchlist state should update")
 
                     // 3. Remove from watchlist
-                    app.buttons["Watchlist"].tap()
-                    sleep(0.5)
+                    selectTVElement(app.buttons["Watchlist"], in: app)
+                    Thread.sleep(forTimeInterval: 0.5)
                     XCTAssertTrue(app.buttons["Watchlist"].exists, "Should toggle watchlist")
                 }
 
                 // 4. Navigate back
-                if app.navigationBars.buttons.firstMatch.exists {
-                    app.navigationBars.buttons.firstMatch.tap()
+                if requireUICondition(app.exists) {
+                    XCUIRemote.shared.press(.menu)
                     sleep(1)
                 }
 
                 // 5. Check if watchlist section updated on home screen
-                if app.staticTexts["My Watchlist"].exists || app.staticTexts["Watchlist"].exists {
-                    XCTAssertTrue(true, "Watchlist section should be visible")
-                }
+                XCTAssertTrue(
+                    app.staticTexts["My Watchlist"].waitForExistence(timeout: 5) ||
+                        app.staticTexts["Watchlist"].waitForExistence(timeout: 2),
+                    "Watchlist section must be visible after returning Home"
+                )
             }
         }
     }
@@ -168,15 +171,15 @@ final class EndToEndFlowTests: XCTestCase {
         // 1. Navigate to content details
         sleep(2)
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
-                firstImage.tap()
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 // 2. Open rating interface
-                if app.buttons["Watched"].exists {
-                    app.buttons["Watched"].tap()
+                if requireUICondition(app.buttons["Watched"].exists) {
+                    selectTVElement(app.buttons["Watched"], in: app)
                     sleep(1)
 
                     // 3. Submit rating (implementation varies)
@@ -185,8 +188,8 @@ final class EndToEndFlowTests: XCTestCase {
                 }
 
                 // 4. Navigate back
-                if app.navigationBars.buttons.firstMatch.exists {
-                    app.navigationBars.buttons.firstMatch.tap()
+                if requireUICondition(app.exists) {
+                    XCUIRemote.shared.press(.menu)
                     sleep(1)
                 }
             }
@@ -199,15 +202,15 @@ final class EndToEndFlowTests: XCTestCase {
         // 1. Navigate to content details
         sleep(2)
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
-                firstImage.tap()
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 // 2. Open share sheet
-                if app.buttons["Share"].exists {
-                    app.buttons["Share"].tap()
+                if requireUICondition(app.buttons["Share"].exists) {
+                    selectTVElement(app.buttons["Share"], in: app)
                     sleep(1)
 
                     // 3. Verify share sheet appears (platform specific)
@@ -217,9 +220,9 @@ final class EndToEndFlowTests: XCTestCase {
                     // 4. Dismiss share sheet (tap outside or cancel)
                     // This varies by platform
                     let cancelButton = app.buttons["Cancel"]
-                    if cancelButton.exists {
-                        cancelButton.tap()
-                        sleep(0.5)
+                    if requireUICondition(cancelButton.exists) {
+                        selectTVElement(cancelButton, in: app)
+                        Thread.sleep(forTimeInterval: 0.5)
                     }
                 }
             }
@@ -234,11 +237,11 @@ final class EndToEndFlowTests: XCTestCase {
 
         // 2. Navigate to first content item
         let images = app.images
-        if images.count > 2 {
+        if requireUICondition(images.count > 2) {
             // First item
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
-                firstImage.tap()
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 3.0) ||
@@ -246,15 +249,15 @@ final class EndToEndFlowTests: XCTestCase {
                             "First details should load")
 
                 // 3. Navigate back
-                if app.navigationBars.buttons.firstMatch.exists {
-                    app.navigationBars.buttons.firstMatch.tap()
+                if requireUICondition(app.exists) {
+                    XCUIRemote.shared.press(.menu)
                     sleep(1)
                 }
 
                 // 4. Navigate to second content item
                 let secondImage = images.element(boundBy: 1)
-                if secondImage.exists && secondImage.isHittable {
-                    secondImage.tap()
+                if requireUICondition(secondImage.exists && secondImage.isHittable) {
+                    selectTVElement(secondImage, in: app)
                     sleep(1)
 
                     XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 3.0) ||
@@ -262,15 +265,15 @@ final class EndToEndFlowTests: XCTestCase {
                                 "Second details should load")
 
                     // 5. Navigate back
-                    if app.navigationBars.buttons.firstMatch.exists {
-                        app.navigationBars.buttons.firstMatch.tap()
+                    if requireUICondition(app.exists) {
+                        XCUIRemote.shared.press(.menu)
                         sleep(1)
                     }
 
                     // 6. Navigate to third content item
                     let thirdImage = images.element(boundBy: 2)
-                    if thirdImage.exists && thirdImage.isHittable {
-                        thirdImage.tap()
+                    if requireUICondition(thirdImage.exists && thirdImage.isHittable) {
+                        selectTVElement(thirdImage, in: app)
                         sleep(1)
 
                         XCTAssertTrue(app.buttons["Play"].waitForExistence(timeout: 3.0) ||
@@ -278,8 +281,8 @@ final class EndToEndFlowTests: XCTestCase {
                                     "Third details should load")
 
                         // 7. Navigate back to home
-                        if app.navigationBars.buttons.firstMatch.exists {
-                            app.navigationBars.buttons.firstMatch.tap()
+                        if requireUICondition(app.exists) {
+                            XCUIRemote.shared.press(.menu)
                             sleep(1)
                         }
                     }
@@ -301,16 +304,16 @@ final class EndToEndFlowTests: XCTestCase {
         let initialImages = app.images.count
 
         // 3. Switch to series (if toggle exists)
-        if app.buttons["Series"].exists {
-            app.buttons["Series"].tap()
+        if requireUICondition(app.buttons["Series"].exists) {
+            selectTVElement(app.buttons["Series"], in: app)
             sleep(1)
 
             // 4. Verify content reloaded
             XCTAssertGreaterThan(app.images.count, 0, "Should show series content")
 
             // 5. Switch back to movies
-            if app.buttons["Movies"].exists {
-                app.buttons["Movies"].tap()
+            if requireUICondition(app.buttons["Movies"].exists) {
+                selectTVElement(app.buttons["Movies"], in: app)
                 sleep(1)
 
                 // 6. Verify content reloaded
@@ -326,14 +329,14 @@ final class EndToEndFlowTests: XCTestCase {
         sleep(2)
 
         // 2. Apply genre filter
-        if app.buttons["drama"].exists {
-            app.buttons["drama"].tap()
+        if requireUICondition(app.buttons["drama"].exists) {
+            selectTVElement(app.buttons["drama"], in: app)
             sleep(1)
         }
 
         // 3. Apply sort
-        if app.buttons["Popular"].exists {
-            app.buttons["Popular"].tap()
+        if requireUICondition(app.buttons["Popular"].exists) {
+            selectTVElement(app.buttons["Popular"], in: app)
             sleep(1)
         }
 
@@ -342,17 +345,17 @@ final class EndToEndFlowTests: XCTestCase {
 
         // 5. Scroll to load more filtered items
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
-            scrollView.swipeUp()
+        if requireUICondition(scrollView.exists) {
+            moveTVFocus(.down, in: app, within: scrollView)
             sleep(1)
         }
 
         // 6. View a filtered item's details
         let images = app.images
-        if images.count > 0 {
+        if requireUICondition(images.count > 0) {
             let firstImage = images.element(boundBy: 0)
-            if firstImage.exists && firstImage.isHittable {
-                firstImage.tap()
+            if requireUICondition(firstImage.exists && firstImage.isHittable) {
+                selectTVElement(firstImage, in: app)
                 sleep(1)
 
                 // 7. Verify details loaded
@@ -361,16 +364,16 @@ final class EndToEndFlowTests: XCTestCase {
                             "Filtered item details should load")
 
                 // 8. Navigate back
-                if app.navigationBars.buttons.firstMatch.exists {
-                    app.navigationBars.buttons.firstMatch.tap()
+                if requireUICondition(app.exists) {
+                    XCUIRemote.shared.press(.menu)
                     sleep(1)
                 }
             }
         }
 
         // 9. Clear all filters
-        if app.buttons["Clear Filters"].exists {
-            app.buttons["Clear Filters"].tap()
+        if requireUICondition(app.buttons["Clear Filters"].exists) {
+            selectTVElement(app.buttons["Clear Filters"], in: app)
             sleep(1)
         }
 
@@ -386,16 +389,16 @@ final class EndToEndFlowTests: XCTestCase {
 
         for iteration in 1...5 {
             let images = app.images
-            if images.count > iteration {
+            if requireUICondition(images.count > iteration) {
                 let image = images.element(boundBy: iteration % images.count)
-                if image.exists && image.isHittable {
-                    image.tap()
-                    sleep(0.5)
+                if requireUICondition(image.exists && image.isHittable) {
+                    selectTVElement(image, in: app)
+                    Thread.sleep(forTimeInterval: 0.5)
 
                     // Quick navigate back
-                    if app.navigationBars.buttons.firstMatch.exists {
-                        app.navigationBars.buttons.firstMatch.tap()
-                        sleep(0.5)
+                    if requireUICondition(app.exists) {
+                        XCUIRemote.shared.press(.menu)
+                        Thread.sleep(forTimeInterval: 0.5)
                     }
                 }
             }
@@ -410,17 +413,17 @@ final class EndToEndFlowTests: XCTestCase {
         sleep(2)
 
         let scrollView = app.scrollViews.firstMatch
-        if scrollView.exists {
+        if requireUICondition(scrollView.exists) {
             // Scroll down extensively
             for _ in 1...20 {
-                scrollView.swipeUp()
-                sleep(0.2)
+                moveTVFocus(.down, in: app, within: scrollView)
+                Thread.sleep(forTimeInterval: 0.2)
             }
 
             // Scroll back up
             for _ in 1...20 {
-                scrollView.swipeDown()
-                sleep(0.2)
+                moveTVFocus(.up, in: app, within: scrollView)
+                Thread.sleep(forTimeInterval: 0.2)
             }
 
             // App should remain responsive
@@ -436,14 +439,14 @@ final class EndToEndFlowTests: XCTestCase {
 
             // Complete flow: home -> details -> back
             let images = app.images
-            if images.count > 0 {
+            if requireUICondition(images.count > 0) {
                 let firstImage = images.element(boundBy: 0)
-                if firstImage.exists && firstImage.isHittable {
-                    firstImage.tap()
+                if requireUICondition(firstImage.exists && firstImage.isHittable) {
+                    selectTVElement(firstImage, in: app)
                     sleep(1)
 
-                    if app.navigationBars.buttons.firstMatch.exists {
-                        app.navigationBars.buttons.firstMatch.tap()
+                    if requireUICondition(app.exists) {
+                        XCUIRemote.shared.press(.menu)
                         sleep(1)
                     }
                 }

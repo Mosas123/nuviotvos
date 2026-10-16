@@ -24,6 +24,9 @@ class DetailsViewModel: ObservableObject {
     @Published private(set) var uiState = DetailsUiState()
     private(set) var didLoadMetadataSuccessfully = false
     private(set) var metadataLoadError: String?
+    private(set) var prefetchedStreamId: String?
+    private(set) var prefetchedEpisode: NuvioVideo?
+    private(set) var prefetchStartTime: Date?
 
     private let repository: CatalogRepository
     private let streamDiscoveryMode: DetailsStreamDiscoveryMode
@@ -31,16 +34,19 @@ class DetailsViewModel: ObservableObject {
     private var streamObserveTask: Task<Void, Never>?
     private var enrichmentTask: Task<Void, Never>?
     private var deferredLoadTask: Task<Void, Never>?
-    private var watchlistMutationTask: Task<Void, Never>?
+    private(set) var watchlistMutationTask: Task<Void, Never>?
     /// Invalidates every asynchronous completion from an older details load.
     /// This is intentionally separate from the content id: the same title can
     /// be refreshed while its previous request is still in flight.
     private var detailsRequestGeneration: UInt64 = 0
+    private var watchlistMutationGeneration: UInt64 = 0
     private var observedRequestKey: String?
     private var lastAppliedStreamsRequestKey: String?
     private var lastAppliedStreamsRevision: UInt64?
     private let deferredPreparationDelay: AsyncDelay
     private let injectedEnrichmentStarter: EnrichmentStarter?
+    private let watchlistContext: @MainActor () -> SelectedLibraryMutationContext?
+    private let remoteWatchlistMutation: @MainActor (NuvioMeta, Bool) async -> Bool
 
     init(
         repository: CatalogRepository,
@@ -48,12 +54,20 @@ class DetailsViewModel: ObservableObject {
         deferredPreparationDelay: @escaping AsyncDelay = {
             try await Task.sleep(nanoseconds: 350_000_000)
         },
-        enrichmentStarter: EnrichmentStarter? = nil
+        enrichmentStarter: EnrichmentStarter? = nil,
+        watchlistContext: @escaping @MainActor () -> SelectedLibraryMutationContext? = {
+            SelectedLibraryMutationContext()
+        },
+        remoteWatchlistMutation: @escaping @MainActor (NuvioMeta, Bool) async -> Bool = { meta, membership in
+            await SelectedLibraryService.setWatchlist(meta, isInWatchlist: membership)
+        }
     ) {
         self.repository = repository
         self.streamDiscoveryMode = streamDiscoveryMode
         self.deferredPreparationDelay = deferredPreparationDelay
         self.injectedEnrichmentStarter = enrichmentStarter
+        self.watchlistContext = watchlistContext
+        self.remoteWatchlistMutation = remoteWatchlistMutation
     }
 
     @discardableResult
@@ -66,6 +80,9 @@ class DetailsViewModel: ObservableObject {
         streamObserveTask?.cancel()
         enrichmentTask?.cancel()
         uiState.isLoadingEnrichment = false
+        prefetchedStreamId = nil
+        prefetchedEpisode = nil
+        prefetchStartTime = nil
         detailsRequestGeneration &+= 1
         let requestGeneration = detailsRequestGeneration
 
@@ -127,9 +144,7 @@ class DetailsViewModel: ObservableObject {
                           self.detailsRequestGeneration == requestGeneration,
                           self.uiState.meta?.id == meta.id else { return }
 
-                    if !meta.isSeries {
-                        self.prepareStreams(forId: meta.streamId, type: meta.type)
-                    }
+                    self.triggerStreamPreFetch(for: meta)
                     let metaHasImdbId = NuvioMeta.canonicalImdbID(from: meta.imdbId ?? "") != nil
                         || NuvioMeta.canonicalImdbID(from: meta.id) != nil
                     let needsEnrichmentRetry = !cachedHadImdbId && metaHasImdbId
@@ -170,6 +185,56 @@ class DetailsViewModel: ObservableObject {
         enrichmentTask?.cancel()
         enrichmentTask = nil
         uiState.isLoadingEnrichment = false
+        prefetchedStreamId = nil
+        prefetchedEpisode = nil
+        prefetchStartTime = nil
+    }
+
+    func resolveDefaultPlayTarget(for meta: NuvioMeta) -> (streamId: String, episode: NuvioVideo?)? {
+        if meta.isSeries || NuvioMeta.isSeriesType(meta.type) {
+            guard let videos = meta.videos, !videos.isEmpty else {
+                return nil
+            }
+            let continueItem: ContinueWatchingItem? = {
+                if RemoteTrackingState.isProgressSourceAuthenticated {
+                    return TraktProgressService.currentContinueWatchingItem(for: meta)
+                }
+                return ContinueWatchingStore.item(for: meta.id)
+            }()
+            let watchedKeys = WatchedStore.currentSnapshot().watchedEpisodeKeys(meta: meta)
+            let playTarget = TvDetailsPlayTargetBuilder.makePlayTarget(
+                episodes: videos,
+                continueItem: continueItem,
+                watchedKeys: watchedKeys
+            )
+            if let episode = playTarget.episode {
+                let streamId = meta.canonicalEpisodeStreamId(for: episode)
+                return (streamId, episode)
+            }
+            return nil
+        } else {
+            return (meta.streamId, nil)
+        }
+    }
+
+    func triggerStreamPreFetch(for meta: NuvioMeta) {
+        let prefetchEnabled = (ProfileSettings.current.object(forKey: SettingsKey.backgroundStreamPreFetch) as? Bool) ?? true
+        guard prefetchEnabled else { return }
+        guard prefetchedStreamId == nil else { return }
+
+        guard let (targetStreamId, targetEpisode) = resolveDefaultPlayTarget(for: meta) else {
+            return
+        }
+        prefetchedStreamId = targetStreamId
+        prefetchedEpisode = targetEpisode
+        prefetchStartTime = Date()
+        let contentType = (meta.isSeries || NuvioMeta.isSeriesType(meta.type)) ? "series" : meta.type
+        if let targetEpisode {
+            print("[PreFetch] 🚀 Started background stream pre-fetch for series \"\(meta.name)\" S\(targetEpisode.season)E\(targetEpisode.episode) (streamId: \(targetStreamId))")
+        } else {
+            print("[PreFetch] 🚀 Started background stream pre-fetch for \"\(meta.name)\" (streamId: \(targetStreamId))")
+        }
+        prepareStreams(forId: targetStreamId, type: contentType)
     }
 
     /// Loads More Like This, Production companies, and top Trakt comments
@@ -218,6 +283,16 @@ class DetailsViewModel: ObservableObject {
                         let episodes = await TmdbDetailsService.fetchEpisodes(for: meta)
                         await MainActor.run { [weak self] in
                             self?.applyTmdbEpisodes(episodes, for: meta.id, generation: generation)
+                        }
+                    }
+                }
+
+                // 3b. TMDB Certification (Content Rating)
+                if meta.certification == nil || meta.certification?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                    group.addTask {
+                        let cert = await TmdbDetailsService.fetchCertification(for: meta)
+                        await MainActor.run { [weak self] in
+                            self?.applyCertification(cert, for: meta.id, generation: generation)
                         }
                     }
                 }
@@ -333,6 +408,15 @@ class DetailsViewModel: ObservableObject {
         }
     }
 
+    private func applyCertification(_ certification: String?, for metaId: String, generation: UInt64) {
+        guard isCurrentRequest(metaId: metaId, generation: generation) else { return }
+        guard let cert = certification?.trimmingCharacters(in: .whitespacesAndNewlines), !cert.isEmpty else { return }
+        guard let currentMeta = uiState.meta else { return }
+        if currentMeta.certification == nil || currentMeta.certification?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            uiState.meta = currentMeta.withCertification(cert)
+        }
+    }
+
     private func applyMdbListUserRating(_ rating: Int?, for metaId: String, generation: UInt64) {
         guard isCurrentRequest(metaId: metaId, generation: generation) else { return }
         uiState.mdbListUserRating = rating
@@ -355,7 +439,11 @@ class DetailsViewModel: ObservableObject {
                 fromTmdb: episodes,
                 parentId: currentMeta.id
             )
-            uiState.meta = currentMeta.withVideos(mergedVideos)
+            let updatedMeta = currentMeta.withVideos(mergedVideos)
+            uiState.meta = updatedMeta
+            if (updatedMeta.isSeries || NuvioMeta.isSeriesType(updatedMeta.type)) && prefetchedStreamId == nil {
+                triggerStreamPreFetch(for: updatedMeta)
+            }
         }
     }
 
@@ -568,35 +656,33 @@ class DetailsViewModel: ObservableObject {
     func toggleWatchlist() {
         guard let meta = uiState.meta else { return }
         if TraktSettingsStore.librarySourceMode == .local {
+            watchlistMutationGeneration &+= 1
             uiState.isInWatchlist = LibraryStore.toggle(meta: meta)
             return
         }
 
-        // A Trakt-selected library must never silently fall back to Nuvio
-        // Sync. Without a live Trakt session, leave the state unchanged.
-        guard SelectedLibraryService.isSelectedAndAuthenticated else { return }
+        // Capture the selected account before waiting; a later login must never
+        // inherit this intent. Token refresh keeps the same account binding.
+        guard let context = watchlistContext() else { return }
 
-        let store = ProfileSettings.current
-        let librarySource = TraktSettingsStore.librarySourceMode
         // Keep Details responsive, then let LibraryViewModel refresh the
         // Trakt-backed list from the notification posted after the mutation.
         let desiredMembership = !uiState.isInWatchlist
+        watchlistMutationGeneration &+= 1
+        let mutationGeneration = watchlistMutationGeneration
+        let requestGeneration = detailsRequestGeneration
         uiState.isInWatchlist = desiredMembership
         let previousMutation = watchlistMutationTask
         watchlistMutationTask = Task { @MainActor in
-            if let previousMutation {
-                await previousMutation.value
-            }
-            guard !Task.isCancelled,
-                  ProfileSettings.isActiveStore(store),
-                  TraktSettingsStore.librarySourceMode == librarySource else { return }
-
-            let succeeded = await SelectedLibraryService.setWatchlist(
-                meta,
-                isInWatchlist: desiredMembership
-            )
-            guard !Task.isCancelled, uiState.meta?.id == meta.id else { return }
-            if !succeeded {
+            if let previousMutation { await previousMutation.value }
+            guard !Task.isCancelled, context.isCurrent else { return }
+            let succeeded = await remoteWatchlistMutation(meta, desiredMembership)
+            guard !Task.isCancelled, context.isCurrent,
+                  watchlistMutationGeneration == mutationGeneration,
+                  detailsRequestGeneration == requestGeneration,
+                  uiState.meta?.id == meta.id,
+                  uiState.meta?.type == meta.type else { return }
+            if !succeeded, uiState.isInWatchlist == desiredMembership {
                 uiState.isInWatchlist = !desiredMembership
             }
         }

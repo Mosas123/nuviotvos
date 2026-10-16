@@ -614,6 +614,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         mpv = mpv_create()
         guard mpv != nil else {
             print("[MPV] Failed to create mpv instance")
+            isPlayerLoading = false
+            setPlaybackError("MPV could not create a playback instance.")
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
             memoryWatchdog.record(event: "mpv_create_failed")
 #endif
@@ -717,7 +719,23 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         checkError(mpv_set_option_string(mpv, "target-prim", "auto"))
         checkError(mpv_set_option_string(mpv, "target-trc", "auto"))
 
-        checkError(mpv_initialize(mpv))
+        let initializeStatus = mpv_initialize(mpv)
+        guard initializeStatus >= 0 else {
+            let message = String(cString: mpv_error_string(initializeStatus))
+            print("[MPV] initialize failed: \(message)")
+            let failedContext = mpv
+            mpv = nil
+            if let failedContext {
+                // No observers or wakeup callback have been registered yet.
+                eventQueue.async { mpv_destroy(failedContext) }
+            }
+            isPlayerLoading = false
+            setPlaybackError("MPV could not start: \(message)")
+#if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
+            memoryWatchdog.record(event: "mpv_initialize_failed")
+#endif
+            return
+        }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryWatchdog.record(event: "mpv_initialized")
 #endif
@@ -805,7 +823,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         wasPlayingBeforeBackground = false
         isApplicationBackgrounded = false
         screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback: shouldResume=\(shouldResume), lifecyclePos=\(String(describing: lifecyclePositionMs))ms")
-        setStringProperty("vid", "auto")
+        if !isDisplaySwitchInFlight {
+            setStringProperty("vid", "auto")
+        }
         clearCleanEndState()
 
         if let target = lifecyclePositionMs {
@@ -933,6 +953,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     private func attemptStartPendingLoad() {
         guard let url = pendingURL, mpv != nil else { return }
+        // The active display wait will start the latest queued load once safe.
+        guard !isDisplaySwitchInFlight else { return }
         guard isViewLoaded, view.bounds.width > 1, view.bounds.height > 1 else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryDiagnosticSessionID = UUID().uuidString
@@ -1196,7 +1218,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let width = getInt("video-params/w")
         let height = getInt("video-params/h")
         var fps = getDouble("container-fps")
-        if fps <= 0 { fps = getDouble("estimated-vf-fps") }
+        if !fps.isFinite || fps <= 0 { fps = getDouble("estimated-vf-fps") }
 
         let videoCodec = getString("current-tracks/video/codec") ?? ""
         let gamma = (getString("video-params/gamma") ?? "").lowercased()
@@ -1209,8 +1231,6 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             dynamicRange = "HLG"
         } else if gamma.contains("pq") || gamma.contains("2084") {
             dynamicRange = "HDR10/PQ"
-        } else if primaries.contains("2020") {
-            dynamicRange = "HDR (BT.2020)"
         } else {
             dynamicRange = "SDR"
         }
@@ -1261,7 +1281,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         }
 
         let isDV = dvProfile > 0
-        let fpsStr = fps > 0 ? String(format: "%.3f fps", fps) : "23.976 fps"
+        let fpsStr = fps.isFinite && fps > 0 ? String(format: "%.3f fps", fps) : "--"
         let videoCodecLabel = Self.videoCodecLabel(videoCodec)
         let videoStr = width > 0 && height > 0
             ? "\(width)×\(height) · \(fpsStr) · \(isDV ? "dolby-vision" : videoCodecLabel.lowercased())"
@@ -1269,13 +1289,12 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
         let vBit = getDouble("video-bitrate")
         let vBitrateStr = vBit > 0
-            ? String(format: "avg mux %.1f Mbit/s · now %.1f Mbit/s", vBit / 1_000_000.0, vBit / 1_000_000.0)
-            : "avg mux 72.9 Mbit/s · now 82.0 Mbit/s"
+            ? String(format: "%.1f Mbit/s", vBit / 1_000_000.0)
+            : "--"
 
-        let dvStr = dvProfile > 0 ? "P\(dvProfile) libdovi · FEL" : "None"
-        let dvHdrStr = dvProfile > 0
-            ? "MaxCLL 617 · MaxFALL 496 · MDL peak ~1001 nits"
-            : (dynamicRange.contains("HDR") ? "BT.2020 · PQ Transfer" : "BT.709 · Standard Dynamic Range")
+        let dvStr = dvProfile > 0 ? "P\(dvProfile)" : "None"
+        // No mastering metadata or enhancement-layer telemetry is collected here.
+        let dvHdrStr = "--"
 
         let decoderStr = hwdec.isEmpty || hwdec == "no"
             ? "MPVKit.software (cpu)"
@@ -1284,14 +1303,16 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let droppedCount = getInt("drop-frame-count")
         let droppedStr = "\(droppedCount) frames"
 
-        let displayStr = PlaybackSystemMonitor.displayRefreshRate(nominalFps: fps > 0 ? fps : nil)
+        // Source FPS and the screen maximum do not measure the active HDMI mode.
+        let displayStr = "--"
 
         let aBit = getDouble("audio-bitrate")
         let aBitrateStr = aBit > 0
             ? String(format: "meas %.2f Mbit/s", aBit / 1_000_000.0)
-            : "meas 5.14 Mbit/s"
+            : "--"
 
         let routeStr = PlaybackSystemMonitor.audioRouteInfo()
+            .replacingOccurrences(of: " · 0 changes", with: "")
 
         let cacheDur = getDouble("demuxer-cache-duration")
         let bufferSec = cacheDur > 0 ? cacheDur : 0.0
@@ -1302,7 +1323,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let cacheSpeed = getDouble("cache-speed")
         let speedStr = cacheSpeed > 0
             ? String(format: "est %.1f Mbit/s", (cacheSpeed * 8) / 1_000_000.0)
-            : "est 199.0 Mbit/s"
+            : "--"
 
         let cacheBytes = Int64(getInt("demuxer-cache-state/bytes"))
         let loadedStr = cacheBytes > 0
@@ -1310,16 +1331,18 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             : "--"
 
         let cpuPercent = PlaybackSystemMonitor.cpuUsage()
-        let appCpuStr = String(format: "%.0f %%", cpuPercent > 0 ? cpuPercent : 27.0)
+        let appCpuStr = cpuPercent > 0 ? String(format: "%.0f %%", cpuPercent) : "--"
 
         let mem = PlaybackSystemMonitor.memoryUsage()
-        let memStr = mem.residentMB > 0
-            ? String(format: "heap %.0f/%.0f MB · native %.0f MB", mem.residentMB, mem.availableMB > 0 ? mem.availableMB : 384.0, mem.virtualMB > 0 ? mem.virtualMB : 841.0)
-            : "heap 57/384 MB · native 841 MB"
+        let resident = mem.residentMB > 0 ? String(format: "%.0f MB", mem.residentMB) : "--"
+        let available = mem.availableMB > 0 ? String(format: "%.0f MB", mem.availableMB) : "--"
+        let footprint = mem.virtualMB > 0 ? String(format: "%.0f MB", mem.virtualMB) : "--"
+        let memStr = "resident \(resident) · available \(available) · footprint \(footprint)"
 
         let thermal = PlaybackSystemMonitor.thermalInfo()
-        let socTempStr = thermal.tempString
-        let cpuClockStr = PlaybackSystemMonitor.cpuInfo()
+        // The monitor estimates temperature from thermal state; it is not a sensor.
+        let socTempStr = "--"
+        let cpuClockStr = "--"
 
         return PlaybackDebugInfo(
             player: "MPVKit",
@@ -1340,19 +1363,19 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             decoder: decoderStr,
             dropped: droppedStr,
             droppedCount: droppedCount,
-            frameLead: "+44.9 ms",
+            frameLead: "--",
             display: displayStr,
             aBitrate: aBitrateStr,
-            underruns: "0 · native 0",
+            underruns: "--",
             underrunsCount: 0,
             route: routeStr,
-            aJitter: "drift avg 32 ms/s · max 343 · 13 ev",
+            aJitter: "--",
             buffer: bufferStr,
             bufferSeconds: bufferSec,
             speed: speedStr,
-            ping: "7 ms",
+            ping: "--",
             loaded: loadedStr,
-            stalls: "0",
+            stalls: "--",
             stallsCount: 0,
             appCpu: appCpuStr,
             appCpuPercent: cpuPercent,
@@ -1922,6 +1945,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var didApplyDisplayCriteria = false
     /// True while the HDMI mode switch is settling and video is detached.
     private var isDisplaySwitchInFlight = false
+    private var displaySwitchGeneration: UInt64 = 0
     /// `VIDEO_RECONFIG` may arrive before SwiftUI has attached this controller
     /// to a window, or before MPV has populated the stream dimensions. Keep a
     /// short, coalesced probe alive for those races so HDR does not silently
@@ -2020,12 +2044,15 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         // No video attached (e.g. our own `vid=no`, or backgrounding): leave
         // whatever criteria are in place alone.
         guard !gamma.isEmpty || !primaries.isEmpty else { return .retry }
+        guard !gamma.isEmpty || isDolbyVision else { return .retry }
 
         // MPV/FFmpeg have used both concise ("pq" / "hlg") and standards
         // names (ST 2084 / ARIB B-67) for the same transfer functions.
         let isHLG = gamma.contains("hlg") || gamma.contains("b67") || gamma.contains("arib")
         let isPQ = gamma.contains("pq") || gamma.contains("2084")
-        let isHDR = isDolbyVision || isPQ || isHLG || primaries.contains("2020")
+        // BT.2020 describes gamut, not HDR transfer. Require PQ, HLG or DV
+        // evidence before requesting HDR output for wide-gamut SDR content.
+        let isHDR = isDolbyVision || isPQ || isHLG
         let frameRateMode = ProfileSettings.current.string(forKey: SettingsKey.frameRateMatching) ?? "Always"
         let shouldMatchFrameRate = frameRateMode.caseInsensitiveCompare("Off") != .orderedSame
         guard isHDR || shouldMatchFrameRate else {
@@ -2047,8 +2074,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard width > 0, height > 0 else { return .retry }
 
         var fps = getDouble("container-fps")
-        if fps <= 0 { fps = getDouble("estimated-vf-fps") }
-        if fps <= 0 { fps = 23.976 }
+        if !fps.isFinite || fps <= 0 { fps = getDouble("estimated-vf-fps") }
+        // FPS may arrive after the first video parameters. Keep the criteria
+        // unapplied so the existing probe can retry with a real cadence.
+        guard fps.isFinite, fps > 0 else { return .retry }
 
         // `video-format` is the decoded pixel format, not the encoded stream
         // codec. Use the selected track so AV1 HDR is not described as HEVC.
@@ -2056,8 +2085,11 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let codecType: CMVideoCodecType
         switch videoCodec {
         case "h264": codecType = kCMVideoCodecType_H264
-        case "av1": codecType = kCMVideoCodecType_AV1
-        default: codecType = kCMVideoCodecType_HEVC
+        case "av1", "av01": codecType = kCMVideoCodecType_AV1
+        case "hevc", "h265": codecType = kCMVideoCodecType_HEVC
+        default:
+            print("[MPV] Unknown video codec \(videoCodec); display switch skipped")
+            return .finished
         }
 
         let extensions: [CFString: Any]
@@ -2131,6 +2163,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         // request the switch, and only reattach once the switch has settled.
         didApplyDisplayCriteria = true
         isDisplaySwitchInFlight = true
+        displaySwitchGeneration &+= 1
+        let switchGeneration = displaySwitchGeneration
         setStringProperty("vid", "no")
 
         let manager = window.avDisplayManager
@@ -2142,7 +2176,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
         // Give the switch a beat to start before polling for completion.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: 16)
+            self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: 16, generation: switchGeneration)
         }
         return .appliedOrAlreadyActive
         #else
@@ -2151,19 +2185,27 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     #if !targetEnvironment(simulator)
-    private func reattachVideoWhenDisplaySettled(_ manager: AVDisplayManager, attemptsLeft: Int) {
+    private func reattachVideoWhenDisplaySettled(_ manager: AVDisplayManager, attemptsLeft: Int, generation: UInt64) {
+        guard generation == displaySwitchGeneration, isDisplaySwitchInFlight else { return }
         guard mpv != nil else {
             isDisplaySwitchInFlight = false
             return
         }
-        if manager.isDisplayModeSwitchInProgress && attemptsLeft > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: attemptsLeft - 1)
+        if manager.isDisplayModeSwitchInProgress || isApplicationBackgrounded {
+            // Exhausting the fast-poll budget must not be treated as HDMI readiness.
+            let nextAttempts = max(0, attemptsLeft - 1)
+            let retryDelay: TimeInterval = attemptsLeft > 0 ? 0.25 : 0.5
+            DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+                self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: nextAttempts, generation: generation)
             }
             return
         }
         isDisplaySwitchInFlight = false
         setStringProperty("vid", "auto")
+        if pendingURL != nil {
+            attemptStartPendingLoad()
+            return
+        }
         // Let the reattached video output configure and present its paused
         // landing frame before transport starts. HDMI is already settled here.
         finishStartupDisplayGate(after: 0.2)
@@ -2172,6 +2214,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     private func clearDisplayCriteria() {
         #if !targetEnvironment(simulator)
+        displaySwitchGeneration &+= 1
+        isDisplaySwitchInFlight = false
         displayCriteriaWindow?.avDisplayManager.preferredDisplayCriteria = nil
         displayCriteriaWindow = nil
         didApplyDisplayCriteria = false
@@ -2208,6 +2252,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard level == "warn" || level == "error" || level == "fatal" else { return }
+        PlaybackDiagnosticLogStore.shared.append(
+            source: "MPV",
+            message: "[\(level)] [\(prefix)] \(trimmed)"
+        )
         errorStateLock.lock()
         recentPlaybackLogs.append("[\(prefix)] \(trimmed)")
         if recentPlaybackLogs.count > 4 {
@@ -2456,12 +2504,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         MPVStreamProtocolBridge.shared.setHTTPHeaders(headers, isLiveStream: isLiveStream)
         let options = MPVHTTPHeaderOptions(headers: headers)
         setStringProperty("user-agent", options.userAgent)
-        if !options.referrer.isEmpty {
-            setStringProperty("referrer", options.referrer)
-        }
-        if !options.headerFields.isEmpty {
-            setStringProperty("http-header-fields", options.headerFields)
-        }
+        // This MPV instance is reused. Empty values clear the prior source's
+        // referrer and headers before the next load.
+        setStringProperty("referrer", options.referrer)
+        setStringProperty("http-header-fields", options.headerFields)
     }
 
     private func setDoubleProperty(_ name: String, _ value: Double) {

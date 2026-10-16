@@ -169,6 +169,7 @@ enum AppCardStyle {
 /// Poster card component with focus animation (tvOS) and tap handling (iOS)
 struct PosterCard: View {
     let meta: NuvioMeta
+    var customPosterScreen: CustomPosterScreen = .home
     var isLandscape: Bool = false
     var isAlwaysLandscape: Bool = false
     var tileShape: CollectionTileShape = .poster
@@ -221,6 +222,9 @@ struct PosterCard: View {
     let onClick: () -> Void
 
     private let landscapeTransitionDuration: TimeInterval = 0.3
+    @AppStorage(SettingsKey.customPosterURLPattern) private var customPosterURLPattern = ""
+    @AppStorage(SettingsKey.customPosterEnabledScreens) private var customPosterEnabledScreens = "all"
+    @State private var loadedCustomLandscapeArtworkURL: String?
 
     #if os(tvOS)
     @FocusState private var isFocused: Bool
@@ -254,6 +258,7 @@ struct PosterCard: View {
             .buttonStyle(PosterCardButtonStyle(onNativeFocusChange: { focused in
                 if focused { onFocus?(meta) } else { onBlur?(meta) }
             }))
+            .accessibilityIdentifier("poster-card-\(externalFocusValue ?? meta.id)")
             .disabled(!allowsFocus)
             .focused($isFocused)
             .modifier(ExternalFocusBinding(binding: externalFocus, id: externalFocusValue ?? meta.id))
@@ -356,15 +361,24 @@ struct PosterCard: View {
             CachedPosterArtwork(
                 urlString: imageUrl,
                 preloadURLString: landscapePreloadURL,
+                fallbackURLString: effectiveLandscape ? landscapeArtworkFallbackURL : portraitArtworkFallbackURL,
+                preloadFallbackURLString: landscapePreloadURL == nil ? nil : landscapeArtworkFallbackURL,
                 width: cardWidth,
                 height: cardHeight,
                 maximumWidth: artworkDecodeWidth,
                 preloadMaximumWidth: landscapeArtworkDecodeWidth,
                 minimumSwapDelay: 0,
-                onPreloadFinished: {
+                onPreloadFinished: { succeeded in
                     #if os(tvOS)
-                    landscapeArtworkPrepared = true
+                    landscapeArtworkPrepared = succeeded
                     #endif
+                },
+                onArtworkLoaded: { loadedURL in
+                    if loadedURL == customLandscapeArtworkURL {
+                        loadedCustomLandscapeArtworkURL = loadedURL
+                    } else if loadedURL == landscapeArtworkFallbackURL {
+                        loadedCustomLandscapeArtworkURL = nil
+                    }
                 }
             ) {
                 placeholderView
@@ -375,7 +389,10 @@ struct PosterCard: View {
             // trailer is ready to draw, avoiding a black frame on slow links.
             .opacity(isTrailerPreviewVisible ? 0 : 1)
             .overlay {
-                if isTrailerPreviewActive && trailersEnabled && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
+                // Prepare during the delay, but keep playback and visibility
+                // gated by isTrailerPreviewActive until the timer completes.
+                if isFocused && effectiveLandscape && trailersEnabled
+                    && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
                     TrailerPreviewPlayer(
                         meta: meta,
                         isActive: isTrailerPreviewActive,
@@ -449,7 +466,7 @@ struct PosterCard: View {
 
     @ViewBuilder
     private var landscapeOverlay: some View {
-        if shouldShowLandscapeOverlay {
+        if shouldShowLandscapeOverlay && !usesLoadedCustomLandscapeArtwork {
             ZStack(alignment: .bottomLeading) {
                 if shouldShowLandscapeGradient {
                     if liquidGlassCards {
@@ -647,6 +664,7 @@ struct PosterCard: View {
     }
 
     private var shouldShowLandscapeOverlay: Bool {
+        if usesLoadedCustomLandscapeArtwork { return false }
         if isContinueOrUpcomingCard { return true }
         if isEffectivelyAlwaysLandscape {
             return landscapeLogoURL != nil || !showsPosterTitle
@@ -655,6 +673,7 @@ struct PosterCard: View {
     }
 
     private var shouldShowLandscapeGradient: Bool {
+        if usesLoadedCustomLandscapeArtwork { return false }
         if isContinueOrUpcomingCard { return true }
         if isEffectivelyAlwaysLandscape {
             return landscapeLogoURL != nil || !showsPosterTitle
@@ -715,6 +734,15 @@ struct PosterCard: View {
            let continueEpisodeArtworkURL, !continueEpisodeArtworkURL.isEmpty {
             return continueEpisodeArtworkURL
         }
+        if let customLandscapeArtworkURL { return customLandscapeArtworkURL }
+        return originalLandscapeArtworkURL
+    }
+
+    private var originalLandscapeArtworkURL: String? {
+        if continueEpisodeText != nil,
+           let continueEpisodeArtworkURL, !continueEpisodeArtworkURL.isEmpty {
+            return continueEpisodeArtworkURL
+        }
         if let customLandscape = meta.landscapePosterUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !customLandscape.isEmpty {
             return customLandscape
         }
@@ -724,11 +752,45 @@ struct PosterCard: View {
         return meta.backgroundUrl ?? meta.posterUrl
     }
 
+    private var customPortraitArtworkURL: String? {
+        CustomPosterURLResolver.resolve(
+            pattern: customPosterURLPattern,
+            meta: meta,
+            screen: customPosterScreen,
+            enabledScreens: customPosterEnabledScreens,
+            shape: tileShape == .square || meta.tileShape == .square ? "square" : "poster"
+        )
+    }
+
+    private var customLandscapeArtworkURL: String? {
+        CustomPosterURLResolver.resolve(
+            pattern: customPosterURLPattern,
+            meta: meta,
+            screen: customPosterScreen,
+            enabledScreens: customPosterEnabledScreens,
+            shape: "landscape"
+        )
+    }
+
+    private var portraitArtworkFallbackURL: String? {
+        customPortraitArtworkURL == nil ? nil : meta.posterUrl
+    }
+
+    private var landscapeArtworkFallbackURL: String? {
+        customLandscapeArtworkURL == nil ? nil : originalLandscapeArtworkURL
+    }
+
+    private var usesLoadedCustomLandscapeArtwork: Bool {
+        !isContinueOrUpcomingCard
+            && customLandscapeArtworkURL != nil
+            && loadedCustomLandscapeArtworkURL == customLandscapeArtworkURL
+    }
+
     private var imageUrl: String? {
         if effectiveLandscape {
             return landscapeArtworkURL
         }
-        return meta.posterUrl
+        return customPortraitArtworkURL ?? meta.posterUrl
     }
 
     private var landscapePreloadURL: String? {
@@ -894,6 +956,7 @@ struct PosterCard: View {
 extension PosterCard: Equatable {
     static func == (lhs: PosterCard, rhs: PosterCard) -> Bool {
         lhs.meta.id == rhs.meta.id
+            && lhs.customPosterScreen == rhs.customPosterScreen
             && lhs.meta.name == rhs.meta.name
             && lhs.meta.posterUrl == rhs.meta.posterUrl
             && lhs.meta.backgroundUrl == rhs.meta.backgroundUrl
@@ -1084,8 +1147,8 @@ struct TrailerPlayerSurface: UIViewRepresentable {
 /// Shared video preview for Home cards and the focused Grid hero.
 struct TrailerPreviewPlayer: View {
     let meta: NuvioMeta
-    /// Resolution begins as soon as the card gains focus; playback waits for
-    /// Home's configured delay to promote the card to landscape.
+    /// Prepare while the caller's delay runs; playback and visibility remain
+    /// gated by its activation state.
     let isActive: Bool
     let onPlaybackReady: () -> Void
     let onPlaybackFinished: () -> Void
@@ -1099,6 +1162,8 @@ struct TrailerPreviewPlayer: View {
     @State private var itemStatusObserver: NSKeyValueObservation?
     @State private var failedToEndObserver: NSObjectProtocol?
     @State private var didReportUnavailable = false
+    @State private var isPlaybackUnavailable = false
+    @State private var playbackActiveOverride: Bool?
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
     private let resolver = YouTubeTrailerResolver.shared
 
@@ -1106,7 +1171,7 @@ struct TrailerPreviewPlayer: View {
         TrailerPlayerSurface(player: player) {
             guard !isRenderReady else { return }
             isRenderReady = true
-            if isActive {
+            if wantsPlayback {
                 onPlaybackReady()
             }
         }
@@ -1115,11 +1180,18 @@ struct TrailerPreviewPlayer: View {
         .opacity(isVisible ? 1 : 0)
         .animation(.easeInOut(duration: 0.32), value: isVisible)
         .allowsHitTesting(false)
+        .onAppear { playbackActiveOverride = isActive }
         .task(id: previewIdentity) {
             await startPreview()
         }
         .onChange(of: isActive) { _, active in
+            playbackActiveOverride = active
             if active {
+                if isPlaybackUnavailable {
+                    reportPlaybackUnavailable()
+                    return
+                }
+                applySoundPreference(trailerPreviewSound)
                 player.play()
                 if isRenderReady { onPlaybackReady() }
             } else {
@@ -1139,6 +1211,7 @@ struct TrailerPreviewPlayer: View {
             onPlaybackFinished()
         }
         .onDisappear {
+            playbackActiveOverride = false
             isRenderReady = false
             cleanupTimeObserver()
             cleanupFailureObservers()
@@ -1163,10 +1236,15 @@ struct TrailerPreviewPlayer: View {
         isActive && isRenderReady
     }
 
+    // The resolving task can outlive the View value that launched it. Read
+    // shared state after suspension instead of that value's initial isActive.
+    private var wantsPlayback: Bool { playbackActiveOverride ?? isActive }
+
     @MainActor
     private func startPreview() async {
         isRenderReady = false
         didReportUnavailable = false
+        isPlaybackUnavailable = false
 
         guard let playbackSource = await resolver.resolvePreview(for: meta) else {
             guard !Task.isCancelled else { return }
@@ -1201,7 +1279,7 @@ struct TrailerPreviewPlayer: View {
         observePlaybackFailure(for: item)
         applySoundPreference(trailerPreviewSound)
         setupTimeObserver()
-        if isActive {
+        if wantsPlayback {
             player.play()
         }
     }
@@ -1282,7 +1360,10 @@ struct TrailerPreviewPlayer: View {
 
     @MainActor
     private func reportPlaybackUnavailable() {
-        guard let onPlaybackUnavailable, !didReportUnavailable else { return }
+        isPlaybackUnavailable = true
+        // Preparation may fail before the delay ends. Report it when playback
+        // becomes active, so the parent's existing fallback guards still apply.
+        guard wantsPlayback, let onPlaybackUnavailable, !didReportUnavailable else { return }
         didReportUnavailable = true
         onPlaybackUnavailable()
     }
@@ -1290,7 +1371,7 @@ struct TrailerPreviewPlayer: View {
     private func applySoundPreference(_ soundEnabled: Bool) {
         player.isMuted = !soundEnabled
         player.volume = soundEnabled ? 1 : 0
-        guard soundEnabled else { return }
+        guard soundEnabled, wantsPlayback else { return }
 
         // Home previews do not pass through PlayerView, which normally
         // activates the movie-playback audio session for full-screen video.
@@ -1307,6 +1388,7 @@ struct TrailerPreviewPlayer: View {
 /// cheap while a whole strip of it is mounted, so it deliberately stays flatter.
 struct PosterGridCard: View {
     let meta: NuvioMeta
+    var customPosterScreen: CustomPosterScreen = .search
     var width: CGFloat = 210
     var height: CGFloat = 315
     var externalFocus: FocusState<String?>.Binding? = nil
@@ -1337,6 +1419,18 @@ struct PosterGridCard: View {
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
     @AppStorage(SettingsKey.cardCornerRadius) private var cardCornerRadiusSetting = AppCardStyle.defaultCornerRadiusRaw
     @AppStorage(SettingsKey.liquidGlassCards) private var liquidGlassCards = true
+    @AppStorage(SettingsKey.customPosterURLPattern) private var customPosterURLPattern = ""
+    @AppStorage(SettingsKey.customPosterEnabledScreens) private var customPosterEnabledScreens = "all"
+
+    private var customPosterArtworkURL: String? {
+        CustomPosterURLResolver.resolve(
+            pattern: customPosterURLPattern,
+            meta: meta,
+            screen: customPosterScreen,
+            enabledScreens: customPosterEnabledScreens,
+            shape: meta.tileShape == .square ? "square" : "poster"
+        )
+    }
 
     private var showsFocusedAppearance: Bool { focused || retainFocusAppearance }
 
@@ -1351,13 +1445,14 @@ struct PosterGridCard: View {
     var body: some View {
         let cardContent = VStack(alignment: .leading, spacing: 12) {
             CachedPosterArtwork(
-                urlString: meta.posterUrl,
+                urlString: customPosterArtworkURL ?? meta.posterUrl,
                 preloadURLString: nil,
+                fallbackURLString: customPosterArtworkURL == nil ? nil : meta.posterUrl,
                 width: width,
                 height: height,
                 maximumWidth: width,
                 minimumSwapDelay: 0,
-                onPreloadFinished: {}
+                onPreloadFinished: { _ in }
             ) {
                 placeholder
             }
@@ -1479,33 +1574,47 @@ struct LiquidGlassSurface: ViewModifier {
     let cornerRadius: CGFloat
     var prominent: Bool = false
 
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.amoledSurfaces) private var amoledSurfaces = false
+
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     }
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        #if os(tvOS)
-        if #available(tvOS 26.0, *) {
+        if amoled && amoledSurfaces {
             content
-                .background(
-                    Color.white.opacity(prominent ? 0.16 : 0.08),
-                    in: shape
+                .background(Color.black, in: shape)
+                .overlay(
+                    shape.strokeBorder(
+                        Color.white.opacity(prominent ? 0.30 : 0.10),
+                        lineWidth: prominent ? 1.5 : 1
+                    )
                 )
-                .glassEffect(.regular, in: shape)
         } else {
+            #if os(tvOS)
+            if #available(tvOS 26.0, *) {
+                content
+                    .background(
+                        Color.white.opacity(prominent ? 0.16 : 0.08),
+                        in: shape
+                    )
+                    .glassEffect(.regular, in: shape)
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: shape)
+                    .background(
+                        Color.white.opacity(prominent ? 0.16 : 0.08),
+                        in: shape
+                    )
+            }
+            #else
             content
                 .background(.ultraThinMaterial, in: shape)
-                .background(
-                    Color.white.opacity(prominent ? 0.16 : 0.08),
-                    in: shape
-                )
+                .background(Color.white.opacity(prominent ? 0.16 : 0.08), in: shape)
+            #endif
         }
-        #else
-        content
-            .background(.ultraThinMaterial, in: shape)
-            .background(Color.white.opacity(prominent ? 0.16 : 0.08), in: shape)
-        #endif
     }
 }
 
@@ -1517,13 +1626,25 @@ struct LiquidGlassCardModifier: ViewModifier {
     var isFocused: Bool = false
     var isEnabled: Bool = true
 
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.amoledSurfaces) private var amoledSurfaces = false
+
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     }
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if isEnabled {
+        if amoled && amoledSurfaces {
+            content
+                .background(Color.black, in: shape)
+                .overlay {
+                    shape.strokeBorder(
+                        Color.white.opacity(isFocused ? 0.34 : 0.08),
+                        lineWidth: isFocused ? 1.5 : 1
+                    )
+                }
+        } else if isEnabled {
             content
                 .background {
                     #if os(tvOS)
@@ -1725,43 +1846,55 @@ struct ArtworkPlaceholder: View {
 struct CachedPosterArtwork<Placeholder: View>: View {
     let urlString: String?
     var preloadURLString: String? = nil
+    var fallbackURLString: String? = nil
+    var preloadFallbackURLString: String? = nil
     let width: CGFloat
     let height: CGFloat
     var maximumWidth: CGFloat? = nil
     var preloadMaximumWidth: CGFloat? = nil
     var minimumSwapDelay: TimeInterval = 0
-    var onPreloadFinished: () -> Void = {}
+    var onPreloadFinished: (Bool) -> Void = { _ in }
+    var onArtworkLoaded: (String?) -> Void = { _ in }
     @ViewBuilder let placeholder: Placeholder
 
     init(
         urlString: String?,
         preloadURLString: String? = nil,
+        fallbackURLString: String? = nil,
+        preloadFallbackURLString: String? = nil,
         width: CGFloat,
         height: CGFloat,
         maximumWidth: CGFloat? = nil,
         preloadMaximumWidth: CGFloat? = nil,
         minimumSwapDelay: TimeInterval = 0,
-        onPreloadFinished: @escaping () -> Void = {},
+        onPreloadFinished: @escaping (Bool) -> Void = { _ in },
+        onArtworkLoaded: @escaping (String?) -> Void = { _ in },
         @ViewBuilder placeholder: () -> Placeholder
     ) {
         self.urlString = urlString
         self.preloadURLString = preloadURLString
+        self.fallbackURLString = fallbackURLString
+        self.preloadFallbackURLString = preloadFallbackURLString
         self.width = width
         self.height = height
         self.maximumWidth = maximumWidth
         self.preloadMaximumWidth = preloadMaximumWidth
         self.minimumSwapDelay = minimumSwapDelay
         self.onPreloadFinished = onPreloadFinished
+        self.onArtworkLoaded = onArtworkLoaded
         self.placeholder = placeholder()
     }
 
     private struct CardArtworkState {
         var image: UIImage?
         var loadedKey: String?
+        var loadedSourceURL: String?
         var previousImage: UIImage?
         var previousLoadedKey: String?
+        var previousLoadedSourceURL: String?
         var preloadedImage: UIImage?
         var preloadedKey: String?
+        var preloadedSourceURL: String?
     }
 
     @State private var state = CardArtworkState()
@@ -1779,11 +1912,11 @@ struct CachedPosterArtwork<Placeholder: View>: View {
     }
 
     private var cacheKey: String {
-        "\(urlString ?? "")#\(maxPixelSize)"
+        "\(urlString ?? "")#fallback:\(fallbackURLString ?? "")#\(maxPixelSize)"
     }
 
     private var preloadCacheKey: String {
-        "\(preloadURLString ?? "")#\(preloadMaxPixelSize)"
+        "\(preloadURLString ?? "")#fallback:\(preloadFallbackURLString ?? "")#\(preloadMaxPixelSize)"
     }
 
     var body: some View {
@@ -1819,29 +1952,36 @@ struct CachedPosterArtwork<Placeholder: View>: View {
 
     @MainActor
     private func load() async {
-        guard let urlString,
-              let url = URL(string: urlString) else {
+        guard urlString != nil || fallbackURLString != nil else {
             state.image = nil
             state.loadedKey = nil
+            state.loadedSourceURL = nil
             state.previousImage = nil
             state.previousLoadedKey = nil
+            state.previousLoadedSourceURL = nil
+            onArtworkLoaded(nil)
             return
         }
 
         let key = cacheKey
         let traceLoad = preloadURLString != nil
         let started = TVHomeDebugTrace.now()
-        if traceLoad {
-            TVHomeDebugTrace.log("art.load.begin host=\(url.host ?? "unknown") key=\(key)")
-        }
+        let logHost = (urlString ?? fallbackURLString).flatMap(URL.init(string:))?.host ?? "unknown"
+        if traceLoad { TVHomeDebugTrace.log("art.load.begin host=\(logHost) key=\(key)") }
         let loadStartedAt = Date()
-        if state.loadedKey == key { return }
+        if state.loadedKey == key {
+            onArtworkLoaded(state.loadedSourceURL)
+            return
+        }
 
         if state.preloadedKey == key, let preloadedImage = state.preloadedImage {
             state.previousImage = state.image
             state.previousLoadedKey = state.loadedKey
+            state.previousLoadedSourceURL = state.loadedSourceURL
             state.image = preloadedImage
             state.loadedKey = key
+            state.loadedSourceURL = state.preloadedSourceURL
+            onArtworkLoaded(state.loadedSourceURL)
             if traceLoad {
                 TVHomeDebugTrace.log(
                     "art.load.end source=preloaded ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
@@ -1856,8 +1996,11 @@ struct CachedPosterArtwork<Placeholder: View>: View {
         if state.previousLoadedKey == key, let previousImage = state.previousImage {
             state.image = previousImage
             state.loadedKey = key
+            state.loadedSourceURL = state.previousLoadedSourceURL
             state.previousImage = nil
             state.previousLoadedKey = nil
+            state.previousLoadedSourceURL = nil
+            onArtworkLoaded(state.loadedSourceURL)
             if traceLoad {
                 TVHomeDebugTrace.log(
                     "art.load.end source=previous ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
@@ -1866,7 +2009,11 @@ struct CachedPosterArtwork<Placeholder: View>: View {
             return
         }
 
-        if let cached = await PosterArtworkCache.shared.image(for: url, maxPixelSize: maxPixelSize) {
+        if let loaded = await cachedImage(
+            primaryURLString: urlString,
+            fallbackURLString: fallbackURLString,
+            maxPixelSize: maxPixelSize
+        ) {
             let remainingDelay = minimumSwapDelay - Date().timeIntervalSince(loadStartedAt)
             if remainingDelay > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(remainingDelay * 1_000_000_000))
@@ -1874,8 +2021,13 @@ struct CachedPosterArtwork<Placeholder: View>: View {
             guard !Task.isCancelled, key == cacheKey else { return }
             state.previousImage = state.image
             state.previousLoadedKey = state.loadedKey
-            state.image = cached
+            state.previousLoadedSourceURL = state.loadedSourceURL
+            state.image = loaded.image
             state.loadedKey = key
+            state.loadedSourceURL = loaded.urlString
+            onArtworkLoaded(loaded.urlString)
+        } else {
+            onArtworkLoaded(nil)
         }
         if traceLoad {
             TVHomeDebugTrace.log(
@@ -1886,47 +2038,68 @@ struct CachedPosterArtwork<Placeholder: View>: View {
 
     @MainActor
     private func preload() async {
-        guard let preloadURLString,
-              let url = URL(string: preloadURLString) else {
-            return
-        }
+        guard !Task.isCancelled else { return }
+        guard preloadURLString != nil || preloadFallbackURLString != nil else { return }
 
         let key = preloadCacheKey
         let started = TVHomeDebugTrace.now()
-        TVHomeDebugTrace.log(
-            "art.preload.begin host=\(url.host ?? "unknown") key=\(key)"
-        )
+        let logHost = (preloadURLString ?? preloadFallbackURLString).flatMap(URL.init(string:))?.host ?? "unknown"
+        TVHomeDebugTrace.log("art.preload.begin host=\(logHost) key=\(key)")
         if state.loadedKey == key, let image = state.image {
             state.preloadedImage = image
             state.preloadedKey = key
-            onPreloadFinished()
+            state.preloadedSourceURL = state.loadedSourceURL
+            onPreloadFinished(true)
+            onArtworkLoaded(state.preloadedSourceURL)
             TVHomeDebugTrace.log(
                 "art.preload.end source=loaded ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
             )
             return
         }
-        if state.preloadedKey == key {
-            onPreloadFinished()
+        if state.preloadedKey == key, state.preloadedImage != nil {
+            onPreloadFinished(true)
+            onArtworkLoaded(state.preloadedSourceURL)
             TVHomeDebugTrace.log(
                 "art.preload.end source=preloaded ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
             )
             return
         }
 
-        let cached = await PosterArtworkCache.shared.image(
-            for: url,
+        let loaded = await cachedImage(
+            primaryURLString: preloadURLString,
+            fallbackURLString: preloadFallbackURLString,
             maxPixelSize: preloadMaxPixelSize
         )
-        if let cached {
-            guard !Task.isCancelled, key == preloadCacheKey else { return }
-            state.preloadedImage = cached
+        guard !Task.isCancelled, key == preloadCacheKey else { return }
+        if let loaded {
+            state.preloadedImage = loaded.image
             state.preloadedKey = key
+            state.preloadedSourceURL = loaded.urlString
         }
-        onPreloadFinished()
+        onPreloadFinished(loaded != nil)
+        onArtworkLoaded(loaded?.urlString)
         TVHomeDebugTrace.log(
-            "art.preload.end source=cache hit=\(cached != nil) "
+            "art.preload.end source=cache hit=\(loaded != nil) "
                 + "ms=\(TVHomeDebugTrace.elapsedMilliseconds(since: started))"
         )
+    }
+
+    @MainActor
+    private func cachedImage(
+        primaryURLString: String?,
+        fallbackURLString: String?,
+        maxPixelSize: Int
+    ) async -> (image: UIImage, urlString: String)? {
+        var attempted: Set<String> = []
+        for rawURL in [primaryURLString, fallbackURLString].compactMap({ $0 }) {
+            guard attempted.insert(rawURL).inserted,
+                  let url = URL(string: rawURL),
+                  let image = await PosterArtworkCache.shared.image(for: url, maxPixelSize: maxPixelSize) else {
+                continue
+            }
+            return (image, rawURL)
+        }
+        return nil
     }
 }
 
@@ -2022,7 +2195,7 @@ actor PosterArtworkCache {
                 // silently revalidate in the background to refresh rating badges without blocking UI.
                 if isVolatile && !stored.isFresh {
                     Task.detached(priority: .background) {
-                        guard let freshData = await downloadPosterData(url: url) else { return }
+                        guard let freshData = await downloadPosterData(url: url, revalidate: true) else { return }
                         await PosterDiskCache.shared.store(freshData, for: url)
                         if let freshImage = await PosterDecodeLimiter.shared.image(
                             from: freshData,
