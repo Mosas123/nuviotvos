@@ -297,6 +297,7 @@ enum MdbListAuthStore {
     static let changedNotification = Notification.Name("nuvio.tv.mdblist.auth.changed")
 
     private enum Key {
+        static let accountBindingID = "nuvio.tv.mdblist.auth.accountBindingID"
         static let username = "nuvio.tv.mdblist.auth.username"
         static let displayName = "nuvio.tv.mdblist.auth.displayName"
         static let accountID = "nuvio.tv.mdblist.auth.accountID"
@@ -363,6 +364,14 @@ enum MdbListAuthStore {
         defaults.set(min(max(seconds, 1), 3_600), forKey: Key.pollInterval)
     }
 
+    /// OAuth refresh writes only token storage; a new grant replaces this binding.
+    static func accountBindingID(in defaults: UserDefaults) -> String {
+        if let value = defaults.string(forKey: Key.accountBindingID) { return value }
+        let value = UUID().uuidString
+        defaults.set(value, forKey: Key.accountBindingID)
+        return value
+    }
+
     @discardableResult
     static func saveTokens(
         _ tokens: MdbListStoredTokens,
@@ -372,6 +381,7 @@ enum MdbListAuthStore {
         tokenStorage: MdbListTokenStorage
     ) -> Bool {
         guard tokenStorage.save(tokens, for: profileScope) else { return false }
+        defaults.set(UUID().uuidString, forKey: Key.accountBindingID)
         saveUser(user, store: defaults)
         clearDeviceFlow(store: defaults)
         NotificationCenter.default.post(name: changedNotification, object: nil)
@@ -413,7 +423,7 @@ enum MdbListAuthStore {
         }
         tokenStorage.remove(for: profileScope)
         [
-            Key.username, Key.displayName, Key.accountID, Key.deviceCode, Key.userCode,
+            Key.accountBindingID, Key.username, Key.displayName, Key.accountID, Key.deviceCode, Key.userCode,
             Key.verificationURL, Key.expiresAtMillis, Key.pollInterval, Key.cachedStats
         ].forEach { defaults.removeObject(forKey: $0) }
         NotificationCenter.default.post(name: changedNotification, object: nil)

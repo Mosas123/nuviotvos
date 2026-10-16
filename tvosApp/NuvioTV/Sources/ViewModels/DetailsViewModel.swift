@@ -34,6 +34,7 @@ class DetailsViewModel: ObservableObject {
     private var streamObserveTask: Task<Void, Never>?
     private var enrichmentTask: Task<Void, Never>?
     private var deferredLoadTask: Task<Void, Never>?
+    private(set) var watchlistMutationTask: Task<Void, Never>?
     /// Invalidates every asynchronous completion from an older details load.
     /// This is intentionally separate from the content id: the same title can
     /// be refreshed while its previous request is still in flight.
@@ -44,6 +45,8 @@ class DetailsViewModel: ObservableObject {
     private var lastAppliedStreamsRevision: UInt64?
     private let deferredPreparationDelay: AsyncDelay
     private let injectedEnrichmentStarter: EnrichmentStarter?
+    private let watchlistContext: @MainActor () -> SelectedLibraryMutationContext?
+    private let remoteWatchlistMutation: @MainActor (NuvioMeta, Bool) async -> Bool
 
     init(
         repository: CatalogRepository,
@@ -51,12 +54,20 @@ class DetailsViewModel: ObservableObject {
         deferredPreparationDelay: @escaping AsyncDelay = {
             try await Task.sleep(nanoseconds: 350_000_000)
         },
-        enrichmentStarter: EnrichmentStarter? = nil
+        enrichmentStarter: EnrichmentStarter? = nil,
+        watchlistContext: @escaping @MainActor () -> SelectedLibraryMutationContext? = {
+            SelectedLibraryMutationContext()
+        },
+        remoteWatchlistMutation: @escaping @MainActor (NuvioMeta, Bool) async -> Bool = { meta, membership in
+            await SelectedLibraryService.setWatchlist(meta, isInWatchlist: membership)
+        }
     ) {
         self.repository = repository
         self.streamDiscoveryMode = streamDiscoveryMode
         self.deferredPreparationDelay = deferredPreparationDelay
         self.injectedEnrichmentStarter = enrichmentStarter
+        self.watchlistContext = watchlistContext
+        self.remoteWatchlistMutation = remoteWatchlistMutation
     }
 
     @discardableResult
@@ -650,9 +661,9 @@ class DetailsViewModel: ObservableObject {
             return
         }
 
-        // A Trakt-selected library must never silently fall back to Nuvio
-        // Sync. Without a live Trakt session, leave the state unchanged.
-        guard SelectedLibraryService.isSelectedAndAuthenticated else { return }
+        // Capture the selected account before waiting; a later login must never
+        // inherit this intent. Token refresh keeps the same account binding.
+        guard let context = watchlistContext() else { return }
 
         // Keep Details responsive, then let LibraryViewModel refresh the
         // Trakt-backed list from the notification posted after the mutation.
@@ -661,12 +672,12 @@ class DetailsViewModel: ObservableObject {
         let mutationGeneration = watchlistMutationGeneration
         let requestGeneration = detailsRequestGeneration
         uiState.isInWatchlist = desiredMembership
-        Task {
-            let succeeded = await SelectedLibraryService.setWatchlist(
-                meta,
-                isInWatchlist: desiredMembership
-            )
-            guard !Task.isCancelled,
+        let previousMutation = watchlistMutationTask
+        watchlistMutationTask = Task { @MainActor in
+            if let previousMutation { await previousMutation.value }
+            guard !Task.isCancelled, context.isCurrent else { return }
+            let succeeded = await remoteWatchlistMutation(meta, desiredMembership)
+            guard !Task.isCancelled, context.isCurrent,
                   watchlistMutationGeneration == mutationGeneration,
                   detailsRequestGeneration == requestGeneration,
                   uiState.meta?.id == meta.id,

@@ -197,6 +197,7 @@ enum SimklAuthStore {
     static let changedNotification = Notification.Name("nuvio.tv.simkl.auth.changed")
 
     private enum Key {
+        static let accountBindingID = "nuvio.tv.simkl.auth.accountBindingID"
         static let username = "nuvio.tv.simkl.auth.username"
         static let accountID = "nuvio.tv.simkl.auth.accountID"
         static let accountPlan = "nuvio.tv.simkl.auth.accountPlan"
@@ -271,6 +272,14 @@ enum SimklAuthStore {
         defaults.set(isV2Flow, forKey: Key.isV2Flow)
     }
 
+    /// Stable across refresh, replaced on every new login (including same-account relinks).
+    static func accountBindingID(in defaults: UserDefaults) -> String {
+        if let value = defaults.string(forKey: Key.accountBindingID) { return value }
+        let value = UUID().uuidString
+        defaults.set(value, forKey: Key.accountBindingID)
+        return value
+    }
+
     static func saveToken(
         _ accessToken: String,
         refreshToken: String? = nil,
@@ -278,8 +287,14 @@ enum SimklAuthStore {
         clientID: String,
         profileScope: String,
         store defaults: UserDefaults,
-        tokenStorage: SimklTokenStorage
+        tokenStorage: SimklTokenStorage,
+        isNewLogin: Bool = true
     ) {
+        if isNewLogin {
+            defaults.set(UUID().uuidString, forKey: Key.accountBindingID)
+        } else {
+            _ = accountBindingID(in: defaults)
+        }
         tokenStorage.setAccessToken(accessToken, for: profileScope)
         if let refreshToken {
             tokenStorage.setRefreshToken(refreshToken, for: profileScope)
@@ -346,7 +361,7 @@ enum SimklAuthStore {
         tokenStorage.setAccessToken(nil, for: profileScope)
         tokenStorage.setRefreshToken(nil, for: profileScope)
         [
-            Key.username, Key.accountID, Key.accountPlan, Key.avatarURL,
+            Key.accountBindingID, Key.username, Key.accountID, Key.accountPlan, Key.avatarURL,
             Key.deviceCode, Key.userCode, Key.verificationURI, Key.verificationURIComplete,
             Key.expiresAt, Key.pollInterval, Key.credentialClientID, Key.hasAccessToken,
             Key.cachedStats, Key.settingsWatermark, Key.tokenExpiresAt, Key.isV2Flow
@@ -1002,7 +1017,8 @@ final class SimklAuthService {
                 clientID: requestedClientID,
                 profileScope: profileScope,
                 store: store,
-                tokenStorage: tokenStorage
+                tokenStorage: tokenStorage,
+                isNewLogin: false
             )
             didRefreshToken(token.accessToken)
             return true

@@ -1905,6 +1905,7 @@ enum SelectedLibraryService {
         }
     }
 
+    @MainActor
     static func setWatchlist(_ meta: NuvioMeta, isInWatchlist: Bool) async -> Bool {
         switch TraktSettingsStore.librarySourceMode {
         case .local:
