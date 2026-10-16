@@ -853,7 +853,7 @@ struct PosterCard: View {
         didFinishTrailerPreview = false
         guard isFocused, effectiveLandscape, trailersEnabled, !isContinueOrUpcomingCard else { return }
 
-        let delay = max(0, trailerDelay)
+        let delay = min(15, max(0, trailerDelay))
         do {
             try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
         } catch {
