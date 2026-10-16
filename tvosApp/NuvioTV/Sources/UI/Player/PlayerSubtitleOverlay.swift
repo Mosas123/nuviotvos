@@ -166,7 +166,7 @@ struct PlayerSubtitleOverlay: View {
         Text(string)
             .font(.system(size: textSize, weight: fontWeight))
             .foregroundStyle(textColor.opacity(textOpacity))
-            .tracking(CGFloat(style.letterSpacing))
+            .tracking(CGFloat(style.subSpacing))
             .multilineTextAlignment(alignment)
             .subtitleOutline(color: outlineColor, width: outlineWidth)
             .subtitleBackground(style: style)
@@ -188,7 +188,7 @@ struct PlayerSubtitleOverlay: View {
         var text = Text(run.text)
             .font(font.weight(run.isBold || style.bold ? .bold : .regular))
             .foregroundColor(runColor(run).opacity(textOpacity))
-            .tracking(CGFloat(style.letterSpacing))
+            .tracking(CGFloat(style.subSpacing))
         if run.isItalic { text = text.italic() }
         if run.isUnderlined { text = text.underline() }
         if run.isStruckThrough { text = text.strikethrough() }
@@ -309,7 +309,7 @@ struct MPVSubtitleOverlay: View {
                     Text(text)
                         .font(.system(size: textSize, weight: fontWeight))
                         .foregroundStyle(textColor.opacity(textOpacity))
-                        .tracking(CGFloat(style.letterSpacing))
+                        .tracking(CGFloat(style.subSpacing))
                         .multilineTextAlignment(.center)
                         .subtitleOutline(color: outlineColor, width: outlineWidth)
                         .subtitleBackground(style: style)
