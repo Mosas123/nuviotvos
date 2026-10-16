@@ -2590,23 +2590,44 @@ enum StreamPickerListBuilder {
         by option: StreamSortOption,
         preserveAddonStreams: Bool = false
     ) -> [NuvioStream] {
+        // Parse sort facts once per stream, not on every O(n log n) comparison.
+        // Keep mode-specific work out of modes that do not use it.
+        let needsResolution = !preserveAddonStreams || option == .quality || option == .default
+        let needsHardwareCheck = option == .quality && !AppleTVCapability.current.supportsAV1HardwareDecode
+        let entries = streams.enumerated().map { entry in
+            let stream = entry.element
+            let resolutionValue = needsResolution ? resolution(for: stream) : 0
+            let isBad = (!preserveAddonStreams || option == .default)
+                && (SmartPlaybackSelector.isLowQualityOrTicketStream(stream) || resolutionValue == 0)
+            return (
+                offset: entry.offset,
+                element: stream,
+                resolution: resolutionValue,
+                isBad: isBad,
+                quality: option == .quality ? streamQuality(for: stream) : DebridStreamQuality.unknown,
+                size: option == .quality || option == .size ? sizeBytes(for: stream) : 0,
+                hardwareAccelerated: needsHardwareCheck && resolutionValue >= 2160
+                    ? StreamQualityTags.parse(stream: stream).isHardwareAccelerated() : false
+            )
+        }
+
         switch option {
         case .default:
-            return streams.enumerated().sorted {
-                let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || resolution(for: $0.element) == 0
-                let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || resolution(for: $1.element) == 0
+            return entries.sorted {
+                let bad0 = $0.isBad
+                let bad1 = $1.isBad
                 if bad0 != bad1 {
                     return !bad0 && bad1
                 }
                 return $0.offset < $1.offset
             }.map(\.element)
         case .quality:
-            return streams.enumerated().sorted {
-                let res0 = resolution(for: $0.element)
-                let res1 = resolution(for: $1.element)
+            return entries.sorted {
+                let res0 = $0.resolution
+                let res1 = $1.resolution
                 if !preserveAddonStreams {
-                    let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || res0 == 0
-                    let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || res1 == 0
+                    let bad0 = $0.isBad
+                    let bad1 = $1.isBad
                     if bad0 != bad1 {
                         return !bad0 && bad1
                     }
@@ -2616,21 +2637,21 @@ enum StreamPickerListBuilder {
                     return res0 > res1
                 }
                 // Tier 2: Release Quality DESC (Android DebridStreamSortKey.QUALITY)
-                let q0 = streamQuality(for: $0.element)
-                let q1 = streamQuality(for: $1.element)
+                let q0 = $0.quality
+                let q1 = $1.quality
                 if q0 != q1 {
                     return q0 > q1
                 }
                 // Tier 3: Size bytes DESC (Android DebridStreamSortKey.SIZE)
-                let s0 = sizeBytes(for: $0.element)
-                let s1 = sizeBytes(for: $1.element)
+                let s0 = $0.size
+                let s1 = $1.size
                 if s0 != s1 {
                     return s0 > s1
                 }
                 // Tier 4: Hardware decode capability check (Apple TV AV1 decode at 4K)
-                if res0 >= 2160, !AppleTVCapability.current.supportsAV1HardwareDecode {
-                    let hw0 = StreamQualityTags.parse(stream: $0.element).isHardwareAccelerated()
-                    let hw1 = StreamQualityTags.parse(stream: $1.element).isHardwareAccelerated()
+                if res0 >= 2160, needsHardwareCheck {
+                    let hw0 = $0.hardwareAccelerated
+                    let hw1 = $1.hardwareAccelerated
                     if hw0 != hw1 {
                         return hw0 && !hw1
                     }
@@ -2639,30 +2660,26 @@ enum StreamPickerListBuilder {
                 return $0.offset < $1.offset
             }.map(\.element)
         case .size:
-            return streams.enumerated().sorted {
-                let res0 = resolution(for: $0.element)
-                let res1 = resolution(for: $1.element)
+            return entries.sorted {
                 if !preserveAddonStreams {
-                    let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || res0 == 0
-                    let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || res1 == 0
+                    let bad0 = $0.isBad
+                    let bad1 = $1.isBad
                     if bad0 != bad1 {
                         return !bad0 && bad1
                     }
                 }
-                let s0 = sizeBytes(for: $0.element)
-                let s1 = sizeBytes(for: $1.element)
+                let s0 = $0.size
+                let s1 = $1.size
                 if s0 != s1 {
                     return s0 > s1
                 }
                 return $0.offset < $1.offset
             }.map(\.element)
         case .name:
-            return streams.enumerated().sorted {
-                let res0 = resolution(for: $0.element)
-                let res1 = resolution(for: $1.element)
+            return entries.sorted {
                 if !preserveAddonStreams {
-                    let bad0 = SmartPlaybackSelector.isLowQualityOrTicketStream($0.element) || res0 == 0
-                    let bad1 = SmartPlaybackSelector.isLowQualityOrTicketStream($1.element) || res1 == 0
+                    let bad0 = $0.isBad
+                    let bad1 = $1.isBad
                     if bad0 != bad1 {
                         return !bad0 && bad1
                     }
