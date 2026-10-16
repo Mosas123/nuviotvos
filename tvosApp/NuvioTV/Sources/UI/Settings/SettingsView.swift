@@ -10033,6 +10033,8 @@ private struct JellyfinServerEditSheet: View {
     @State private var apiKey: String
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var saveTask: Task<Void, Never>?
+    @State private var saveGeneration: UInt64 = 0
 
     init(server: JellyfinServerConfig?, accentColor: Color) {
         self.server = server
@@ -10119,7 +10121,10 @@ private struct JellyfinServerEditSheet: View {
                     }
 
                     HStack {
-                        SMBDialogButton(title: L10n.string("action_cancel", fallback: "Cancel"), isPrimary: false) { dismiss() }
+                        SMBDialogButton(title: L10n.string("action_cancel", fallback: "Cancel"), isPrimary: false) {
+                            cancelPendingSave()
+                            dismiss()
+                        }
                         Spacer()
                         SMBDialogButton(
                             title: isSaving
@@ -10136,6 +10141,7 @@ private struct JellyfinServerEditSheet: View {
                 .padding(40)
             }
         }
+        .onDisappear(perform: cancelPendingSave)
     }
 
     private var canSave: Bool {
@@ -10158,31 +10164,47 @@ private struct JellyfinServerEditSheet: View {
 
     private func save() {
         guard let baseURL = URL(string: baseURLString.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+        cancelPendingSave()
+        let generation = saveGeneration
         isSaving = true
         errorMessage = nil
         let id = server?.id ?? UUID().uuidString
         let trimmedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        Task {
+        let selectedAuthKind = authKind
+        let selectedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedUsername = username
+        let selectedPassword = password
+
+        saveTask = Task { @MainActor in
+            defer {
+                if generation == saveGeneration {
+                    saveTask = nil
+                    isSaving = false
+                }
+            }
+            guard !Task.isCancelled, generation == saveGeneration else { return }
             do {
                 let token: String
                 let userId: String
-                switch authKind {
+                switch selectedAuthKind {
                 case .apiKey:
-                    token = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                    userId = try await JellyfinClient.currentUserId(baseURL: baseURL, apiKey: token, username: username)
+                    token = selectedAPIKey
+                    userId = try await JellyfinClient.currentUserId(baseURL: baseURL, apiKey: token, username: selectedUsername)
                 case .login:
-                    let result = try await JellyfinSessionManager.login(baseURL: baseURL, username: username, password: password)
+                    let result = try await JellyfinSessionManager.login(baseURL: baseURL, username: selectedUsername, password: selectedPassword)
                     token = result.accessToken
                     userId = result.userId
                 }
+
+                guard !Task.isCancelled, generation == saveGeneration else { return }
 
                 let config = JellyfinServerConfig(
                     id: id,
                     displayName: trimmedName,
                     baseURLString: baseURL.absoluteString,
-                    authKind: authKind,
-                    username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                    authKind: selectedAuthKind,
+                    username: selectedUsername.trimmingCharacters(in: .whitespacesAndNewlines),
                     userId: userId,
                     selectedLibraryIDs: server?.selectedLibraryIDs ?? [],
                     lastSyncDate: server?.lastSyncDate,
@@ -10190,13 +10212,19 @@ private struct JellyfinServerEditSheet: View {
                 )
                 JellyfinCredentialStore.save(token, forServerID: id)
                 JellyfinServerStore.shared.upsert(config)
-                isSaving = false
                 dismiss()
             } catch {
-                isSaving = false
+                guard !Task.isCancelled, generation == saveGeneration else { return }
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func cancelPendingSave() {
+        saveGeneration &+= 1
+        saveTask?.cancel()
+        saveTask = nil
+        isSaving = false
     }
 }
 
