@@ -23,9 +23,12 @@ struct NuvioTVApp: App {
         let diskCapacity = isLegacyDevice ? (60 * 1024 * 1024) : (150 * 1024 * 1024)
         URLCache.shared.memoryCapacity = memCapacity
         URLCache.shared.diskCapacity = diskCapacity
-        if HomeCatalogPayloadStore.migrateAllKnownPreferences() {
+        let payloadMigrationKey = "nuvio.tv.migrations.largePayloadPreferences.v1"
+        if !UserDefaults.standard.bool(forKey: payloadMigrationKey),
+           HomeCatalogPayloadStore.migrateAllKnownPreferences() {
             LargePayloadStore.purgeAllKnownPreferences()
             UserDefaults.standard.set(true, forKey: SettingsKey.smoothFocus)
+            UserDefaults.standard.set(true, forKey: payloadMigrationKey)
         }
 
         #if canImport(AetherEngine)
