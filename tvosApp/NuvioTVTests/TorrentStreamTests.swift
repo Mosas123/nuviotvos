@@ -67,6 +67,25 @@ final class TorrentStreamTests: XCTestCase {
         XCTAssertEqual(TorrentSettings.cacheLimitGB(store: testStore), 8.0)
     }
 
+    func testTorrentCacheLimitBoundsRestoredValuesWithoutRewritingThem() {
+        let cases: [(stored: Double, expected: Double)] = [
+            (-1, TorrentSettings.defaultCacheLimitGB),
+            (0, TorrentSettings.defaultCacheLimitGB),
+            (0.5, 2),
+            (2, 2),
+            (8.5, 8.5),
+            (40, 40),
+            (41, 40),
+            (.greatestFiniteMagnitude, 40)
+        ]
+
+        for sample in cases {
+            testStore.set(sample.stored, forKey: SettingsKey.p2pCacheLimitGB)
+            XCTAssertEqual(TorrentSettings.cacheLimitGB(store: testStore), sample.expected)
+            XCTAssertEqual(testStore.double(forKey: SettingsKey.p2pCacheLimitGB), sample.stored)
+        }
+    }
+
     func testTorrentSourceParserNormalizesMagnetAndTorrentURLs() {
         let hash = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
 
