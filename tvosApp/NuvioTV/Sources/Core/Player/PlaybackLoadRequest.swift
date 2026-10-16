@@ -178,7 +178,7 @@ enum PlaybackCacheProfile: String, Equatable {
         case .medium: return 90.0
         case .large: return 150.0
         case .max: return 240.0
-        case .ultra: return 360.0
+        case .ultra: return 600.0
         case .auto:
             return Self.resolveAutoLeadSeconds(
                 physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
@@ -210,7 +210,7 @@ enum PlaybackCacheProfile: String, Equatable {
         let mbAvailable = Double(availableMemoryBytes) / (1024.0 * 1024.0)
 
         if gibPhysical > 3.5 && mbAvailable >= 350 {
-            return 360.0 // Ultra: 6 minutes ahead (Gen 3)
+            return 600.0 // Ultra: 10 minutes ahead (Gen 3)
         } else if gibPhysical > 2.5 && mbAvailable >= 250 {
             return 240.0 // Max: 4 minutes ahead (Gen 1/2)
         } else if mbAvailable >= 150 {

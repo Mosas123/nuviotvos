@@ -2459,7 +2459,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var didPrewarmSoftwareFrameExtractor = false
     private var didLogSoftwareThumbnailResult = false
     private let hybridThumbnailIndex = HybridSeekThumbnailIndex()
-    private var coarseThumbnailTask: Task<Void, Never>?
+    var coarseThumbnailTask: Task<Void, Never>?
     private var coarseThumbnailTaskToken: UInt64 = 0
     private var coarseSampleTimes: [Double] = []
     private var coarseSampleCursor = 0
@@ -2473,6 +2473,9 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     private var isAwaitingEngineLoad = false
     private var engineLoadInitialPhase: PlaybackPhase? = nil
+    private var lastAppliedPlaybackPhase: PlaybackPhase?
+    private var lastDiagnosticSnapshotUptime: TimeInterval = 0
+    private var diagnosticPlayIntent = "unknown"
 
     var onFirstFrameReady: (() -> Void)?
     var hasFirstFrameReadyForDisplay: Bool {
@@ -2580,6 +2583,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     /// request does not pay the demuxer-open cost.
     func prepareScrubThumbnailExtractor() {
         guard isLocalPlaybackCache || (!isRemoteStream && engine.playbackBackend == .software) else { return }
+        guard engine.playbackPhase == .paused, !isTransportPlaying else { return }
         guard !didPrewarmSoftwareFrameExtractor else { return }
         guard let extractor = getOrCreateFrameExtractor() else { return }
         didPrewarmSoftwareFrameExtractor = true
@@ -2729,8 +2733,27 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         coarseResumeNotBefore = Date().addingTimeInterval(2)
     }
 
+    /// Release paused-only thumbnail decoders as soon as playback actually resumes,
+    /// including engine-driven resumes that do not pass through playPlayback().
+    private func releaseAuxiliaryThumbnailWorkForPlayback() {
+        suspendCoarseThumbnailWork()
+        engine.closeAuxiliaryScrubExtractors()
+        didPrewarmSoftwareFrameExtractor = false
+        if let extractor = softwareFrameExtractor {
+            Task { await extractor.closeAuxiliaryContext() }
+        }
+    }
+
+    static func shouldReleaseAuxiliaryThumbnailWork(
+        for phase: PlaybackPhase,
+        after previousPhase: PlaybackPhase?
+    ) -> Bool {
+        phase == .playing && previousPhase != .playing
+    }
+
     func advanceCoarseThumbnailIfNeeded(duration: Double) {
         guard !isRemoteStream || isLocalPlaybackCache else { return }
+        guard engine.playbackPhase == .paused, !isTransportPlaying else { return }
         guard duration >= HybridSeekThumbnailPolicy.coarseIntervalSeconds,
               Date() >= coarseResumeNotBefore,
               !coarseThumbnailUnavailable,
@@ -2757,12 +2780,14 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                     self.coarseThumbnailTask = nil
                 }
             }
-            guard let self else { return }
+            guard let self, self.engine.playbackPhase == .paused, !self.isTransportPlaying else { return }
             var cursor = self.coarseSampleCursor
-            while cursor < self.coarseSampleTimes.count,
-                  await self.hybridThumbnailIndex.hasCoarse(
-                      at: self.coarseSampleTimes[cursor], generation: generation
-                  ) {
+            while cursor < self.coarseSampleTimes.count {
+                let hasCoarse = await self.hybridThumbnailIndex.hasCoarse(
+                    at: self.coarseSampleTimes[cursor], generation: generation
+                )
+                guard self.engine.playbackPhase == .paused, !self.isTransportPlaying else { return }
+                if !hasCoarse { break }
                 cursor += 1
             }
             self.coarseSampleCursor = cursor
@@ -2772,6 +2797,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             }
             guard cursor < self.coarseSampleTimes.count,
                   !Task.isCancelled,
+                  self.engine.playbackPhase == .paused,
+                  !self.isTransportPlaying,
                   self.coarseThumbnailTaskToken == token,
                   self.loadGeneration == generation else { return }
             let seconds = self.coarseSampleTimes[cursor]
@@ -2784,6 +2811,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             // card so prefetch cannot leave a lower-resolution cached still.
             let image = await extractor.preciseThumbnail(at: seconds, maxWidth: 480)
             guard !Task.isCancelled,
+                  self.engine.playbackPhase == .paused,
+                  !self.isTransportPlaying,
                   self.coarseThumbnailTaskToken == token,
                   self.loadGeneration == generation else { return }
             self.coarseResumeNotBefore = Date().addingTimeInterval(1)
@@ -2868,7 +2897,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
         // DV HDR Metadata line
         let dvHdrStr = isDV
-            ? "MaxCLL 617 · MaxFALL 496 · MDL peak ~1001 nits"
+            ? "Dolby Vision (Metadata unavailable)"
             : (sourceRange.contains("HDR") ? "BT.2020 · PQ Transfer" : "BT.709 · Standard Dynamic Range")
 
         // Decoder
@@ -2892,11 +2921,38 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         } else if let gap = telemetry?.avSyncGapMs {
             frameLeadStr = String(format: "%+.1f ms", gap)
         } else {
-            frameLeadStr = "+44.9 ms"
+            frameLeadStr = "Unavailable"
         }
 
         // Display refresh rate
         let displayStr = PlaybackSystemMonitor.displayRefreshRate(nominalFps: fpsVal)
+
+        // Audio delivery mapping
+        let deliveryStr: String
+        switch engine.audioDelivery {
+        case .none:
+            deliveryStr = "Unavailable"
+        case .noAudioInSource:
+            deliveryStr = "None (Silent Source)"
+        case .streamCopy:
+            deliveryStr = "Stream-copy (fMP4 bitstream preserved)"
+        case .bridged:
+            if let activeDec = engine.activeAudioDecoder, !activeDec.isEmpty {
+                deliveryStr = "Bridged (\(activeDec))"
+            } else {
+                deliveryStr = "Bridged (re-encode)"
+            }
+        case .decoded:
+            if let activeDec = engine.activeAudioDecoder, !activeDec.isEmpty {
+                deliveryStr = "Decoded (\(activeDec))"
+            } else {
+                deliveryStr = "Decoded (Software PCM)"
+            }
+        case .droppedNoPipeline:
+            deliveryStr = "Dropped (Pipeline failure or unsupported codec)"
+        case .playerManaged:
+            deliveryStr = "Player-managed (AVFoundation)"
+        }
 
         // Audio format line
         let audioFormatted: String
@@ -2904,12 +2960,12 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             let title = selectedAudio.title
             let detail = selectedAudio.detail.trimmingCharacters(in: .whitespacesAndNewlines)
             if !detail.isEmpty && detail != title {
-                audioFormatted = "\(title) · \(detail) · passthrough"
+                audioFormatted = "\(title) · \(detail) · \(deliveryStr)"
             } else {
-                audioFormatted = "\(title) · passthrough"
+                audioFormatted = "\(title) · \(deliveryStr)"
             }
         } else {
-            audioFormatted = audioDetail
+            audioFormatted = audioDetail.isEmpty ? deliveryStr : "\(audioDetail) · \(deliveryStr)"
         }
 
         // Audio bitrate
@@ -2926,10 +2982,9 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         // Audio jitter
         let aJitterStr: String
         if let syncGap = telemetry?.avSyncGapMs {
-            let gapAbs = abs(syncGap)
-            aJitterStr = String(format: "drift avg %.0f ms/s · max %.0f · 0 ev", gapAbs, gapAbs * 1.5)
+            aJitterStr = String(format: "gap %+.1f ms", syncGap)
         } else {
-            aJitterStr = "drift avg 32 ms/s · max 343 · 13 ev"
+            aJitterStr = "Unavailable"
         }
 
         // Network buffer
@@ -2969,12 +3024,12 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
         // System
         let cpuPercent = PlaybackSystemMonitor.cpuUsage()
-        let appCpuStr = String(format: "%.0f %%", cpuPercent > 0 ? cpuPercent : 27.0)
+        let appCpuStr = cpuPercent > 0 ? String(format: "%.0f %%", cpuPercent) : "-- %"
 
         let mem = PlaybackSystemMonitor.memoryUsage()
         let memStr = mem.residentMB > 0
-            ? String(format: "heap %.0f/%.0f MB · native %.0f MB", mem.residentMB, mem.availableMB > 0 ? mem.availableMB : 384.0, mem.virtualMB > 0 ? mem.virtualMB : 841.0)
-            : "heap 57/384 MB · native 841 MB"
+            ? String(format: "heap %.0f/%.0f MB · native %.0f MB", mem.residentMB, max(0.0, mem.availableMB), max(0.0, mem.virtualMB))
+            : "Unavailable"
 
         let thermal = PlaybackSystemMonitor.thermalInfo()
         let socTempStr = thermal.tempString
@@ -3010,7 +3065,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             buffer: bufferStr,
             bufferSeconds: bufferSec,
             speed: speedStr,
-            ping: "7 ms",
+            ping: "--",
             loaded: loadedStr,
             stalls: "\(stallsCount)",
             stallsCount: stallsCount,
@@ -3029,6 +3084,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     /// MPVKit and an explicitly forced Aether session can show a recoverable
     /// error instead of crashing during view-model initialization.
     init?(engine: AetherEngine? = nil) {
+        PlaybackDiagnosticLogStore.installAetherEngineHandlerIfNeeded()
         guard let resolvedEngine = engine ?? (try? AetherEngine()) else {
             return nil
         }
@@ -3381,7 +3437,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             .store(in: &cancellables)
     }
 
-    private func applyPhase(_ phase: PlaybackPhase, engineIsBuffering: Bool) {
+    func applyPhase(_ phase: PlaybackPhase, engineIsBuffering: Bool) {
         if isAwaitingEngineLoad {
             if phase != engineLoadInitialPhase {
                 isAwaitingEngineLoad = false
@@ -3395,6 +3451,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 return
             }
         }
+        if Self.shouldReleaseAuxiliaryThumbnailWork(for: phase, after: lastAppliedPlaybackPhase) {
+            releaseAuxiliaryThumbnailWorkForPlayback()
+        }
+        lastAppliedPlaybackPhase = phase
         switch phase {
         case .idle:
             isPlayerLoading = false
@@ -3720,6 +3780,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     // MARK: Load
 
     func load(_ request: PlaybackLoadRequest, generation: UInt64) {
+        diagnosticPlayIntent = request.autoplay ? "play" : "pause"
+        lastDiagnosticSnapshotUptime = 0
         let currentEngineGeneration = max(
             engine.startupProgress?.generation ?? 0,
             startupProgressGenerationObserver.generation ?? 0
@@ -3967,6 +4029,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func playPlayback() {
+        diagnosticPlayIntent = "play"
         screensaverDebugLog("[ScreensaverDebug][AetherController] playPlayback() called: state=\(engine.state), clock=\(engine.clock.currentTime)")
         if foregroundReloadTask != nil {
             playbackWasPlayingBeforeBackground = true
@@ -3974,6 +4037,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         engine.play()
     }
     func pausePlayback() {
+        diagnosticPlayIntent = "pause"
         screensaverDebugLog("[ScreensaverDebug][AetherController] pausePlayback() called: state=\(engine.state), clock=\(engine.clock.currentTime)")
         engine.pause()
     }
@@ -4171,6 +4235,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 durationMs = 0
                 bufferedMs = 0
                 sourceTimeSeconds = 0
+                appendDiagnosticStateSampleIfDue()
                 return
             }
         }
@@ -4178,9 +4243,50 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         mapAudioTracks(engine.audioTracks)
         mapSubtitleTracks(engine.subtitleTracks)
         applyPhase(engine.playbackPhase, engineIsBuffering: engine.isBuffering)
+        appendDiagnosticStateSampleIfDue()
         #if os(tvOS) || os(iOS)
         configureRemoteCommandsIfNeeded()
         #endif
+    }
+
+    private func appendDiagnosticStateSampleIfDue() {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        guard uptime - lastDiagnosticSnapshotUptime >= 5 else { return }
+        lastDiagnosticSnapshotUptime = uptime
+
+        let state: String
+        if isPlayerLoading {
+            state = "loading"
+        } else if isPlayerEnded {
+            state = "ended"
+        } else if isPlayerPlaying {
+            state = "playing"
+        } else {
+            state = "paused"
+        }
+        let phaseLabel: String
+        switch engine.playbackPhase {
+        case .idle: phaseLabel = "idle"
+        case .loading: phaseLabel = "loading"
+        case .playing: phaseLabel = "playing"
+        case .paused: phaseLabel = "paused"
+        case .seeking: phaseLabel = "seeking"
+        case .rebuffering: phaseLabel = "rebuffering"
+        case .stalled(let reconnecting): phaseLabel = "stalled(reconnecting=\(reconnecting))"
+        case .ended: phaseLabel = "ended"
+        case .error: phaseLabel = "error"
+        }
+        let telemetry = engine.liveTelemetry
+        let consumerBytes = telemetry?.networkTransferredBytes.map(String.init) ?? "unknown"
+        let demuxerInput = isLocalPlaybackCache
+            ? "hybrid-cache-loopback"
+            : (isRemoteStream ? "direct-remote-source" : "local-or-custom-source")
+        let message = "state=\(state) phase=\(phaseLabel) intent=\(diagnosticPlayIntent) "
+            + "positionMs=\(positionMs) bufferedMs=\(bufferedMs) "
+            + "demuxerInput=\(demuxerInput) demuxerReadBytes=\(telemetry?.demuxerBytesFetched ?? 0) "
+            + "consumerReadBytes=\(consumerBytes) localHLSServerBytesSent=\(telemetry?.serverBytesSentLifetime ?? 0) "
+            + "producerRestarts=\(telemetry?.producerRestartCount ?? 0) cacheBytes=\(telemetry?.cachedBytes ?? 0)"
+        PlaybackDiagnosticLogStore.shared.append(source: "AetherState", message: message)
     }
 
     #if os(tvOS) || os(iOS)

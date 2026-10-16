@@ -475,8 +475,9 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
         let castToUse = (resolved.cast == nil || resolved.cast?.isEmpty == true) ? existing.cast : resolved.cast
         let directorToUse = (resolved.director == nil || resolved.director?.isEmpty == true) ? existing.director : resolved.director
         let writerToUse = (resolved.writer == nil || resolved.writer?.isEmpty == true) ? existing.writer : resolved.writer
+        let certToUse = (resolved.certification == nil || resolved.certification?.isEmpty == true) ? existing.certification : resolved.certification
 
-        if castToUse != resolved.cast || directorToUse != resolved.director || writerToUse != resolved.writer {
+        if castToUse != resolved.cast || directorToUse != resolved.director || writerToUse != resolved.writer || certToUse != resolved.certification {
             resolved = NuvioMeta(
                 id: resolved.id,
                 name: resolved.name,
@@ -495,7 +496,7 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
                 cast: castToUse,
                 director: directorToUse,
                 writer: writerToUse,
-                certification: resolved.certification,
+                certification: certToUse,
                 country: resolved.country,
                 language: resolved.language,
                 released: resolved.released,
@@ -509,6 +510,39 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             )
         }
         return resolved
+    }
+
+    func withCertification(_ newCertification: String?) -> NuvioMeta {
+        NuvioMeta(
+            id: id,
+            name: name,
+            description: description,
+            posterUrl: posterUrl,
+            backgroundUrl: backgroundUrl,
+            logoUrl: logoUrl,
+            imdbId: imdbId,
+            tmdbId: tmdbId,
+            type: type,
+            year: year,
+            genres: genres,
+            rating: rating,
+            releaseInfo: releaseInfo,
+            runtime: runtime,
+            cast: cast,
+            director: director,
+            writer: writer,
+            certification: newCertification ?? certification,
+            country: country,
+            language: language,
+            released: released,
+            status: status,
+            videos: videos,
+            trailerYtIds: trailerYtIds,
+            externalRatings: externalRatings,
+            posterShape: posterShape,
+            isFromAddon: isFromAddon,
+            landscapePosterUrl: landscapePosterUrl
+        )
     }
 
     func withExternalRatings(_ ratings: [NuvioExternalRating]) -> NuvioMeta {
@@ -671,6 +705,194 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             isFromAddon: isFromAddon,
             landscapePosterUrl: landscapePosterUrl
         )
+    }
+}
+
+enum CustomPosterScreen: String, CaseIterable, Hashable, Identifiable {
+    case home
+    case continueWatching = "continue_watching"
+    case collections
+    case library
+    case search
+    case details
+    case tvRecommendations = "tv_recommendations"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .home: return "Home"
+        case .continueWatching: return "Continue Watching"
+        case .collections: return "Collections"
+        case .library: return "Library"
+        case .search: return "Search"
+        case .details: return "Details"
+        case .tvRecommendations: return "TV Recommendations"
+        }
+    }
+
+    static func fromStorageValue(_ rawValue: String?) -> Set<CustomPosterScreen> {
+        guard let rawValue else { return Set(allCases) }
+        let keys = rawValue
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        if keys.isEmpty || keys.allSatisfy(\.isEmpty) || keys.contains("none") {
+            return []
+        }
+        if keys.contains("all") { return Set(allCases) }
+        return Set(keys.compactMap(CustomPosterScreen.init(rawValue:)))
+    }
+
+    static func storageValue(for screens: Set<CustomPosterScreen>) -> String {
+        if screens.isEmpty { return "none" }
+        return allCases.filter(screens.contains).map(\.rawValue).joined(separator: ",")
+    }
+}
+
+enum CustomPosterURLResolver {
+    private enum Part {
+        case literal(String)
+        case placeholder([String], optional: Bool)
+    }
+
+    private final class PreparedTemplate: NSObject {
+        let parts: [Part]
+        let containsShape: Bool
+
+        init(parts: [Part], containsShape: Bool) {
+            self.parts = parts
+            self.containsShape = containsShape
+        }
+    }
+
+    private static let preparedTemplates: NSCache<NSString, PreparedTemplate> = {
+        let cache = NSCache<NSString, PreparedTemplate>()
+        cache.countLimit = 128
+        return cache
+    }()
+
+    static func resolve(
+        pattern: String,
+        meta: NuvioMeta,
+        shape: String = "poster"
+    ) -> String? {
+        let trimmedPattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPattern.isEmpty,
+              ["poster", "landscape", "square"].contains(shape),
+              let prepared = prepare(trimmedPattern),
+              prepared.containsShape || shape == "poster" else {
+            return nil
+        }
+
+        let imdbID = NuvioMeta.canonicalImdbID(from: meta.imdbId ?? "")
+            ?? NuvioMeta.canonicalImdbID(from: meta.id)
+        let tmdbID = meta.tmdbId.flatMap { $0 > 0 ? String($0) : nil }
+            ?? namespacedTMDBID(from: meta.id)
+        var values = [
+            "type": meta.isSeries ? "series" : "movie",
+            "shape": shape
+        ]
+        if let tmdbID { values["tmdb_id"] = tmdbID }
+        if let imdbID { values["imdb_id"] = imdbID }
+
+        var result = ""
+        for part in prepared.parts {
+            switch part {
+            case .literal(let value):
+                result.append(value)
+            case .placeholder(let keys, let optional):
+                let resolved = keys.lazy.compactMap { key -> String? in
+                    guard let value = values[key], !value.isEmpty else { return nil }
+                    return value
+                }.first
+                if let resolved {
+                    result.append(resolved)
+                } else if optional {
+                    continue
+                } else {
+                    return nil
+                }
+            }
+        }
+
+        guard !result.isEmpty,
+              !result.contains(where: \.isWhitespace),
+              let components = URLComponents(string: result),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty,
+              components.url != nil else {
+            return nil
+        }
+        return result
+    }
+
+    static func resolve(
+        pattern: String,
+        meta: NuvioMeta,
+        screen: CustomPosterScreen,
+        enabledScreens: String?,
+        shape: String = "poster"
+    ) -> String? {
+        guard CustomPosterScreen.fromStorageValue(enabledScreens).contains(screen) else { return nil }
+        return resolve(pattern: pattern, meta: meta, shape: shape)
+    }
+
+    private static func prepare(_ rawPattern: String) -> PreparedTemplate? {
+        if let cached = preparedTemplates.object(forKey: rawPattern as NSString) {
+            return cached
+        }
+
+        let pattern = rawPattern
+            .replacingOccurrences(of: "%7B", with: "{", options: .caseInsensitive)
+            .replacingOccurrences(of: "%7D", with: "}", options: .caseInsensitive)
+            .replacingOccurrences(of: "%7C", with: "|", options: .caseInsensitive)
+        var parts: [Part] = []
+        var containsShape = false
+        var cursor = pattern.startIndex
+
+        while cursor < pattern.endIndex {
+            guard let open = pattern[cursor...].firstIndex(of: "{") else {
+                let literal = String(pattern[cursor...])
+                guard !literal.contains("}") else { return nil }
+                if !literal.isEmpty { parts.append(.literal(literal)) }
+                cursor = pattern.endIndex
+                break
+            }
+
+            let literal = String(pattern[cursor..<open])
+            guard !literal.contains("}") else { return nil }
+            if !literal.isEmpty { parts.append(.literal(literal)) }
+
+            let bodyStart = pattern.index(after: open)
+            guard let close = pattern[bodyStart...].firstIndex(of: "}") else { return nil }
+            let body = String(pattern[bodyStart..<close])
+            let optional = body.hasSuffix("?")
+            let keyBody = optional ? String(body.dropLast()) : body
+            let keys = keyBody.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            let allowed = Set(["type", "shape", "tmdb_id", "imdb_id"])
+            guard !keys.isEmpty,
+                  keys.allSatisfy({ allowed.contains($0) }) else {
+                return nil
+            }
+            containsShape = containsShape || keys.contains("shape")
+            parts.append(.placeholder(keys, optional: optional))
+            cursor = pattern.index(after: close)
+        }
+
+        let prepared = PreparedTemplate(parts: parts, containsShape: containsShape)
+        preparedTemplates.setObject(prepared, forKey: rawPattern as NSString)
+        return prepared
+    }
+
+    private static func namespacedTMDBID(from rawID: String) -> String? {
+        let parts = rawID.split(whereSeparator: { $0 == ":" || $0 == "/" })
+        guard parts.contains(where: { $0.caseInsensitiveCompare("tmdb") == .orderedSame }),
+              let candidate = parts.last,
+              let value = Int(candidate), value > 0 else {
+            return nil
+        }
+        return String(value)
     }
 }
 
@@ -1155,7 +1377,7 @@ struct NuvioSubtitle: Identifiable, Codable, Equatable {
     var source: String? = nil
 }
 
-struct NuvioStream: Identifiable, Codable {
+struct NuvioStream: Identifiable, Codable, Equatable {
     /// Stable identity for lists and focus. Prefer URL / torrent key; never mint a
     /// fresh UUID on each access (that forces full SwiftUI list rebuilds).
     var id: String {
@@ -2388,10 +2610,6 @@ enum ContinueWatchingStore {
         }
 
         print("[ContinueWatching][Store] save: meta=\(meta.id), S\(season.map(String.init) ?? "nil")E\(episode.map(String.init) ?? "nil"), pos=\(position)/\(duration)")
-
-        // Going back to a title retires the removal the user made earlier, so a
-        // months-old dismissal can never hide progress they just made.
-        ContinueWatchingDismissStore.clear(contentId: meta.id)
 
         // Record the raw row before any display rule runs. A finished episode is
         // not "nothing to store" — it is precisely the seed that produces the

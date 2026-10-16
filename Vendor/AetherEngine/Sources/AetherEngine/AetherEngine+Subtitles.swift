@@ -682,6 +682,15 @@ extension AetherEngine {
         // prefetcher's read position; restart it at the new playhead. Once per tick, not per
         // channel: both channels ride the same playhead and the same side demuxer.
         if work.prefetchNeedsReanchor { startSubtitleForwardPrefetcher() }
+        if let deferredAnchor = deferredSubtitleForwardPrefetchAnchor,
+           (nativeVideoSession?.segmentCacheCount ?? 2) >= 2 {
+            deferredSubtitleForwardPrefetchAnchor = nil
+            EngineLog.emit(
+                "[AetherEngine] resuming deferred subtitle forward prefetch from drain tick (resident count=\(nativeVideoSession?.segmentCacheCount ?? 0))",
+                category: .engine
+            )
+            startSubtitleForwardPrefetcher(startAt: deferredAnchor)
+        }
         // #125: the packet store is NOT time-pruned here. A trailing playhead-relative prune
         // (was: playhead - retentionSeconds) evicted packets a backward seek could still land on:
         // a backward jump into segment-cache-resident content is served without a producer restart,
@@ -721,6 +730,14 @@ extension AetherEngine {
     /// drainer keeps working off the pump's harvest exactly as before.
     func startSubtitleForwardPrefetcher(startAt: Double? = nil) {
         let anchor = max(0, startAt ?? sourceTime)
+        if let session = nativeVideoSession, session.segmentCacheCount < 2 {
+            deferredSubtitleForwardPrefetchAnchor = anchor
+            EngineLog.emit(
+                "[AetherEngine] deferring subtitle forward prefetch until video pump settles (resident count=\(session.segmentCacheCount) < 2)",
+                category: .engine
+            )
+            return
+        }
         // Phase D: while the OCR worker is armed the prefetcher must out-run the worker's
         // 240 s window, or the packet store never holds what the worker wants to decode.
         // #362: otherwise it parks a margin BEYOND the drain window, so the set at the window's
@@ -843,6 +860,9 @@ extension AetherEngine {
         subtitleForwardPrefetchDemuxer = nil
         subtitleForwardPrefetchReanchor = nil
         subtitleForwardPrefetchActiveLead = nil
+        if reason == .sessionStopped {
+            deferredSubtitleForwardPrefetchAnchor = nil
+        }
     }
 
     /// Open + position the prefetch side demuxer, then hand off to the packet loop. Mirrors

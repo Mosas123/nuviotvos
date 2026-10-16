@@ -897,6 +897,7 @@ private struct CollectionFolderHomeStyleRow: View {
                     let cardKey = "\(rowId)\u{1}\(item.id)"
                     PosterCard(
                         meta: item,
+                        customPosterScreen: .collections,
                         isLandscape: rowTileShape == .landscape || (rowHomeLayout == "Modern" && landscapeFocusedId == cardKey),
                         isAlwaysLandscape: rowTileShape == .landscape || item.tileShape == .landscape,
                         tileShape: item.tileShape != .poster ? item.tileShape : rowTileShape,
@@ -1076,6 +1077,18 @@ struct CollectionFolderResultCard: View {
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
     @AppStorage(SettingsKey.cardCornerRadius) private var cardCornerRadiusSetting = AppCardStyle.defaultCornerRadiusRaw
     @AppStorage(SettingsKey.liquidGlassCards) private var liquidGlassCards = true
+    @AppStorage(SettingsKey.customPosterURLPattern) private var customPosterURLPattern = ""
+    @AppStorage(SettingsKey.customPosterEnabledScreens) private var customPosterEnabledScreens = "all"
+
+    private var customPosterArtworkURL: String? {
+        CustomPosterURLResolver.resolve(
+            pattern: customPosterURLPattern,
+            meta: meta,
+            screen: .collections,
+            enabledScreens: customPosterEnabledScreens,
+            shape: "poster"
+        )
+    }
 
     private var cardCornerRadius: CGFloat {
         AppCardStyle.cornerRadius(for: cardCornerRadiusSetting, fallback: 16)
@@ -1089,7 +1102,8 @@ struct CollectionFolderResultCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 12) {
                 CachedPosterArtwork(
-                    urlString: meta.posterUrl,
+                    urlString: customPosterArtworkURL ?? meta.posterUrl,
+                    fallbackURLString: customPosterArtworkURL == nil ? nil : meta.posterUrl,
                     width: CollectionFolderGridMetrics.posterWidth,
                     height: CollectionFolderGridMetrics.posterHeight,
                     maximumWidth: CollectionFolderGridMetrics.posterWidth

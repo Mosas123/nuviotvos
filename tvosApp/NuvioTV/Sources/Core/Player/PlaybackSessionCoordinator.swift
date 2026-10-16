@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import Combine
+import AetherEngine
 
 struct PlaybackCompletionIdentity: Equatable {
     let titleID: String
@@ -264,6 +265,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         _ request: PlaybackLoadRequest,
         requiresMPVAudioControls: Bool = false
     ) {
+        PlaybackDiagnosticLogStore.shared.append(source: "Player", message: "Playback load started")
         userStopped = false
         isHandoffInProgress = false
         isProgressSaveSuspended = false
@@ -324,6 +326,16 @@ final class PlaybackSessionCoordinator: ObservableObject {
                 }
             }
         }
+
+        let diskCacheSetting = (ProfileSettings.current.object(forKey: SettingsKey.hybridDiskCacheEnabled) as? Bool) ?? false
+        let cacheEligible = diskCacheSetting
+            && PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
+            && request.videoURL.pathExtension.lowercased() != "m3u8"
+        let aetherVersion = selectedBackend == .aether ? AetherEngine.version : "not-active"
+        PlaybackDiagnosticLogStore.shared.append(
+            source: "Player",
+            message: "backend=\(selectedBackend.rawValue) aetherVersion=\(aetherVersion) hybridDiskCache=\(cacheEligible ? "enabled" : "disabled")"
+        )
 
         let generation = loadGeneration
         selectBackend(selectedBackend, toast: policy.statusMessage ?? statusToast, pauseOutgoing: true)

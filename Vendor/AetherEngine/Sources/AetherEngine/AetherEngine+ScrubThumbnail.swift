@@ -147,7 +147,15 @@ extension AetherEngine {
     /// eviction boundary can be pinned without opening a playback session.
     func trimScrubThumbnailExtractors() {
         while scrubThumbnailExtractors.count > Self.scrubThumbnailExtractorLimit {
-            _ = scrubThumbnailExtractors.removeFirst()
+            let evicted = scrubThumbnailExtractors.removeFirst()
+            Task { await evicted.extractor.closeAuxiliaryContext() }
+        }
+    }
+
+    /// Releases auxiliary decode contexts across all cached scrub extractors during active playback.
+    public func closeAuxiliaryScrubExtractors() {
+        for entry in scrubThumbnailExtractors {
+            Task { await entry.extractor.closeAuxiliaryContext() }
         }
     }
 

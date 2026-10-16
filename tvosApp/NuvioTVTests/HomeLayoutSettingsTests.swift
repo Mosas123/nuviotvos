@@ -634,6 +634,14 @@ final class HomeLayoutSettingsTests: XCTestCase {
         XCTAssertNotEqual(withLandscape, withoutLandscapeAgain)
     }
 
+    func testPosterCardEquatableChecksCustomPosterScreen() throws {
+        let meta = try title("item1")
+        let homeCard = PosterCard(meta: meta, customPosterScreen: .home) {}
+        let searchCard = PosterCard(meta: meta, customPosterScreen: .search) {}
+
+        XCTAssertNotEqual(homeCard, searchCard)
+    }
+
     func testTVCatalogRowEquatableChecksLandscapePosterURL() throws {
         func row(item: NuvioMeta) -> TVCatalogRow {
             TVCatalogRow(
@@ -660,6 +668,27 @@ final class HomeLayoutSettingsTests: XCTestCase {
         XCTAssertNotEqual(withoutLandscape, withLandscape)
         XCTAssertNotEqual(withLandscape, withChangedLandscape)
         XCTAssertNotEqual(withLandscape, withoutLandscapeAgain)
+    }
+
+    func testTVCatalogRowEquatableChecksCustomPosterScreen() {
+        func row(screen: CustomPosterScreen) -> TVCatalogRow {
+            TVCatalogRow(
+                id: "catalog-1",
+                customPosterScreen: screen,
+                title: "Popular Movies",
+                horizontalEdgeInset: 40,
+                items: [],
+                initialFocusCardKey: nil,
+                landscapeFocusedId: nil,
+                onInitialFocusRequested: {},
+                onFocus: { _ in },
+                onBlur: { _ in },
+                onApproachEnd: { _ in },
+                onSelect: { _ in }
+            )
+        }
+
+        XCTAssertNotEqual(row(screen: .home), row(screen: .search))
     }
 
     func testTVCollectionFolderCardEquatableChecksCardIndex() throws {

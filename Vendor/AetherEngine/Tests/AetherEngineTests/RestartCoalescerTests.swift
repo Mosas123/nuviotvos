@@ -124,4 +124,82 @@ struct RestartCoalescerTests {
         #expect(c.begin(230) == false)
         #expect(c.next(justRan: 200) == 230)
     }
+
+    // MARK: - Automatic restart provenance
+
+    @Test("A coalesced burst yields only its latest automatic request with its epoch")
+    func coalescedAutomaticRequestsKeepLatestProvenance() {
+        var c = RestartCoalescer()
+        let active = RestartCoalescer.Request(
+            index: 10, authoritative: false, automatic: false, sessionEpoch: 1)
+        let overwritten = RestartCoalescer.Request(
+            index: 20, authoritative: false, automatic: true, sessionEpoch: 2)
+        let latest = RestartCoalescer.Request(
+            index: 30, authoritative: false, automatic: true, sessionEpoch: 3)
+
+        let activeStarted = c.begin(active)
+        let overwrittenStarted = c.begin(overwritten)
+        let latestStarted = c.begin(latest)
+        #expect(activeStarted)
+        #expect(!overwrittenStarted)
+        #expect(!latestStarted)
+        #expect(c.next(justRan: active) == latest)
+        #expect(latest.automatic)
+        #expect(!latest.authoritative)
+        #expect(latest.sessionEpoch == 3)
+        #expect(c.next(justRan: latest) == nil)
+    }
+
+    @Test("An authoritative pending request keeps its provenance and epoch over automatic work")
+    func authoritativePendingKeepsProvenanceAndEpoch() {
+        var c = RestartCoalescer()
+        let active = RestartCoalescer.Request(
+            index: 10, authoritative: false, automatic: true, sessionEpoch: 4)
+        let authority = RestartCoalescer.Request(
+            index: 30, authoritative: true, automatic: false, sessionEpoch: 7)
+        let staleAutomatic = RestartCoalescer.Request(
+            index: 40, authoritative: false, automatic: true, sessionEpoch: 8)
+
+        let activeStarted = c.begin(active)
+        let authorityStarted = c.begin(authority)
+        let staleAutomaticStarted = c.begin(staleAutomatic)
+        #expect(activeStarted)
+        #expect(!authorityStarted)
+        #expect(!staleAutomaticStarted)
+        #expect(c.next(justRan: active) == authority)
+        #expect(authority.authoritative)
+        #expect(!authority.automatic)
+        #expect(authority.sessionEpoch == 7)
+    }
+
+    @Test("A deferred automatic request preserves a same-index authoritative follow-up")
+    func deferredAutomaticPreservesSameIndexAuthority() {
+        var c = RestartCoalescer()
+        let automatic = RestartCoalescer.Request(
+            index: 12, authoritative: false, automatic: true, sessionEpoch: 9)
+        let authority = RestartCoalescer.Request(
+            index: 12, authoritative: true, automatic: false, sessionEpoch: 9)
+
+        let automaticStarted = c.begin(automatic)
+        let authorityStarted = c.begin(authority)
+        #expect(automaticStarted)
+        #expect(!authorityStarted)
+        #expect(c.next(justRan: automatic, destructiveStarted: false) == authority)
+    }
+
+    @Test("Successful destructive work settles a same-index authoritative follow-up")
+    func successfulSameIndexWorkSettlesPendingAuthority() {
+        var c = RestartCoalescer()
+        let automatic = RestartCoalescer.Request(
+            index: 12, authoritative: false, automatic: true, sessionEpoch: 9)
+        let authority = RestartCoalescer.Request(
+            index: 12, authoritative: true, automatic: false, sessionEpoch: 9)
+
+        let automaticStarted = c.begin(automatic)
+        let authorityStarted = c.begin(authority)
+        #expect(automaticStarted)
+        #expect(!authorityStarted)
+        #expect(c.next(justRan: automatic, destructiveStarted: true) == nil)
+        #expect(!c.isInFlight)
+    }
 }

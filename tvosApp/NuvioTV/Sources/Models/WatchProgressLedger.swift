@@ -207,6 +207,9 @@ enum WatchProgressLedger {
     /// agree or a title reappears on one device after the other retires it.
     static let completionFraction = 0.90
 
+    /// Minimum playback duration in seconds required before persisting progress or clearing dismissals.
+    static let minimumTrackableSeconds: Double = 10.0
+
     private(set) static var activeProfileId: String?
 
     /// Decoded rows for `cachedKey`. Playback saves progress every few seconds,

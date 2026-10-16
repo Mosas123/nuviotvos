@@ -482,7 +482,7 @@ actor PlaybackStreamCacheServer {
             if diff >= 0 && diff < 256 * 1024 * 1024 {
                 return clientOffset
             }
-            if diff < 0 && abs(diff) < 16 * 1024 * 1024 {
+            if diff < 0 && abs(diff) < 64 * 1024 * 1024 {
                 return clientOffset
             }
         }
@@ -507,6 +507,7 @@ actor PlaybackStreamCacheServer {
     // span separately from the complete chunk cache.
     private var transientTailSpan: Data?
     private var inFlightTailFetch: InFlightTailFetch?
+    private static let transportRetryMaxDelay: TimeInterval = 5.0
 
     /// Target bytes for the high-priority opening burst (60 seconds of video or 256 MB).
     var burstTargetBytes: Int64 {
@@ -609,6 +610,9 @@ actor PlaybackStreamCacheServer {
     private var lastSuccessfulFetchAt: Date?
     private var lastThrottleTime: Date?
     private let throttleRecoveryInterval: TimeInterval = 300 // 5 minutes
+    private let transportRetryBaseDelay: TimeInterval
+    private var transportRetryStreak = 0
+    private var transportRetryNotBefore: Date?
 
     static func defaultMaxConcurrentUpstream(physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Int {
         let gibPhysical = Double(physicalMemoryBytes) / 1_073_741_824.0
@@ -633,6 +637,7 @@ actor PlaybackStreamCacheServer {
         manifest: PlaybackStreamManifest? = nil,
         sessionConfiguration: URLSessionConfiguration? = nil,
         rateLimitCooldown: TimeInterval = 1,
+        transportRetryBaseDelay: TimeInterval = 0.5,
         maxConcurrentUpstream: Int? = nil,
         freeSpaceProvider: PlaybackStreamDiskCache.FreeSpaceProvider? = nil,
         demandBatchJoinGrace: TimeInterval = 2.5,
@@ -646,11 +651,19 @@ actor PlaybackStreamCacheServer {
         self.targetLeadSeconds = targetLeadSeconds.isFinite && targetLeadSeconds > 0 ? targetLeadSeconds : 600.0
         self.thermalStateProvider = thermalStateProvider
         self.rateLimitCooldown = rateLimitCooldown.isFinite ? min(max(0.1, rateLimitCooldown), 60) : 1
+        self.transportRetryBaseDelay = transportRetryBaseDelay.isFinite
+            ? min(max(0.01, transportRetryBaseDelay), Self.transportRetryMaxDelay)
+            : 0.5
         let grace = demandBatchJoinGrace.isFinite ? max(0, demandBatchJoinGrace) : 2.5
         self.demandBatchJoinGraceNanoseconds = UInt64(min(grace, 120) * 1_000_000_000)
         let resolvedConcurrency = maxConcurrentUpstream ?? Self.defaultMaxConcurrentUpstream()
         self.configuredMaxConcurrentUpstream = max(1, resolvedConcurrency)
-        self.maxConcurrentUpstream = self.configuredMaxConcurrentUpstream
+        let isRemoteHTTP = remoteURL.scheme == "http" || remoteURL.scheme == "https"
+        if maxConcurrentUpstream == nil && isRemoteHTTP {
+            self.maxConcurrentUpstream = min(2, self.configuredMaxConcurrentUpstream)
+        } else {
+            self.maxConcurrentUpstream = self.configuredMaxConcurrentUpstream
+        }
         self.maxDiskCacheSizeBytes = maxDiskCacheSizeBytes
         self.freeSpaceReserveBytes = freeSpaceReserveBytes
         self.diskCache = PlaybackStreamDiskCache(
@@ -697,6 +710,7 @@ actor PlaybackStreamCacheServer {
         self.listener = listener
         self.port = actualPort
         diskCacheLog.notice("PlaybackStreamCacheServer started on 127.0.0.1:\(actualPort)")
+        recordDiagnostic("local range server started port=\(actualPort)")
 
         acceptTask = Task { await self.acceptLoop(incoming) }
         startBackgroundWorkers()
@@ -849,7 +863,10 @@ actor PlaybackStreamCacheServer {
         guard endChunk >= startChunk else { return false }
 
         // Determine how many concurrent slots forward fill can use, always preserving at least 1 slot for demand
-        let allowedConcurrency = max(1, maxConcurrentUpstream - 1)
+        var allowedConcurrency = max(1, maxConcurrentUpstream - 1)
+        if bursting && (remoteURL.scheme == "http" || remoteURL.scheme == "https") {
+            allowedConcurrency = min(allowedConcurrency, 2)
+        }
         let availableSlots = max(0, allowedConcurrency - activeUpstreamFetches - queuedDemandWaiters - (maxConcurrentUpstream <= 1 ? activeDemandFetches : 0))
         guard availableSlots > 0 else { return isUrgent }
 
@@ -1145,6 +1162,7 @@ actor PlaybackStreamCacheServer {
             guard data.count == Int(range.count), !stopped, !Task.isCancelled else {
                 throw PlaybackStreamRangeError.invalidBodyLength
             }
+            resetTransportRetryBackoff()
             let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
             if elapsed > 0.05 { updateThroughput(Double(range.count) / elapsed) }
             lastSuccessfulFetchAt = Date()
@@ -1158,9 +1176,11 @@ actor PlaybackStreamCacheServer {
             if case let PlaybackStreamRangeError.httpStatus(status, retryAfter) = error,
                status == 429 || status == 503 {
                 let delay = applyRateLimitThrottle(retryAfter: retryAfter)
+                recordDiagnostic("demand upstream HTTP \(status); cooldownSeconds=\(String(format: "%.1f", delay))")
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
             let nsError = error as NSError
+            noteTransportFailure(error, priority: .demand)
             if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorTimedOut {
                 noteUpstreamTimeout()
             }
@@ -1445,6 +1465,7 @@ actor PlaybackStreamCacheServer {
                 guard assembled.isEmpty, emitted == actualCount, !Task.isCancelled else {
                     throw PlaybackStreamRangeError.invalidBodyLength
                 }
+                resetTransportRetryBackoff()
                 let elapsed = CFAbsoluteTimeGetCurrent() - t0
                 if elapsed > 0.05 {
                     updateThroughput(Double(batchRange.count) / elapsed)
@@ -1457,16 +1478,19 @@ actor PlaybackStreamCacheServer {
                 stream.cancel()
                 releaseFetchSlot(priority: priority)
                 let nsError = error as NSError
+                noteTransportFailure(error, priority: priority)
                 if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorTimedOut {
                     noteUpstreamTimeout()
                 }
                 if case let PlaybackStreamRangeError.httpStatus(status, retryAfter) = error {
                     if status == 401 || status == 403 || status == 404 || status == 410 || status == 416 {
                         diskCacheLog.warning("Upstream \(String(describing: priority)) batch [\(startChunk)..<(\(startChunk + actualCount))] non-retryable HTTP \(status)")
+                        recordDiagnostic("upstream batch priority=\(priority) chunks=\(startChunk)..<\(startChunk + actualCount) HTTP \(status) non-retryable")
                         break
                     }
                     if status == 429 || status == 503 {
                         let delay = applyRateLimitThrottle(retryAfter: retryAfter)
+                        recordDiagnostic("upstream batch priority=\(priority) chunks=\(startChunk)..<\(startChunk + actualCount) HTTP \(status) attempt=\(attempt)/3 cooldownSeconds=\(String(format: "%.1f", delay))")
                         if priority != .demand {
                             diskCacheLog.warning("Upstream \(String(describing: priority)) batch [\(startChunk)..<(\(startChunk + actualCount))] rate limited (\(status)), yielding immediately for \(delay)s cooldown")
                             break
@@ -1477,6 +1501,9 @@ actor PlaybackStreamCacheServer {
                 }
                 if attempt == 3 {
                     diskCacheLog.warning("Upstream \(String(describing: priority)) batch [\(startChunk)..<(\(startChunk + actualCount))] failed after 3 attempts: \(error.localizedDescription)")
+                    recordDiagnostic("upstream batch priority=\(priority) chunks=\(startChunk)..<\(startChunk + actualCount) failed attempt=3 errorCode=\(nsError.code)")
+                } else {
+                    recordDiagnostic("upstream retry priority=\(priority) chunks=\(startChunk)..<\(startChunk + actualCount) attempt=\(attempt)/3 errorCode=\(nsError.code)")
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000 * UInt64(attempt))
             }
@@ -1576,6 +1603,7 @@ actor PlaybackStreamCacheServer {
         while !Task.isCancelled && !stopped {
             checkThrottleRecovery()
             let coolingDown = throttleUntil.map { $0 > Date() } ?? false
+            let transportCoolingDown = transportRetryNotBefore.map { $0 > Date() } ?? false
             let isDemand = priority == .demand
             let isForward = priority == .forward
             if isDemand && !queuedDemand {
@@ -1589,12 +1617,12 @@ actor PlaybackStreamCacheServer {
                 // to avoid immediate rate-limit hammering while keeping playback seamless.
                 let minDemandSpacing = min(rateLimitCooldown, 0.2)
                 let recentThrottle = lastThrottleTime.map { Date().timeIntervalSince($0) < minDemandSpacing } ?? false
-                if !recentThrottle && activeUpstreamFetches < maxConcurrentUpstream {
+                if !transportCoolingDown && !recentThrottle && activeUpstreamFetches < maxConcurrentUpstream {
                     activeUpstreamFetches += 1
                     activeDemandFetches += 1
                     return true
                 }
-            } else if !coolingDown {
+            } else if !transportCoolingDown && !coolingDown {
                 let canEnter = isForward || (!hasActiveDemand && activeUpstreamFetches < maxConcurrentUpstream)
                 let reservedSlots = hasActiveDemand ? 1 : 0
                 if canEnter && (activeUpstreamFetches + reservedSlots) < maxConcurrentUpstream {
@@ -1614,9 +1642,14 @@ actor PlaybackStreamCacheServer {
         activeUpstreamFetches = max(0, activeUpstreamFetches - 1)
     }
 
+    private func recordDiagnostic(_ message: String) {
+        PlaybackDiagnosticLogStore.shared.append(source: "DiskCache", message: message)
+    }
+
     private func markDiskWriteFailed() {
         diskWriteRetryAfter = Date().addingTimeInterval(30)
         diskCacheLog.error("Pausing background cache fills for 30 seconds after a disk write failure")
+        recordDiagnostic("disk write failed; background cache fills cooling down for 30 seconds")
     }
 
     private func shouldPersistToDisk() -> Bool {
@@ -1635,7 +1668,31 @@ actor PlaybackStreamCacheServer {
         let newUntil = Date().addingTimeInterval(delay)
         throttleUntil = max(throttleUntil ?? .distantPast, newUntil)
         diskCacheLog.warning("Provider rate limit detected. Concurrency halved to \(self.maxConcurrentUpstream), ramp interval \(self.rampInterval)s")
+        recordDiagnostic("provider throttle active; concurrency=\(maxConcurrentUpstream) cooldownSeconds=\(String(format: "%.1f", delay))")
         return delay
+    }
+
+    private func noteTransportFailure(_ error: Error, priority: FetchPriority) {
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain,
+              nsError.code == URLError.Code.cannotConnectToHost.rawValue
+                || nsError.code == URLError.Code.networkConnectionLost.rawValue else { return }
+
+        transportRetryStreak = min(transportRetryStreak + 1, 32)
+        let exponent = min(transportRetryStreak - 1, 16)
+        let delay = min(Self.transportRetryMaxDelay,
+                        transportRetryBaseDelay * pow(2.0, Double(exponent)))
+        let retryNotBefore = Date().addingTimeInterval(delay)
+        transportRetryNotBefore = max(transportRetryNotBefore ?? .distantPast, retryNotBefore)
+        recordDiagnostic(
+            "upstream transport failure priority=\(priority) errorCode=\(nsError.code) " +
+            "streak=\(transportRetryStreak) cooldownSeconds=\(String(format: "%.2f", delay))"
+        )
+    }
+
+    private func resetTransportRetryBackoff() {
+        transportRetryStreak = 0
+        transportRetryNotBefore = nil
     }
 
     private func noteUpstreamTimeout() {
@@ -1645,6 +1702,7 @@ actor PlaybackStreamCacheServer {
         rampInterval = min(Self.rampIntervalMax, max(Self.rampIntervalMin, rampInterval * 2))
         lastThrottleTime = Date()
         diskCacheLog.warning("Upstream range timed out; reducing concurrent fetches to \(self.maxConcurrentUpstream)")
+        recordDiagnostic("upstream range timed out; concurrency reduced to \(maxConcurrentUpstream)")
     }
 
     private func checkThrottleRecovery() {
@@ -1655,6 +1713,7 @@ actor PlaybackStreamCacheServer {
             lastRampAt = now
             rampInterval = Self.rampIntervalMin
             diskCacheLog.notice("Upstream recovery period elapsed. Concurrency may ramp after successful fetches.")
+            recordDiagnostic("upstream recovery interval elapsed; concurrency may ramp")
             return
         }
         // Progressive ramp up if running smoothly without errors
@@ -1670,6 +1729,7 @@ actor PlaybackStreamCacheServer {
             lastRampAt = now
             rampInterval = max(Self.rampIntervalMin, rampInterval * 0.9)
             diskCacheLog.info("Progressive ramp-up: concurrency increased to \(self.maxConcurrentUpstream)")
+            recordDiagnostic("upstream recovery ramp; concurrency=\(maxConcurrentUpstream)")
         }
     }
 
@@ -1841,6 +1901,7 @@ actor PlaybackStreamCacheServer {
 
             guard let bytesToSend = data, !bytesToSend.isEmpty else {
                 diskCacheLog.error("[DiskCacheWatchdog] ❌ Demand fetch failed for offset \(currentOffset) in chunk \(chunkIdx) after retries. Aborting range response.")
+                recordDiagnostic("demand exhausted offset=\(currentOffset) chunk=\(chunkIdx) attempts=3; range response aborted")
                 break
             }
             try await NetworkIO.send(connection, bytesToSend)
