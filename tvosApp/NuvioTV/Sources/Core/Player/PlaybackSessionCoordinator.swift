@@ -121,6 +121,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
     private var lastRequiresMPVAudioControls = false
     private var isHandoffInProgress = false
     private var handoffTargetSeconds: Double?
+    private var handoffStartedAtUptime: TimeInterval?
     private var userStopped = false
     /// Suppress progress saves / watched marks during backend handoff.
     private(set) var isProgressSaveSuspended = false
@@ -269,6 +270,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         userStopped = false
         isHandoffInProgress = false
         isProgressSaveSuspended = false
+        handoffStartedAtUptime = nil
         didFallbackForCurrentURL = false
         lastRequest = request
         lastRequiresMPVAudioControls = requiresMPVAudioControls
@@ -411,6 +413,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         prepareForHandoff?(&mpvRequest)
         lastRequest = mpvRequest
         handoffTargetSeconds = mpvRequest.resumePositionSeconds
+        handoffStartedAtUptime = ProcessInfo.processInfo.systemUptime
 
         let outgoingCacheToken = currentCacheSessionToken
         currentCacheSessionToken = nil
@@ -429,18 +432,23 @@ final class PlaybackSessionCoordinator: ObservableObject {
         startLoad(mpvRequest, on: .mpv, generation: generation)
     }
 
-    /// Ends the save guard only after MPV reports a coherent post-handoff clock.
+    /// Wait for the resume target, or a coherent clock after the seek settle window.
     func refreshHandoffState() {
         guard isHandoffInProgress, activeBackend == .mpv else { return }
         guard !mpvController.isPlayerLoading, mpvController.durationMs > 0 else { return }
         let position = Double(mpvController.positionMs) / 1_000
         if let target = handoffTargetSeconds, target > 1,
            abs(position - target) > 12 {
-            return
+            // A failed/imprecise seek must not suppress saves for the whole session.
+            // After the settle window, use MPV's actual coherent clock.
+            guard let startedAt = handoffStartedAtUptime,
+                  ProcessInfo.processInfo.systemUptime - startedAt >= 15,
+                  mpvController.hasCoherentTimeSample else { return }
         }
         isHandoffInProgress = false
         isProgressSaveSuspended = false
         handoffTargetSeconds = nil
+        handoffStartedAtUptime = nil
     }
 
     func updateExternalSubtitles(_ subtitles: [NuvioSubtitle]) {
@@ -470,6 +478,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
         isProgressSaveSuspended = false
         isHandoffInProgress = false
         handoffTargetSeconds = nil
+        handoffStartedAtUptime = nil
         statusToast = nil
         aetherController?.destroyPlayer()
         mpvController.destroyPlayer()
