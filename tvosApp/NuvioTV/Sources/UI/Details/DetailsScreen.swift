@@ -75,6 +75,7 @@ struct DetailsScreen: View {
     @State private var isEpisodeMenuPresented = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
+    @AppStorage(SettingsKey.reuseLastLink) private var reuseLastLink = false
     @AppStorage(SettingsKey.smartStreamUseTopResult) private var smartStreamUseTopResult = false
     @AppStorage(SettingsKey.preserveAddonStreamOrder) private var preserveAddonOrder = false
     @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
@@ -573,6 +574,43 @@ struct DetailsScreen: View {
     private func startStreamFlow(streamId: String, type: String, reload: Bool, forceManualPicker: Bool = false) {
         guard let meta = viewModel.uiState.meta else { return }
         streamPickerAvailabilityMessage = nil
+
+        let activeProfileId = ProfileSettings.activeProfileID
+
+        if !forceManualPicker, reuseLastLink {
+            let season = pendingEpisode?.season
+            let episode = pendingEpisode?.episode
+            if let storedStream = LastPlaybackStreamStore.load(
+                metaId: meta.id,
+                season: season,
+                episode: episode,
+                profileId: activeProfileId
+            ), let url = URL(string: storedStream.url) {
+                let startupToken = ensureStartupRequest(title: meta.name)
+                isStreamPickerPresented = false
+                isPreparingPlayback = true
+                isSmartPlaybackPending = false
+
+                onPlayClick(
+                    url.absoluteString,
+                    storedStream.httpHeaders,
+                    meta,
+                    pendingEpisodeSubtitle.isEmpty ? (pendingEpisode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? "") : pendingEpisodeSubtitle,
+                    [],
+                    pendingEpisode,
+                    orderedEpisodes(for: meta),
+                    nil,
+                    nil,
+                    nil,
+                    nil,
+                    nil,
+                    nil,
+                    startupToken,
+                    nil
+                )
+                return
+            }
+        }
 
         if forceManualPicker || !smartStreamSelection {
             cancelStartupRequest()
@@ -3126,6 +3164,7 @@ struct TvDetailsContent: View {
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
+    @AppStorage(SettingsKey.reuseLastLink) private var reuseLastLink = false
     @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
     @AppStorage(SettingsKey.backgroundTrailersEnabled) private var backgroundTrailersEnabled = true
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
@@ -3348,23 +3387,36 @@ struct TvDetailsContent: View {
         isTrailerRenderReady = true
     }
 
+    private func hasStoredPlaybackStream(for playTarget: TvDetailsPlayTarget) -> Bool {
+        guard let meta = uiState.meta else { return false }
+        let season = playTarget.episode?.season
+        let episode = playTarget.episode?.episode
+        return LastPlaybackStreamStore.load(
+            metaId: meta.id,
+            season: season,
+            episode: episode,
+            profileId: ProfileSettings.activeProfileID
+        ) != nil
+    }
+
     @ViewBuilder
     private func actionRowView(
         meta: NuvioMeta,
         playTarget: TvDetailsPlayTarget,
         scrollProxy: ScrollViewProxy
     ) -> some View {
+        let canBypassPicker = smartStreamSelection || (reuseLastLink && hasStoredPlaybackStream(for: playTarget))
         TvDetailsActionRow(
             isInWatchlist: uiState.isInWatchlist,
             isWatched: WatchedStore.isWatchedForDisplay(meta: meta),
             playTitle: playTarget.label,
-            playHint: smartStreamSelection
+            playHint: canBypassPicker
                 ? L10n.string("details_play_hint_smart", fallback: "Plays the best link. Hold Select to choose a source manually.")
                 : L10n.string("details_play_hint", fallback: "Starts playback or opens stream sources"),
             onPlayClick: {
                 handlePlayClick(playTarget: playTarget)
             },
-            onPlayLongPress: smartStreamSelection ? {
+            onPlayLongPress: canBypassPicker ? {
                 handlePlayLongPress(playTarget: playTarget)
             } : nil,
             onWatchlistClick: onWatchlistClick,
@@ -6623,6 +6675,7 @@ private struct TvDetailsEpisodes: View {
     @State private var userDidSelectSeason = false
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
+    @AppStorage(SettingsKey.reuseLastLink) private var reuseLastLink = false
 
     init(
         meta: NuvioMeta,
@@ -6869,7 +6922,7 @@ private struct TvDetailsEpisodes: View {
                         onMenuClosed: { onEpisodeMenuPresented(false) },
                         action: { onSelect(video) },
                         onPlayManually: onPlayManually != nil ? { onPlayManually?(video) } : nil,
-                        smartStreamSelection: smartStreamSelection,
+                        smartStreamSelection: smartStreamSelection || (reuseLastLink && LastPlaybackStreamStore.load(metaId: meta.id, season: video.season, episode: video.episode, profileId: ProfileSettings.activeProfileID) != nil),
                         onBack: onBack,
                         focus: episodeFocus,
                         restrictFocusToKey: effectiveFocusRestriction,

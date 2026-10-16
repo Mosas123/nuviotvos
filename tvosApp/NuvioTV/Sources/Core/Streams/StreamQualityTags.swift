@@ -561,6 +561,19 @@ enum LastPlaybackStreamStore {
     /// Local files (SMB, localhost, private LAN) do not expire based on this TTL.
     public static let remoteStreamTTL: TimeInterval = 7200
 
+    /// Returns the effective remote stream TTL for the profile.
+    /// When Reuse Last Link is enabled, this reflects the user-configured cache duration
+    /// (1 hour to 7 days, default 24 hours). When disabled, it stays at the default 2 hours (7200s).
+    public static func effectiveRemoteStreamTTL(profileId: String? = nil) -> TimeInterval {
+        let store = defaults(for: profileId)
+        guard store.bool(forKey: SettingsKey.reuseLastLink) else {
+            return remoteStreamTTL
+        }
+        let hours = store.object(forKey: SettingsKey.reuseLastLinkCacheHours) as? Int ?? 24
+        guard hours > 0 else { return remoteStreamTTL }
+        return TimeInterval(hours * 3600)
+    }
+
     private struct Record: Codable {
         let url: String
         let httpHeaders: [String: String]?
@@ -620,10 +633,13 @@ enum LastPlaybackStreamStore {
         season: Int?,
         episode: Int?,
         profileId: String? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        customTTL: TimeInterval? = nil
     ) -> (url: String, httpHeaders: [String: String])? {
         let trimmedMetaId = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedMetaId.isEmpty else { return nil }
+
+        let ttl = customTTL ?? effectiveRemoteStreamTTL(profileId: profileId)
 
         lock.lock()
         defer { lock.unlock() }
@@ -634,7 +650,7 @@ enum LastPlaybackStreamStore {
            record.episode == episode {
             if isRemoteExpiringURL(record.url) {
                 if let savedAt = record.savedAt {
-                    if now.timeIntervalSince(savedAt) > remoteStreamTTL {
+                    if now.timeIntervalSince(savedAt) > ttl {
                         records.removeValue(forKey: trimmedMetaId)
                         persistRecords(records, profileId: profileId)
                         return nil
@@ -656,7 +672,7 @@ enum LastPlaybackStreamStore {
             store.removeObject(forKey: key)
             if record.season == season, record.episode == episode {
                 if isRemoteExpiringURL(record.url) {
-                    if let savedAt = record.savedAt, now.timeIntervalSince(savedAt) <= remoteStreamTTL {
+                    if let savedAt = record.savedAt, now.timeIntervalSince(savedAt) <= ttl {
                         var updated = records
                         updated[trimmedMetaId] = record
                         persistRecords(updated, profileId: profileId)
