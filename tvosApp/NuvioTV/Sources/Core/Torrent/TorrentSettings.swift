@@ -31,7 +31,8 @@ enum TorrentSettings {
 
     static func cacheLimitGB(store: UserDefaults = ProfileSettings.current) -> Double {
         let value = store.double(forKey: SettingsKey.p2pCacheLimitGB)
-        return value > 0 ? value : defaultCacheLimitGB
+        guard value.isFinite, value > 0 else { return defaultCacheLimitGB }
+        return min(40, max(2, value))
     }
 
     static func setCacheLimitGB(_ limit: Double, store: UserDefaults = ProfileSettings.current) {
