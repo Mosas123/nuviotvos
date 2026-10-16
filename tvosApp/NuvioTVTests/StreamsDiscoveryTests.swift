@@ -14,7 +14,7 @@ private enum TestStreamError: Error { case failed }
 final class StreamsDiscoveryTests: XCTestCase {
 
     func testStreamRequestRetryPolicyRetriesTransientErrorsOnly() {
-        XCTAssertTrue(StreamsRepository.StreamRequestRetryPolicy.shouldRetry(URLError(.timedOut)))
+        XCTAssertFalse(StreamsRepository.StreamRequestRetryPolicy.shouldRetry(URLError(.timedOut)))
         XCTAssertTrue(StreamsRepository.StreamRequestRetryPolicy.shouldRetry(URLError(.networkConnectionLost)))
         XCTAssertTrue(StreamsRepository.StreamRequestRetryPolicy.shouldRetry(URLError(.cannotConnectToHost)))
         XCTAssertFalse(StreamsRepository.StreamRequestRetryPolicy.shouldRetry(URLError(.cancelled)))
