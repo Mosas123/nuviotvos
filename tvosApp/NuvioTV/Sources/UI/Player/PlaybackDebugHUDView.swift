@@ -5,6 +5,18 @@ struct PlaybackDebugHUDView: View {
     let info: PlaybackDebugInfo
     let reason: String
 
+    @AppStorage private var hideTorrentStats: Bool
+
+    init(info: PlaybackDebugInfo, reason: String) {
+        self.info = info
+        self.reason = reason
+        _hideTorrentStats = AppStorage(
+            wrappedValue: false,
+            SettingsKey.p2pHideTorrentStats,
+            store: ProfileSettings.current
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Top Section: SOURCE & Clock
@@ -68,7 +80,7 @@ struct PlaybackDebugHUDView: View {
             VStack(alignment: .leading, spacing: 3) {
                 hudRow(label: "Add-on", value: info.addon.isEmpty ? "Direct" : info.addon)
                 hudRow(label: "Provider", value: info.provider.isEmpty ? "Direct" : info.provider)
-                if TorrentEngineManager.shared.isStreaming {
+                if !hideTorrentStats && TorrentEngineManager.shared.isStreaming {
                     let stats = TorrentEngineManager.shared.activeStats
                     hudRow(label: "P2P Swarm", value: "\(stats.connectedSeeds) seeds · \(stats.connectedPeers) peers · \(stats.downloadRateFormatted)")
                 }
