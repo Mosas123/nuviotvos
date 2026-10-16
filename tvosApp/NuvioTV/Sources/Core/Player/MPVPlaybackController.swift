@@ -2066,8 +2066,11 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let codecType: CMVideoCodecType
         switch videoCodec {
         case "h264": codecType = kCMVideoCodecType_H264
-        case "av1": codecType = kCMVideoCodecType_AV1
-        default: codecType = kCMVideoCodecType_HEVC
+        case "av1", "av01": codecType = kCMVideoCodecType_AV1
+        case "hevc", "h265": codecType = kCMVideoCodecType_HEVC
+        default:
+            print("[MPV] Unknown video codec \(videoCodec); display switch skipped")
+            return .finished
         }
 
         let extensions: [CFString: Any]
