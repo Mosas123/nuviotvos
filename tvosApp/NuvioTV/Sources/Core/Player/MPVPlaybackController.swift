@@ -805,7 +805,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         wasPlayingBeforeBackground = false
         isApplicationBackgrounded = false
         screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback: shouldResume=\(shouldResume), lifecyclePos=\(String(describing: lifecyclePositionMs))ms")
-        setStringProperty("vid", "auto")
+        if !isDisplaySwitchInFlight {
+            setStringProperty("vid", "auto")
+        }
         clearCleanEndState()
 
         if let target = lifecyclePositionMs {
@@ -933,6 +935,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     private func attemptStartPendingLoad() {
         guard let url = pendingURL, mpv != nil else { return }
+        // The active display wait will start the latest queued load once safe.
+        guard !isDisplaySwitchInFlight else { return }
         guard isViewLoaded, view.bounds.width > 1, view.bounds.height > 1 else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryDiagnosticSessionID = UUID().uuidString
@@ -1922,6 +1926,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var didApplyDisplayCriteria = false
     /// True while the HDMI mode switch is settling and video is detached.
     private var isDisplaySwitchInFlight = false
+    private var displaySwitchGeneration: UInt64 = 0
     /// `VIDEO_RECONFIG` may arrive before SwiftUI has attached this controller
     /// to a window, or before MPV has populated the stream dimensions. Keep a
     /// short, coalesced probe alive for those races so HDR does not silently
@@ -2131,6 +2136,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         // request the switch, and only reattach once the switch has settled.
         didApplyDisplayCriteria = true
         isDisplaySwitchInFlight = true
+        displaySwitchGeneration &+= 1
+        let switchGeneration = displaySwitchGeneration
         setStringProperty("vid", "no")
 
         let manager = window.avDisplayManager
@@ -2142,7 +2149,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
         // Give the switch a beat to start before polling for completion.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: 16)
+            self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: 16, generation: switchGeneration)
         }
         return .appliedOrAlreadyActive
         #else
@@ -2151,19 +2158,27 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     #if !targetEnvironment(simulator)
-    private func reattachVideoWhenDisplaySettled(_ manager: AVDisplayManager, attemptsLeft: Int) {
+    private func reattachVideoWhenDisplaySettled(_ manager: AVDisplayManager, attemptsLeft: Int, generation: UInt64) {
+        guard generation == displaySwitchGeneration, isDisplaySwitchInFlight else { return }
         guard mpv != nil else {
             isDisplaySwitchInFlight = false
             return
         }
-        if manager.isDisplayModeSwitchInProgress && attemptsLeft > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: attemptsLeft - 1)
+        if manager.isDisplayModeSwitchInProgress || isApplicationBackgrounded {
+            // Exhausting the fast-poll budget must not be treated as HDMI readiness.
+            let nextAttempts = max(0, attemptsLeft - 1)
+            let retryDelay: TimeInterval = attemptsLeft > 0 ? 0.25 : 0.5
+            DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+                self?.reattachVideoWhenDisplaySettled(manager, attemptsLeft: nextAttempts, generation: generation)
             }
             return
         }
         isDisplaySwitchInFlight = false
         setStringProperty("vid", "auto")
+        if pendingURL != nil {
+            attemptStartPendingLoad()
+            return
+        }
         // Let the reattached video output configure and present its paused
         // landing frame before transport starts. HDMI is already settled here.
         finishStartupDisplayGate(after: 0.2)
@@ -2172,6 +2187,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     private func clearDisplayCriteria() {
         #if !targetEnvironment(simulator)
+        displaySwitchGeneration &+= 1
+        isDisplaySwitchInFlight = false
         displayCriteriaWindow?.avDisplayManager.preferredDisplayCriteria = nil
         displayCriteriaWindow = nil
         didApplyDisplayCriteria = false
