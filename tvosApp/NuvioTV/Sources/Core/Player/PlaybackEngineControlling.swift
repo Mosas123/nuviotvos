@@ -12,6 +12,11 @@ func screensaverDebugLog(_ message: @autoclosure () -> String) {
     #endif
 }
 
+func formattedAVSyncGap(_ gapMs: Double?) -> String {
+    guard let gapMs, gapMs.isFinite else { return "Unavailable" }
+    return String(format: "%+.1f ms", gapMs)
+}
+
 struct PlaybackDebugInfo: Equatable {
     // Engine / Backend identification
     var player: String = ""
@@ -25,6 +30,7 @@ struct PlaybackDebugInfo: Equatable {
     var audioSourceChannels: Int? = nil
     var audioSpatialFormat: String? = nil
     var audioPipeline: String? = nil
+    var avSyncGapMs: Double? = nil
 
     // SOURCE section
     var addon: String = ""
@@ -58,6 +64,7 @@ struct PlaybackDebugInfo: Equatable {
     var bufferSeconds: Double = 0
     var diskBuffer: String = ""
     var diskBufferSeconds: Double = 0
+    var concurrency: String = ""
     var speed: String = "est -- Mbit/s"
     var ping: String = "7 ms"
     var loaded: String = "0 MB"
@@ -87,6 +94,7 @@ struct PlaybackDebugInfo: Equatable {
         audioSourceChannels: Int? = nil,
         audioSpatialFormat: String? = nil,
         audioPipeline: String? = nil,
+        avSyncGapMs: Double? = nil,
         addon: String = "",
         provider: String = "",
         server: String = "",
@@ -112,6 +120,7 @@ struct PlaybackDebugInfo: Equatable {
         bufferSeconds: Double = 0,
         diskBuffer: String = "",
         diskBufferSeconds: Double = 0,
+        concurrency: String = "",
         speed: String = "est -- Mbit/s",
         ping: String = "7 ms",
         loaded: String = "0 MB",
@@ -136,6 +145,7 @@ struct PlaybackDebugInfo: Equatable {
         self.audioSourceChannels = audioSourceChannels
         self.audioSpatialFormat = audioSpatialFormat
         self.audioPipeline = audioPipeline
+        self.avSyncGapMs = avSyncGapMs
         self.addon = addon
         self.provider = provider
         self.server = server
@@ -161,6 +171,7 @@ struct PlaybackDebugInfo: Equatable {
         self.bufferSeconds = bufferSeconds
         self.diskBuffer = diskBuffer
         self.diskBufferSeconds = diskBufferSeconds
+        self.concurrency = concurrency
         self.speed = speed
         self.ping = ping
         self.loaded = loaded

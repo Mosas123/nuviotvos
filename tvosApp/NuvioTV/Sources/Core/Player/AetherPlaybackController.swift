@@ -2867,6 +2867,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
         // Video Bitrate
         let telemetry = engine.liveTelemetry
+        let avSyncGapMs = telemetry?.avSyncGapMs.flatMap { $0.isFinite ? $0 : nil }
         var vBitrateParts: [String] = []
         if engine.sourceVideoBitrate > 0 {
             vBitrateParts.append(String(format: "avg mux %.1f Mbit/s", Double(engine.sourceVideoBitrate) / 1_000_000.0))
@@ -2918,8 +2919,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let frameLeadStr: String
         if let cushion = telemetry?.displayCushionSeconds {
             frameLeadStr = String(format: "+%.1f ms", cushion * 1000.0)
-        } else if let gap = telemetry?.avSyncGapMs {
-            frameLeadStr = String(format: "%+.1f ms", gap)
+        } else if let avSyncGapMs {
+            frameLeadStr = formattedAVSyncGap(avSyncGapMs)
         } else {
             frameLeadStr = "Unavailable"
         }
@@ -2927,32 +2928,13 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         // Display refresh rate
         let displayStr = PlaybackSystemMonitor.displayRefreshRate(nominalFps: fpsVal)
 
-        // Audio delivery mapping
-        let deliveryStr: String
-        switch engine.audioDelivery {
-        case .none:
-            deliveryStr = "Unavailable"
-        case .noAudioInSource:
-            deliveryStr = "None (Silent Source)"
-        case .streamCopy:
-            deliveryStr = "Stream-copy (fMP4 bitstream preserved)"
-        case .bridged:
-            if let activeDec = engine.activeAudioDecoder, !activeDec.isEmpty {
-                deliveryStr = "Bridged (\(activeDec))"
-            } else {
-                deliveryStr = "Bridged (re-encode)"
-            }
-        case .decoded:
-            if let activeDec = engine.activeAudioDecoder, !activeDec.isEmpty {
-                deliveryStr = "Decoded (\(activeDec))"
-            } else {
-                deliveryStr = "Decoded (Software PCM)"
-            }
-        case .droppedNoPipeline:
-            deliveryStr = "Dropped (Pipeline failure or unsupported codec)"
-        case .playerManaged:
-            deliveryStr = "Player-managed (AVFoundation)"
-        }
+        let deliveryStr = Self.audioDeliveryDescription(
+            engine.audioDelivery,
+            decoder: audioSource.pipeline
+        )
+        let structuredAudioPipeline = engine.state == .loading || engine.audioDelivery == .none
+            ? nil
+            : deliveryStr
 
         // Audio format line
         let audioFormatted: String
@@ -2980,12 +2962,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         let routeStr = PlaybackSystemMonitor.audioRouteInfo()
 
         // Audio jitter
-        let aJitterStr: String
-        if let syncGap = telemetry?.avSyncGapMs {
-            aJitterStr = String(format: "gap %+.1f ms", syncGap)
-        } else {
-            aJitterStr = "Unavailable"
-        }
+        let aJitterStr = formattedAVSyncGap(avSyncGapMs)
 
         // Network buffer
         let bufferSec: Double
@@ -3046,7 +3023,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             audioSourceCodec: audioSource.codec,
             audioSourceChannels: audioSource.channels,
             audioSpatialFormat: audioSource.spatialFormat,
-            audioPipeline: audioSource.pipeline,
+            audioPipeline: structuredAudioPipeline,
+            avSyncGapMs: avSyncGapMs,
             video: videoStr,
             hdr: sourceRange,
             vBitrate: vBitrateStr,
@@ -3764,6 +3742,28 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             spatialFormat,
             visiblePipeline
         )
+    }
+
+    static func audioDeliveryDescription(_ delivery: AudioDelivery, decoder: String?) -> String {
+        let activeDecoder = decoder?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch delivery {
+        case .none:
+            return "Unavailable"
+        case .noAudioInSource:
+            return "None (Silent Source)"
+        case .streamCopy:
+            return "Stream-copy (fMP4 bitstream preserved)"
+        case .bridged:
+            guard let activeDecoder, !activeDecoder.isEmpty else { return "Bridged (re-encode)" }
+            return "Bridged (\(activeDecoder))"
+        case .decoded:
+            guard let activeDecoder, !activeDecoder.isEmpty else { return "Decoded (Software PCM)" }
+            return "Decoded (\(activeDecoder))"
+        case .droppedNoPipeline:
+            return "Dropped (Pipeline failure or unsupported codec)"
+        case .playerManaged:
+            return "Player-managed (AVFoundation)"
+        }
     }
 
     private func audioDetail(_ t: TrackInfo) -> String {

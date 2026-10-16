@@ -645,6 +645,7 @@ actor PlaybackStreamCacheManager {
             cacheRoot: root,
             manifest: manifest,
             sessionConfiguration: sessionConfiguration,
+            maxBatchChunks: 16,
             freeSpaceProvider: freeSpaceProvider
         )
         if let durationSeconds, durationSeconds > 0 {
@@ -763,6 +764,11 @@ actor PlaybackStreamCacheManager {
         let total = await server.fileLength
         let cached = await server.currentCachedBytes
         return (cachedBytes: cached, totalBytes: total)
+    }
+
+    func activeConcurrencyMetrics() async -> (active: Int, currentMax: Int, configuredMax: Int)? {
+        guard let server = activeServer else { return nil }
+        return await server.concurrencyMetrics
     }
 
     func currentCachedRanges() async -> [Range<Int64>] {

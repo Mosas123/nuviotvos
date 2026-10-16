@@ -495,7 +495,8 @@ actor PlaybackStreamCacheServer {
     private let minForwardLeadBytes: Int64 = 80 * 1024 * 1024 // 80 MB minimum
     private let burstSeconds: Double = 60.0
     private let burstFallbackBytes: Int64 = 256 * 1024 * 1024 // 256 MB fallback
-    static let maxBatchChunks = 4 // Batch up to 4 chunks (8 MiB) per upstream request
+    static let defaultBatchChunks = 4 // Default batch up to 4 chunks (8 MiB) per upstream request
+    let maxBatchChunks: Int
     private static let tailFetchSpanBytes: Int64 = 64 * 1024
 
     private struct InFlightTailFetch {
@@ -636,6 +637,7 @@ actor PlaybackStreamCacheServer {
         cacheRoot: URL? = nil,
         manifest: PlaybackStreamManifest? = nil,
         sessionConfiguration: URLSessionConfiguration? = nil,
+        maxBatchChunks: Int = PlaybackStreamCacheServer.defaultBatchChunks,
         rateLimitCooldown: TimeInterval = 1,
         transportRetryBaseDelay: TimeInterval = 0.5,
         maxConcurrentUpstream: Int? = nil,
@@ -650,6 +652,7 @@ actor PlaybackStreamCacheServer {
         self.token = sessionID
         self.targetLeadSeconds = targetLeadSeconds.isFinite && targetLeadSeconds > 0 ? targetLeadSeconds : 600.0
         self.thermalStateProvider = thermalStateProvider
+        self.maxBatchChunks = max(1, min(maxBatchChunks, 32))
         self.rateLimitCooldown = rateLimitCooldown.isFinite ? min(max(0.1, rateLimitCooldown), 60) : 1
         self.transportRetryBaseDelay = transportRetryBaseDelay.isFinite
             ? min(max(0.01, transportRetryBaseDelay), Self.transportRetryMaxDelay)
@@ -657,8 +660,11 @@ actor PlaybackStreamCacheServer {
         let grace = demandBatchJoinGrace.isFinite ? max(0, demandBatchJoinGrace) : 2.5
         self.demandBatchJoinGraceNanoseconds = UInt64(min(grace, 120) * 1_000_000_000)
         let resolvedConcurrency = maxConcurrentUpstream ?? Self.defaultMaxConcurrentUpstream()
-        self.configuredMaxConcurrentUpstream = max(1, resolvedConcurrency)
         let isRemoteHTTP = remoteURL.scheme == "http" || remoteURL.scheme == "https"
+        let effectiveCap = (maxConcurrentUpstream == nil && isRemoteHTTP)
+            ? min(6, resolvedConcurrency)
+            : resolvedConcurrency
+        self.configuredMaxConcurrentUpstream = max(1, effectiveCap)
         if maxConcurrentUpstream == nil && isRemoteHTTP {
             self.maxConcurrentUpstream = min(2, self.configuredMaxConcurrentUpstream)
         } else {
@@ -826,10 +832,11 @@ actor PlaybackStreamCacheServer {
     @discardableResult
     private func performForwardFillStep() async -> Bool {
         guard !diskWriteCoolingDown else { return false }
-        guard pendingWrites.count < Self.maxBatchChunks * 2 else { return false }
+        guard pendingWrites.count < maxBatchChunks * 2 else { return false }
         checkThrottleRecovery()
         let coolingDown = throttleUntil.map { $0 > Date() } ?? false
-        guard !coolingDown && !isThrottled else { return false }
+        let transportCoolingDown = transportRetryNotBefore.map { $0 > Date() } ?? false
+        guard !coolingDown && !transportCoolingDown && !isThrottled else { return false }
         let currentSeekGeneration = seekGeneration
         let playhead = effectiveAnchorOffset
         let totalLen = diskCache.fileLength
@@ -885,7 +892,7 @@ actor PlaybackStreamCacheServer {
                 guard canPrefetch else { break }
 
                 var batchCount = 1
-                while batchCount < Self.maxBatchChunks && (chunk + batchCount) <= endChunk {
+                while batchCount < maxBatchChunks && (chunk + batchCount) <= endChunk {
                     let next = chunk + batchCount
                     let nextIsCached = await diskCache.isChunkCached(next)
                     guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
@@ -935,10 +942,11 @@ actor PlaybackStreamCacheServer {
         let thermalState = thermalStateProvider()
         guard thermalState != .serious && thermalState != .critical else { return false }
         guard !diskWriteCoolingDown else { return false }
-        guard pendingWrites.count < Self.maxBatchChunks * 2 else { return false }
+        guard pendingWrites.count < maxBatchChunks * 2 else { return false }
         checkThrottleRecovery()
         let coolingDown = throttleUntil.map { $0 > Date() } ?? false
-        guard !coolingDown && !isThrottled else { return false }
+        let transportCoolingDown = transportRetryNotBefore.map { $0 > Date() } ?? false
+        guard !coolingDown && !transportCoolingDown && !isThrottled else { return false }
         let archiveBatchInFlight = inFlightBatchFetches.values.contains { $0.batch.priority == .archive }
         guard !archiveBatchInFlight else { return false }
 
@@ -967,7 +975,7 @@ actor PlaybackStreamCacheServer {
         var scanCursor = min(max(0, archiveScanCursor ?? playheadChunk), total - 1)
         archiveScanCursor = scanCursor
         var scannedChunks = 0
-        let scanLimit = min(total, max(32, archiveSlots * Self.maxBatchChunks * 8))
+        let scanLimit = min(total, max(32, archiveSlots * maxBatchChunks * 8))
         while scannedChunks < scanLimit && dispatched < archiveSlots {
             if Task.isCancelled { return dispatched > 0 }
             let chunk = scanCursor
@@ -993,7 +1001,7 @@ actor PlaybackStreamCacheServer {
             }
 
             var batchCount = 1
-            while batchCount < Self.maxBatchChunks && (chunk + batchCount) < total {
+            while batchCount < maxBatchChunks && (chunk + batchCount) < total {
                 let next = chunk + batchCount
                 let nextIsCached = await diskCache.isChunkCached(next)
                 guard currentSeekGeneration == seekGeneration else { return dispatched > 0 }
@@ -1226,7 +1234,7 @@ actor PlaybackStreamCacheServer {
     }
 
     private func executeDemandFetch(_ index: Int, singleChunk: Bool) async -> Data? {
-        let count = singleChunk ? 1 : Self.maxBatchChunks
+        let count = singleChunk ? 1 : maxBatchChunks
         let fetched = await fetchAndCacheBatch(
             startingAt: index, count: count,
             priority: .demand, awaitFirstChunk: true
@@ -1516,7 +1524,7 @@ actor PlaybackStreamCacheServer {
         let evictsBehind: Bool? = priority == .demand || demandOwnedBatchIDs.contains(batch.id)
             ? nil : priority == .forward
         for (index, data) in batch.publishedChunks().sorted(by: { $0.key < $1.key }) {
-            guard pendingWrites.count < Self.maxBatchChunks * 4 else { break }
+            guard pendingWrites.count < maxBatchChunks * 4 else { break }
             guard writingChunk != index, !pendingWrites.contains(where: { $0.index == index }) else { continue }
             pendingWrites.append(PendingWrite(index: index, data: data,
                                              playhead: effectiveAnchorOffset, evictsBehind: evictsBehind))
@@ -1684,6 +1692,13 @@ actor PlaybackStreamCacheServer {
                         transportRetryBaseDelay * pow(2.0, Double(exponent)))
         let retryNotBefore = Date().addingTimeInterval(delay)
         transportRetryNotBefore = max(transportRetryNotBefore ?? .distantPast, retryNotBefore)
+
+        // When the upstream host rejects connections (ECONNREFUSED / -1004) or repeatedly drops them,
+        // activate provider throttling to halve concurrency and pause background prefetching.
+        if (nsError.code == URLError.Code.cannotConnectToHost.rawValue && priority != .demand) || transportRetryStreak >= 2 {
+            _ = applyRateLimitThrottle(retryAfter: String(format: "%.2f", delay))
+        }
+
         recordDiagnostic(
             "upstream transport failure priority=\(priority) errorCode=\(nsError.code) " +
             "streak=\(transportRetryStreak) cooldownSeconds=\(String(format: "%.2f", delay))"
@@ -1945,5 +1960,9 @@ actor PlaybackStreamCacheServer {
 
     func cachedFraction() async -> Double {
         await diskCache.cachedFraction
+    }
+
+    var concurrencyMetrics: (active: Int, currentMax: Int, configuredMax: Int) {
+        (active: activeUpstreamFetches, currentMax: maxConcurrentUpstream, configuredMax: configuredMaxConcurrentUpstream)
     }
 }
