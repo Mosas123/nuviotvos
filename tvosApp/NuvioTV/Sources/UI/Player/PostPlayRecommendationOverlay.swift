@@ -22,6 +22,8 @@ struct PostPlayRecommendationOverlay: View {
     let onBack: () -> Void
 
     @State private var trailerPlayer = AVPlayer()
+    @State private var trailerLoadTask: Task<Void, Never>?
+    @State private var trailerPlaybackGeneration: UInt64 = 0
     @State private var isTrailerReady = false
     @State private var showSynopsisModal = false
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
@@ -65,11 +67,14 @@ struct PostPlayRecommendationOverlay: View {
                     focus.wrappedValue = .primaryAction
                 }
             }
+            .onDisappear { stopTrailerPlayback() }
             .onChange(of: state.isVisible) { _, isVisible in
                 if isVisible {
                     DispatchQueue.main.async {
                         focus.wrappedValue = .primaryAction
                     }
+                } else {
+                    stopTrailerPlayback()
                 }
             }
             .onChange(of: state.isTrailerPlaying) { _, isPlaying in
@@ -413,28 +418,116 @@ struct PostPlayRecommendationOverlay: View {
     // MARK: - Trailer Playback Helpers
 
     private func startTrailerPlayback(recommendation: PostPlayRecommendation) {
+        stopTrailerPlayback()
         guard let videoUrl = recommendation.trailerVideoUrl, let url = URL(string: videoUrl) else { return }
-        isTrailerReady = false
+        let generation = trailerPlaybackGeneration
 
-        let asset: AVURLAsset
-        if let userAgent = recommendation.trailerHeaders["User-Agent"], !userAgent.isEmpty {
-            asset = AVURLAsset(url: url, options: [AVURLAssetHTTPUserAgentKey: userAgent])
-        } else {
-            asset = AVURLAsset(url: url)
+        let videoAsset = trailerAsset(url: url, headers: recommendation.trailerHeaders)
+        guard let audioUrl = recommendation.trailerAudioUrl,
+              let audioURL = URL(string: audioUrl) else {
+            playTrailerItem(AVPlayerItem(asset: videoAsset))
+            return
         }
 
-        let item = AVPlayerItem(asset: asset)
+        let audioAsset = trailerAsset(url: audioURL, headers: recommendation.trailerHeaders)
+        trailerLoadTask = Task { @MainActor in
+            defer {
+                if trailerPlaybackGeneration == generation {
+                    trailerLoadTask = nil
+                }
+            }
+
+            do {
+                let videoTracks = try await videoAsset.loadTracks(withMediaType: .video)
+                let audioTracks = try await audioAsset.loadTracks(withMediaType: .audio)
+                guard !Task.isCancelled,
+                      trailerPlaybackGeneration == generation,
+                      state.isTrailerPlaying,
+                      state.recommendation?.id == recommendation.id else { return }
+                guard let videoTrack = videoTracks.first,
+                      let audioTrack = audioTracks.first else {
+                    playTrailerItem(AVPlayerItem(asset: videoAsset))
+                    return
+                }
+
+                let videoDuration = try await videoAsset.load(.duration)
+                let audioDuration = try await audioAsset.load(.duration)
+                guard !Task.isCancelled,
+                      trailerPlaybackGeneration == generation,
+                      state.isTrailerPlaying,
+                      state.recommendation?.id == recommendation.id else { return }
+                guard videoDuration.isNumeric, audioDuration.isNumeric,
+                      CMTimeCompare(videoDuration, .zero) > 0,
+                      CMTimeCompare(audioDuration, .zero) > 0 else {
+                    playTrailerItem(AVPlayerItem(asset: videoAsset))
+                    return
+                }
+                let composition = AVMutableComposition()
+                guard let compositionVideo = composition.addMutableTrack(
+                    withMediaType: .video,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ), let compositionAudio = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else {
+                    playTrailerItem(AVPlayerItem(asset: videoAsset))
+                    return
+                }
+
+                try compositionVideo.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: videoDuration),
+                    of: videoTrack,
+                    at: .zero
+                )
+                try compositionAudio.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: CMTimeMinimum(videoDuration, audioDuration)),
+                    of: audioTrack,
+                    at: .zero
+                )
+
+                guard !Task.isCancelled,
+                      trailerPlaybackGeneration == generation,
+                      state.isTrailerPlaying,
+                      state.recommendation?.id == recommendation.id else {
+                    return
+                }
+                playTrailerItem(AVPlayerItem(asset: composition))
+            } catch {
+                guard !Task.isCancelled,
+                      trailerPlaybackGeneration == generation,
+                      state.isTrailerPlaying,
+                      state.recommendation?.id == recommendation.id else {
+                    return
+                }
+                // A separate audio representation can fail independently; keep
+                // the established video-only preview available in that case.
+                playTrailerItem(AVPlayerItem(asset: videoAsset))
+            }
+        }
+    }
+
+    private func stopTrailerPlayback() {
+        trailerPlaybackGeneration &+= 1
+        trailerLoadTask?.cancel()
+        trailerLoadTask = nil
+        trailerPlayer.pause()
+        trailerPlayer.replaceCurrentItem(with: nil)
+        isTrailerReady = false
+    }
+
+    private func trailerAsset(url: URL, headers: [String: String]) -> AVURLAsset {
+        guard let userAgent = headers["User-Agent"], !userAgent.isEmpty else {
+            return AVURLAsset(url: url)
+        }
+        return AVURLAsset(url: url, options: [AVURLAssetHTTPUserAgentKey: userAgent])
+    }
+
+    private func playTrailerItem(_ item: AVPlayerItem) {
         item.preferredForwardBufferDuration = 2.0
         trailerPlayer.replaceCurrentItem(with: item)
         trailerPlayer.isMuted = !trailerPreviewSound
         trailerPlayer.volume = trailerPreviewSound ? 1.0 : 0.0
         trailerPlayer.play()
-    }
-
-    private func stopTrailerPlayback() {
-        trailerPlayer.pause()
-        trailerPlayer.replaceCurrentItem(with: nil)
-        isTrailerReady = false
     }
 }
 
