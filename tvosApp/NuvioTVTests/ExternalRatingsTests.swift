@@ -253,4 +253,382 @@ final class ExternalRatingsTests: XCTestCase {
         XCTAssertNil(decoded.iconUrl)
         XCTAssertNil(decoded.max)
     }
+
+    // MARK: - Episode Ratings & Ordering Tests
+
+    func testAddonRatingSourceParsesEpisodesFlag() throws {
+        let jsonWithEpisodesTrue = """
+        {
+            "id": "org.csfd.ratings",
+            "name": "ČSFD Ratings",
+            "resources": ["ratings"],
+            "ratingSources": [
+                {
+                    "source": "csfd",
+                    "name": "ČSFD",
+                    "max": 100,
+                    "episodes": true
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let manifest1 = try JSONDecoder().decode(AddonRatingsManifest.self, from: jsonWithEpisodesTrue)
+        let source1 = try XCTUnwrap(manifest1.ratingSources?.first)
+        XCTAssertEqual(source1.episodes, true)
+
+        let jsonWithEpisodesFalse = """
+        {
+            "id": "org.csfd.ratings",
+            "name": "ČSFD Ratings",
+            "resources": ["ratings"],
+            "ratingSources": [
+                {
+                    "source": "csfd",
+                    "name": "ČSFD",
+                    "episodes": false
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let manifest2 = try JSONDecoder().decode(AddonRatingsManifest.self, from: jsonWithEpisodesFalse)
+        let source2 = try XCTUnwrap(manifest2.ratingSources?.first)
+        XCTAssertEqual(source2.episodes, false)
+
+        let jsonWithoutEpisodes = """
+        {
+            "id": "org.csfd.ratings",
+            "name": "ČSFD Ratings",
+            "resources": ["ratings"],
+            "ratingSources": [
+                {
+                    "source": "csfd",
+                    "name": "ČSFD"
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let manifest3 = try JSONDecoder().decode(AddonRatingsManifest.self, from: jsonWithoutEpisodes)
+        let source3 = try XCTUnwrap(manifest3.ratingSources?.first)
+        XCTAssertNil(source3.episodes)
+    }
+
+    func testRatingOrderPersistenceAndSorting() {
+        let suiteName = "test.ratings.order.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // Default order contains built-in providers
+        let defaultOrder = AddonRatingsService.savedRatingOrder(defaults: defaults)
+        XCTAssertFalse(defaultOrder.isEmpty)
+        XCTAssertTrue(defaultOrder.contains("imdb"))
+        XCTAssertTrue(defaultOrder.contains("tomatoes"))
+
+        // Set custom order and verify notification
+        var notificationReceived = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: AddonRatingsService.ratingOrderChangedNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            notificationReceived = true
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        let customOrder = ["csfd", "letterboxd", "imdb", "tomatoes"]
+        AddonRatingsService.setRatingOrder(customOrder, defaults: defaults)
+
+        XCTAssertEqual(AddonRatingsService.savedRatingOrder(defaults: defaults), customOrder)
+        XCTAssertTrue(notificationReceived)
+
+        // Sort items using custom order
+        let sampleItems = [
+            (source: "tomatoes", name: "Rotten Tomatoes"),
+            (source: "douban", name: "Douban"),
+            (source: "imdb", name: "IMDb"),
+            (source: "csfd", name: "ČSFD"),
+            (source: "letterboxd", name: "Letterboxd")
+        ]
+
+        let sorted = AddonRatingsService.sortRatings(sampleItems, by: { $0.source }, defaults: defaults)
+        let sortedSources = sorted.map(\.source)
+
+        // "csfd", "letterboxd", "imdb", "tomatoes" first, then undeclared "douban"
+        XCTAssertEqual(sortedSources, ["csfd", "letterboxd", "imdb", "tomatoes", "douban"])
+    }
+
+    func testEpisodeRatingsCacheOperations() async {
+        let cache = AddonEpisodeRatingsCache.shared
+        await cache.clear()
+
+        let episodeId = "tt0903747:1:5"
+        let initialCached = await cache.cachedRatings(for: episodeId)
+        XCTAssertNil(initialCached)
+
+        let rating = NuvioExternalRating(
+            source: "csfd",
+            value: 92.0,
+            url: "https://www.csfd.cz/film/episode-5",
+            name: "ČSFD",
+            iconUrl: nil,
+            max: 100.0
+        )
+
+        await cache.setRatings([rating], for: episodeId)
+        let cached = await cache.cachedRatings(for: episodeId)
+        XCTAssertEqual(cached?.count, 1)
+        XCTAssertEqual(cached?.first?.source, "csfd")
+        XCTAssertEqual(cached?.first?.value, 92.0)
+
+        // Case insensitivity
+        let cachedUpper = await cache.cachedRatings(for: "TT0903747:1:5")
+        XCTAssertEqual(cachedUpper?.count, 1)
+
+        // Empty ratings cached
+        let emptyEpisodeId = "tt0903747:1:6"
+        await cache.setRatings([], for: emptyEpisodeId)
+        let cachedEmpty = await cache.cachedRatings(for: emptyEpisodeId)
+        XCTAssertNotNil(cachedEmpty)
+        XCTAssertTrue(cachedEmpty?.isEmpty == true)
+
+        await cache.clear()
+        let clearedCached = await cache.cachedRatings(for: episodeId)
+        XCTAssertNil(clearedCached)
+    }
+
+    func testEpisodeRatingsFilteringExcludesNonEpisodeSources() async throws {
+        let manifestJson = """
+        {
+            "id": "org.test.ratings",
+            "name": "Test Ratings",
+            "resources": ["ratings"],
+            "ratingSources": [
+                {
+                    "source": "csfd",
+                    "name": "ČSFD",
+                    "max": 100,
+                    "episodes": true
+                },
+                {
+                    "source": "filmaffinity",
+                    "name": "FilmAffinity",
+                    "max": 10,
+                    "episodes": false
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+        let manifest = try JSONDecoder().decode(AddonRatingsManifest.self, from: manifestJson)
+
+        let responseData = """
+        {
+            "ratings": [
+                { "source": "csfd", "value": 88 },
+                { "source": "filmaffinity", "value": 7.5 }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockRatingsTestURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let manifestURL = URL(string: "https://test.addon/manifest.json")!
+        MockRatingsTestURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, responseData)
+        }
+
+        // When episodesOnly is false (series/movie level), both sources should be included
+        let fullRatings = await AddonRatingsService.fetchRatingsFromAddon(
+            manifestURL: manifestURL,
+            manifest: manifest,
+            type: "series",
+            id: "tt0903747",
+            session: session,
+            episodesOnly: false
+        )
+        XCTAssertEqual(fullRatings.count, 2)
+        XCTAssertTrue(fullRatings.contains { $0.source == "csfd" })
+        XCTAssertTrue(fullRatings.contains { $0.source == "filmaffinity" })
+
+        // When episodesOnly is true (episode level), only the source with episodes == true must be included
+        let episodeRatings = await AddonRatingsService.fetchRatingsFromAddon(
+            manifestURL: manifestURL,
+            manifest: manifest,
+            type: "series",
+            id: "tt0903747:1:5",
+            session: session,
+            episodesOnly: true
+        )
+        XCTAssertEqual(episodeRatings.count, 1)
+        XCTAssertEqual(episodeRatings.first?.source, "csfd")
+        XCTAssertEqual(episodeRatings.first?.value, 88.0)
+    }
+
+    // MARK: - Home Hero Rating Source Tests
+
+    func testAvailableHeroRatingSourcesIncludesBuiltIns() async {
+        let sources = await AddonRatingsService.availableHeroRatingSources(defaults: .standard)
+        let ids = sources.map(\.id)
+
+        XCTAssertTrue(ids.contains("imdb"))
+        XCTAssertTrue(ids.contains("tmdb"))
+        XCTAssertTrue(ids.contains("tomatoes"))
+        XCTAssertTrue(ids.contains("metacritic"))
+        XCTAssertTrue(ids.contains("trakt"))
+        XCTAssertTrue(ids.contains("letterboxd"))
+        XCTAssertTrue(ids.contains("audience"))
+        XCTAssertTrue(ids.contains("myanimelist"))
+        XCTAssertTrue(ids.contains("tvdb"))
+
+        let imdbOption = sources.first { $0.id == "imdb" }
+        XCTAssertEqual(imdbOption?.displayName, "IMDb")
+    }
+
+    func testAvailableHeroRatingSourcesDiscoversAddonsFromManifestStates() async {
+        let suiteName = "test.hero.ratings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let addonManifest = """
+        {
+            "id": "org.csfd.ratings",
+            "name": "ČSFD Addon",
+            "ratingSources": [
+                {
+                    "source": "csfd",
+                    "name": "ČSFD",
+                    "max": 100
+                }
+            ]
+        }
+        """
+
+        let prefs = [StreamAddonPreference(url: "https://ratings.csfd.cz/manifest.json", enabled: true)]
+        let prefsData = try! JSONEncoder().encode(prefs)
+        let prefsJson = String(data: prefsData, encoding: .utf8)!
+        defaults.set(prefsJson, forKey: SettingsKey.streamAddonManifestStates)
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockRatingsTestURLProtocol.self]
+        let session = URLSession(configuration: config)
+        await StremioManifestDataCache.shared.setSessionForTesting(session)
+        defer {
+            Task {
+                await StremioManifestDataCache.shared.setSessionForTesting(nil)
+            }
+        }
+
+        MockRatingsTestURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, addonManifest.data(using: .utf8)!)
+        }
+
+        let sources = await AddonRatingsService.availableHeroRatingSources(defaults: defaults)
+        let csfdOption = sources.first { $0.id == "csfd" }
+        XCTAssertNotNil(csfdOption)
+        XCTAssertEqual(csfdOption?.displayName, "ČSFD")
+    }
+
+    func testHeroRatingStringFormattingAndFallback() {
+        let metaWithImdb = NuvioMeta(
+            id: "tt123",
+            name: "Dune",
+            type: "movie",
+            rating: 8.6
+        )
+
+        // 1. IMDb source
+        let imdbStr = AddonRatingsService.heroRatingString(for: metaWithImdb, source: "imdb", ratings: nil)
+        XCTAssertEqual(imdbStr, "IMDb 8.6")
+
+        // 2. TMDB source from external ratings
+        let externalRatings = [
+            NuvioExternalRating(source: "tmdb", value: 8.3),
+            NuvioExternalRating(source: "tomatoes", value: 93),
+            NuvioExternalRating(source: "csfd", value: 88, name: "ČSFD")
+        ]
+        let tmdbStr = AddonRatingsService.heroRatingString(for: metaWithImdb, source: "tmdb", ratings: externalRatings)
+        XCTAssertEqual(tmdbStr, "TMDB 8.3")
+
+        // 3. Rotten Tomatoes with percentage
+        let rtStr = AddonRatingsService.heroRatingString(for: metaWithImdb, source: "tomatoes", ratings: externalRatings)
+        XCTAssertEqual(rtStr, "Rotten Tomatoes 93%")
+
+        // 4. Custom add-on source (ČSFD)
+        let csfdStr = AddonRatingsService.heroRatingString(for: metaWithImdb, source: "csfd", ratings: externalRatings)
+        XCTAssertEqual(csfdStr, "ČSFD 88%")
+
+        // 5. Fallback to IMDb when requested source is not in external ratings
+        let fallbackStr = AddonRatingsService.heroRatingString(for: metaWithImdb, source: "letterboxd", ratings: externalRatings)
+        XCTAssertEqual(fallbackStr, "IMDb 8.6")
+
+        // 6. Fallback to IMDb when external ratings are nil
+        let fallbackNilStr = AddonRatingsService.heroRatingString(for: metaWithImdb, source: "csfd", ratings: nil)
+        XCTAssertEqual(fallbackNilStr, "IMDb 8.6")
+
+        // 7. When neither source nor IMDb rating is available, return nil
+        let metaNoRating = NuvioMeta(id: "tt999", name: "No Rating", type: "movie", rating: nil)
+        let nilResult = AddonRatingsService.heroRatingString(for: metaNoRating, source: "csfd", ratings: nil)
+        XCTAssertNil(nilResult)
+    }
+
+    func testSampleRatingString() {
+        XCTAssertEqual(AddonRatingsService.sampleRatingString(for: "imdb"), "IMDb 8.6")
+        XCTAssertEqual(AddonRatingsService.sampleRatingString(for: "tomatoes"), "Rotten Tomatoes 92%")
+        XCTAssertEqual(AddonRatingsService.sampleRatingString(for: "trakt"), "Trakt 8.4")
+        XCTAssertEqual(AddonRatingsService.sampleRatingString(for: "metacritic"), "Metacritic 79")
+        XCTAssertFalse(AddonRatingsService.sampleRatingString(for: "custom_source").isEmpty)
+    }
+
+    func testCatalogModelsFillingMissingHeroMetadataPreservesExternalRatings() {
+        let initialCard = NuvioMeta(
+            id: "tt123",
+            name: "Dune",
+            type: "movie",
+            rating: 8.6,
+            externalRatings: nil
+        )
+        let fullMeta = NuvioMeta(
+            id: "tt123",
+            name: "Dune",
+            type: "movie",
+            rating: 8.6,
+            externalRatings: [
+                NuvioExternalRating(source: "tmdb", value: 8.3)
+            ]
+        )
+
+        let merged = initialCard.fillingMissingHeroMetadata(from: fullMeta)
+        XCTAssertEqual(merged.externalRatings?.count, 1)
+        XCTAssertEqual(merged.externalRatings?.first?.source, "tmdb")
+    }
 }
+
+private class MockRatingsTestURLProtocol: URLProtocol {
+    static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = MockRatingsTestURLProtocol.requestHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+

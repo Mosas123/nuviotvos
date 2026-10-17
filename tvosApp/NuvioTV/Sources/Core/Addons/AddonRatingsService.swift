@@ -11,17 +11,20 @@ import Foundation
 /// An external rating source defined in an add-on manifest's `ratingSources` array.
 struct AddonRatingSource: Codable, Hashable, Identifiable, Sendable {
     let source: String
-    let name: String
+    let name: String?
     let icon: String?
     let max: Double?
+    let episodes: Bool?
 
     var id: String { source }
+    var displayName: String { name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? source.capitalized }
 
-    init(source: String, name: String, icon: String? = nil, max: Double? = nil) {
+    init(source: String, name: String? = nil, icon: String? = nil, max: Double? = nil, episodes: Bool? = nil) {
         self.source = source
         self.name = name
         self.icon = icon
         self.max = max
+        self.episodes = episodes
     }
 }
 
@@ -34,6 +37,7 @@ struct AddonRatingSourceSummary: Identifiable, Equatable {
     let userIconOverride: String?
     let max: Double?
     var isEnabled: Bool
+    let episodes: Bool?
 
     var id: String { source }
 
@@ -51,7 +55,8 @@ struct AddonRatingSourceSummary: Identifiable, Equatable {
         manifestIcon: String? = nil,
         userIconOverride: String? = nil,
         max: Double? = nil,
-        isEnabled: Bool = true
+        isEnabled: Bool = true,
+        episodes: Bool? = nil
     ) {
         self.source = source
         self.name = name
@@ -60,6 +65,7 @@ struct AddonRatingSourceSummary: Identifiable, Equatable {
         self.userIconOverride = userIconOverride
         self.max = max
         self.isEnabled = isEnabled
+        self.episodes = episodes
     }
 }
 
@@ -242,6 +248,8 @@ enum AddonRatingsService {
 
     private static let enabledKeyPrefix = "nuvio.tv.settings.ratings.addon_enabled."
     private static let iconOverrideKeyPrefix = "nuvio.tv.settings.ratings.addon_icon_override."
+    private static let ratingOrderKey = "nuvio.tv.settings.ratings.order"
+    static let ratingOrderChangedNotification = Notification.Name("nuvio.tv.settings.ratings.orderChanged")
 
     static func isSourceEnabled(_ source: String, defaults: UserDefaults = ProfileSettings.current) -> Bool {
         let key = enabledKeyPrefix + source.lowercased()
@@ -266,6 +274,59 @@ enum AddonRatingsService {
         } else {
             defaults.removeObject(forKey: key)
         }
+    }
+
+    static let defaultRatingOrder: [String] = [
+        "imdb", "tmdb", "tomatoes", "metacritic", "trakt",
+        "letterboxd", "audience", "myanimelist", "tvdb"
+    ]
+
+    static func savedRatingOrder(defaults: UserDefaults = ProfileSettings.current) -> [String] {
+        guard let data = defaults.string(forKey: ratingOrderKey)?.data(using: .utf8),
+              let list = try? JSONDecoder().decode([String].self, from: data),
+              !list.isEmpty else {
+            return defaultRatingOrder
+        }
+        let clean = list.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+        return clean.isEmpty ? defaultRatingOrder : clean
+    }
+
+    static func setRatingOrder(_ order: [String], defaults: UserDefaults = ProfileSettings.current) {
+        let clean = order.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+        guard !clean.isEmpty else { return }
+        if let data = try? JSONEncoder().encode(clean), let str = String(data: data, encoding: .utf8) {
+            defaults.set(str, forKey: ratingOrderKey)
+            NotificationCenter.default.post(name: ratingOrderChangedNotification, object: nil)
+        }
+    }
+
+    static func normalizedSourceKey(_ source: String) -> String {
+        let lower = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower == "mal" {
+            return "myanimelist"
+        }
+        return lower
+    }
+
+    static func sortRatings<T>(
+        _ items: [T],
+        by sourceGetter: (T) -> String,
+        defaults: UserDefaults = ProfileSettings.current
+    ) -> [T] {
+        let order = savedRatingOrder(defaults: defaults)
+        guard !order.isEmpty else { return items }
+        let orderMap = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element.lowercased(), $0.offset) })
+
+        return items.enumerated().sorted { a, b in
+            let sourceA = normalizedSourceKey(sourceGetter(a.element))
+            let sourceB = normalizedSourceKey(sourceGetter(b.element))
+            let rankA = orderMap[sourceA] ?? Int.max
+            let rankB = orderMap[sourceB] ?? Int.max
+            if rankA != rankB {
+                return rankA < rankB
+            }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     static func loadManifestsConcurrently(urls: [URL]) async -> [URL: AddonRatingsManifest] {
@@ -309,17 +370,40 @@ enum AddonRatingsService {
                 summaries.append(
                     AddonRatingSourceSummary(
                         source: source.source,
-                        name: source.name,
+                        name: source.displayName,
                         addonName: addonName,
                         manifestIcon: source.icon,
                         userIconOverride: iconOverride(for: source.source, defaults: defaults),
                         max: source.max,
-                        isEnabled: isSourceEnabled(source.source, defaults: defaults)
+                        isEnabled: isSourceEnabled(source.source, defaults: defaults),
+                        episodes: source.episodes
                     )
                 )
             }
         }
         return summaries
+    }
+
+    static func hasEpisodeRatingProviders(
+        manifestURLs: [URL]? = nil,
+        defaults: UserDefaults = ProfileSettings.current
+    ) async -> Bool {
+        let urls = manifestURLs ?? CinemetaCatalogRepository.configuredStreamAddonManifestURLs(in: defaults)
+        guard !urls.isEmpty else { return false }
+        let manifests = await loadManifestsConcurrently(urls: urls)
+        for url in urls {
+            guard let manifest = manifests[url],
+                  let sources = manifest.ratingSources, !sources.isEmpty else { continue }
+            for source in sources {
+                let lower = source.source.lowercased()
+                guard !builtInProviders.contains(lower) else { continue }
+                guard isSourceEnabled(source.source, defaults: defaults) else { continue }
+                if source.episodes == true {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     static func fetchRatings(
@@ -368,13 +452,133 @@ enum AddonRatingsService {
         }
     }
 
+    static func fetchRatingsForEpisode(
+        episodeId: String,
+        seriesType: String = "series",
+        manifestURLs: [URL]? = nil,
+        session: URLSession = .shared,
+        defaults: UserDefaults = ProfileSettings.current
+    ) async -> [NuvioExternalRating] {
+        let cleanId = episodeId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return [] }
+
+        if let cached = await AddonEpisodeRatingsCache.shared.cachedRatings(for: cleanId) {
+            return cached
+        }
+
+        let urls = manifestURLs ?? CinemetaCatalogRepository.configuredStreamAddonManifestURLs(in: defaults)
+        guard !urls.isEmpty else {
+            await AddonEpisodeRatingsCache.shared.setRatings([], for: cleanId)
+            return []
+        }
+
+        let manifests = await loadManifestsConcurrently(urls: urls)
+        var eligible: [(url: URL, manifest: AddonRatingsManifest)] = []
+        for url in urls {
+            guard let manifest = manifests[url],
+                  manifest.supportsRatings(type: seriesType, id: cleanId),
+                  let sources = manifest.ratingSources,
+                  sources.contains(where: { ($0.episodes == true) && isSourceEnabled($0.source, defaults: defaults) && !builtInProviders.contains($0.source.lowercased()) })
+            else { continue }
+            eligible.append((url, manifest))
+        }
+
+        guard !eligible.isEmpty else {
+            await AddonEpisodeRatingsCache.shared.setRatings([], for: cleanId)
+            return []
+        }
+
+        let ratings = await withTaskGroup(of: (Int, [NuvioExternalRating]).self) { group in
+            for (index, item) in eligible.enumerated() {
+                group.addTask {
+                    (
+                        index,
+                        await fetchRatingsFromAddon(
+                            manifestURL: item.url,
+                            manifest: item.manifest,
+                            type: seriesType,
+                            id: cleanId,
+                            session: session,
+                            defaults: defaults,
+                            episodesOnly: true
+                        )
+                    )
+                }
+            }
+            var ratingsByAddon: [Int: [NuvioExternalRating]] = [:]
+            for await (index, ratings) in group {
+                ratingsByAddon[index] = ratings
+            }
+            let ordered = eligible.indices.flatMap { ratingsByAddon[$0] ?? [] }
+            return deduplicatedRatings(ordered)
+        }
+
+        await AddonEpisodeRatingsCache.shared.setRatings(ratings, for: cleanId)
+        return ratings
+    }
+
+    static func fetchRatingsForEpisodes(
+        episodeIds: [String],
+        seriesType: String = "series",
+        manifestURLs: [URL]? = nil,
+        session: URLSession = .shared,
+        defaults: UserDefaults = ProfileSettings.current
+    ) async -> [String: [NuvioExternalRating]] {
+        guard !episodeIds.isEmpty else { return [:] }
+
+        var missing: [String] = []
+        var results: [String: [NuvioExternalRating]] = [:]
+
+        for id in episodeIds {
+            let cleanId = id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanId.isEmpty else { continue }
+            if let cached = await AddonEpisodeRatingsCache.shared.cachedRatings(for: cleanId) {
+                results[cleanId] = cached
+            } else {
+                missing.append(cleanId)
+            }
+        }
+
+        guard !missing.isEmpty else { return results }
+
+        let hasProviders = await hasEpisodeRatingProviders(manifestURLs: manifestURLs, defaults: defaults)
+        if !hasProviders {
+            for id in missing {
+                await AddonEpisodeRatingsCache.shared.setRatings([], for: id)
+                results[id] = []
+            }
+            return results
+        }
+
+        await withTaskGroup(of: (String, [NuvioExternalRating]).self) { group in
+            for id in missing {
+                group.addTask {
+                    let ratings = await fetchRatingsForEpisode(
+                        episodeId: id,
+                        seriesType: seriesType,
+                        manifestURLs: manifestURLs,
+                        session: session,
+                        defaults: defaults
+                    )
+                    return (id, ratings)
+                }
+            }
+            for await (id, ratings) in group {
+                results[id] = ratings
+            }
+        }
+
+        return results
+    }
+
     static func fetchRatingsFromAddon(
         manifestURL: URL,
         manifest: AddonRatingsManifest,
         type: String,
         id: String,
         session: URLSession = .shared,
-        defaults: UserDefaults = ProfileSettings.current
+        defaults: UserDefaults = ProfileSettings.current,
+        episodesOnly: Bool = false
     ) async -> [NuvioExternalRating] {
         guard let endpointURL = AddonTransportUrls.buildResourceURL(
             manifestURL: manifestURL,
@@ -407,6 +611,10 @@ enum AddonRatingsService {
                 guard isSourceEnabled(item.source, defaults: defaults) else { continue }
 
                 let declared = sourceLookup[lower]
+                if episodesOnly {
+                    guard declared?.episodes == true else { continue }
+                }
+
                 let displayName = declared?.name ?? item.source
                 let manifestIcon = declared?.icon
                 let overrideIcon = iconOverride(for: item.source, defaults: defaults)
@@ -428,6 +636,184 @@ enum AddonRatingsService {
         } catch {
             return []
         }
+    }
+
+    // MARK: - Home Hero Rating Source & Resolution
+
+    static let builtInHeroRatingSources: [HeroRatingSourceOption] = [
+        HeroRatingSourceOption(id: "imdb", displayName: "IMDb", addonName: nil),
+        HeroRatingSourceOption(id: "tmdb", displayName: "TMDB", addonName: nil),
+        HeroRatingSourceOption(id: "tomatoes", displayName: "Rotten Tomatoes", addonName: nil),
+        HeroRatingSourceOption(id: "metacritic", displayName: "Metacritic", addonName: nil),
+        HeroRatingSourceOption(id: "trakt", displayName: "Trakt", addonName: nil),
+        HeroRatingSourceOption(id: "letterboxd", displayName: "Letterboxd", addonName: nil),
+        HeroRatingSourceOption(id: "audience", displayName: "Audience Score", addonName: nil),
+        HeroRatingSourceOption(id: "myanimelist", displayName: "MyAnimeList", addonName: nil),
+        HeroRatingSourceOption(id: "tvdb", displayName: "TVDB", addonName: nil)
+    ]
+
+    static func availableHeroRatingSources(
+        defaults: UserDefaults = ProfileSettings.current
+    ) async -> [HeroRatingSourceOption] {
+        var options = builtInHeroRatingSources
+        let addonSources = await availableRatingSources(defaults: defaults)
+        for addon in addonSources {
+            let id = addon.source.lowercased()
+            if !options.contains(where: { $0.id == id }) {
+                options.append(
+                    HeroRatingSourceOption(
+                        id: id,
+                        displayName: addon.name,
+                        addonName: addon.addonName
+                    )
+                )
+            }
+        }
+        return options
+    }
+
+    static func heroRatingDisplayName(for sourceId: String, customName: String? = nil) -> String {
+        switch sourceId.lowercased() {
+        case "imdb": return "IMDb"
+        case "tmdb": return "TMDB"
+        case "tomatoes", "rotten_tomatoes": return "Rotten Tomatoes"
+        case "metacritic": return "Metacritic"
+        case "trakt": return "Trakt"
+        case "letterboxd": return "Letterboxd"
+        case "audience": return "Audience"
+        case "myanimelist", "mal": return "MAL"
+        case "tvdb": return "TVDB"
+        default: return customName ?? sourceId.capitalized
+        }
+    }
+
+    static func heroRatingString(
+        for meta: NuvioMeta,
+        source: String,
+        ratings: [NuvioExternalRating]? = nil
+    ) -> String? {
+        let cleanSource = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let resolvedRatings = ratings ?? meta.externalRatings ?? []
+
+        if cleanSource.isEmpty || cleanSource == "imdb" {
+            if let match = resolvedRatings.first(where: { $0.source.lowercased() == "imdb" }) {
+                return "IMDb \(formatRating(value: match.value, max: match.max))"
+            }
+            return meta.rating.map { String(format: "IMDb %.1f", $0) }
+        }
+
+        if let match = resolvedRatings.first(where: { isSourceMatch(requested: cleanSource, actual: $0.source) }) {
+            let label = heroRatingDisplayName(for: match.source, customName: match.name)
+            let formatted = formatRating(value: match.value, max: match.max)
+            return "\(label) \(formatted)"
+        }
+
+        if cleanSource == "tmdb", let rating = meta.rating, meta.tmdbId != nil, meta.imdbId == nil {
+            return String(format: "TMDB %.1f", rating)
+        }
+
+        return meta.rating.map { String(format: "IMDb %.1f", $0) }
+    }
+
+    static func sampleRatingString(for source: String) -> String {
+        switch source.lowercased() {
+        case "tmdb": return "TMDB 8.6"
+        case "tomatoes", "rotten_tomatoes": return "Rotten Tomatoes 92%"
+        case "metacritic": return "Metacritic 79"
+        case "trakt": return "Trakt 8.4"
+        case "letterboxd": return "Letterboxd 4.2"
+        case "audience": return "Audience 95%"
+        case "myanimelist", "mal": return "MAL 8.7"
+        case "tvdb": return "TVDB 8.8"
+        case "csfd": return "ČSFD 86%"
+        case "douban": return "Douban 8.4"
+        case "kinopoisk": return "Кинопоиск 8.3"
+        default:
+            if source.lowercased() == "imdb" || source.isEmpty {
+                return "IMDb 8.6"
+            }
+            return "\(heroRatingDisplayName(for: source)) 8.6"
+        }
+    }
+
+    static func fetchHomeHeroRatings(
+        for meta: NuvioMeta,
+        defaults: UserDefaults = ProfileSettings.current
+    ) async -> [NuvioExternalRating] {
+        let cleanId = NuvioMeta.canonicalImdbID(from: meta.imdbId ?? meta.id) ?? meta.id
+        if let cached = await HomeHeroRatingsCache.shared.cachedRatings(for: cleanId) {
+            return cached
+        }
+
+        async let addonRatingsTask = fetchRatings(for: meta, defaults: defaults)
+        async let mdbRatingsTask = MdbListDetailsService.fetchRatings(for: meta)
+        let (addonRatings, mdbRatings) = await (addonRatingsTask, mdbRatingsTask)
+
+        var combined = mdbRatings + addonRatings
+        var seen = Set<String>()
+        combined = combined.filter { seen.insert($0.source.lowercased()).inserted }
+
+        await HomeHeroRatingsCache.shared.setRatings(combined, for: cleanId)
+        return combined
+    }
+
+    private static func isSourceMatch(requested: String, actual: String) -> Bool {
+        let req = requested.lowercased()
+        let act = actual.lowercased()
+        if req == act { return true }
+        if (req == "myanimelist" || req == "mal") && (act == "myanimelist" || act == "mal") { return true }
+        if (req == "tomatoes" || req == "rotten_tomatoes") && (act == "tomatoes" || act == "rotten_tomatoes") { return true }
+        return false
+    }
+}
+
+/// An option representing a rating source selectable for the Home hero info.
+struct HeroRatingSourceOption: Identifiable, Hashable, Sendable {
+    let id: String
+    let displayName: String
+    let addonName: String?
+
+    var selectionLabel: String {
+        if let addonName, !addonName.isEmpty {
+            return "\(displayName) (\(addonName))"
+        }
+        return displayName
+    }
+}
+
+/// Thread-safe in-memory cache for Home Hero external ratings.
+actor HomeHeroRatingsCache {
+    static let shared = HomeHeroRatingsCache()
+    private var cache: [String: [NuvioExternalRating]] = [:]
+
+    func cachedRatings(for key: String) -> [NuvioExternalRating]? {
+        cache[key.lowercased()]
+    }
+
+    func setRatings(_ ratings: [NuvioExternalRating], for key: String) {
+        cache[key.lowercased()] = ratings
+    }
+
+    func clear() {
+        cache.removeAll()
+    }
+}
+
+/// Thread-safe in-memory cache for per-episode external ratings.
+actor AddonEpisodeRatingsCache {
+    static let shared = AddonEpisodeRatingsCache()
+    private var cache: [String: [NuvioExternalRating]] = [:]
+
+    func cachedRatings(for episodeId: String) -> [NuvioExternalRating]? {
+        cache[episodeId.lowercased()]
+    }
+
+    func setRatings(_ ratings: [NuvioExternalRating], for episodeId: String) {
+        cache[episodeId.lowercased()] = ratings
+    }
+
+    func clear() {
+        cache.removeAll()
     }
 }
 

@@ -3928,6 +3928,13 @@ struct TvDetailsContent: View {
             ) { _ in
                 progressRevision &+= 1
             }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: AddonRatingsService.ratingOrderChangedNotification
+                ).receive(on: RunLoop.main)
+            ) { _ in
+                progressRevision &+= 1
+            }
             #if os(tvOS)
             .onChange(of: initialPlayRequestID, initial: true) { _, requestID in
                 guard let requestID,
@@ -4679,7 +4686,7 @@ private struct TvDetailsSummary: View {
             )
             badges.append(TvRatingBadge(visual: visual, rating: extra))
         }
-        return badges
+        return AddonRatingsService.sortRatings(badges, by: { $0.visual.source })
     }
 }
 
@@ -6676,6 +6683,8 @@ private struct TvDetailsEpisodes: View {
     @State private var watchedSummary: WatchedEpisodeSummary?
     @State private var seasonIsWatched: Bool
     @State private var userDidSelectSeason = false
+    @State private var episodeRatings: [String: [NuvioExternalRating]] = [:]
+    @State private var ratingOrderRevision: UInt64 = 0
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
     @AppStorage(SettingsKey.reuseLastLink) private var reuseLastLink = false
@@ -6742,6 +6751,9 @@ private struct TvDetailsEpisodes: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: TraktSettingsStore.continueWatchingChangedNotification).receive(on: RunLoop.main)) { _ in
             refreshWatchedState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AddonRatingsService.ratingOrderChangedNotification).receive(on: RunLoop.main)) { _ in
+            ratingOrderRevision &+= 1
         }
         .onChange(of: presentationRevision) { oldRevision, newRevision in
             if oldRevision.selection != newRevision.selection {
@@ -6888,6 +6900,7 @@ private struct TvDetailsEpisodes: View {
                     let watchKey = "\(video.season):\(video.episode)"
                     let episodeWatchCount = episodeWatchCounts[watchKey]
                         ?? (watchedEpisodeKeys.contains(watchKey) ? 1 : 0)
+                    let epRating = episodeRatings[meta.canonicalEpisodeStreamId(for: video)] ?? []
                     TvEpisodeCard(
                         video: video,
                         fallbackRating: seriesRating,
@@ -6895,6 +6908,7 @@ private struct TvDetailsEpisodes: View {
                         isWatched: watchedEpisodeKeys.contains(watchKey),
                         watchCount: episodeWatchCount,
                         isSeasonWatched: isSeasonWatched,
+                        episodeRatings: epRating,
                         onFocus: {
                             episodeScrollIndex = itemIndex
                             onFocus()
@@ -6945,6 +6959,17 @@ private struct TvDetailsEpisodes: View {
             .animation(smoothFocus ? .spring(response: 0.3, dampingFraction: 1.0) : nil, value: episodeScrollIndex)
         }
         .frame(height: TvEpisodeCardLayout.stripHeight)
+        .task(id: "\(selectedSeason)-\(materializedEpisodeIndices(visibleCardCount: 6).first ?? 0)-\(materializedEpisodeIndices(visibleCardCount: 6).last ?? 0)") {
+            let visibleCount = max(1, Int(ceil(1920 / TvEpisodeCardLayout.step)) + 1)
+            let indices = materializedEpisodeIndices(visibleCardCount: visibleCount)
+            let episodes = indices.compactMap { seasonEpisodes.indices.contains($0) ? seasonEpisodes[$0] : nil }
+            guard !episodes.isEmpty else { return }
+            let ids = episodes.map { meta.canonicalEpisodeStreamId(for: $0) }
+            let results = await AddonRatingsService.fetchRatingsForEpisodes(episodeIds: ids)
+            if !results.isEmpty {
+                episodeRatings.merge(results) { _, new in new }
+            }
+        }
     }
 
     @ViewBuilder
@@ -7070,6 +7095,16 @@ private struct TvSeasonPill: View {
     }
 }
 
+private struct TvEpisodeRatingItem: Identifiable {
+    let id: String
+    let source: String
+    let displayName: String
+    let valueText: String
+    let iconUrl: URL?
+    let assetName: String?
+    let color: Color
+}
+
 private struct TvEpisodeCard: View {
     let video: NuvioVideo
     let fallbackRating: Double?
@@ -7077,6 +7112,7 @@ private struct TvEpisodeCard: View {
     let isWatched: Bool
     let watchCount: Int
     let isSeasonWatched: Bool
+    var episodeRatings: [NuvioExternalRating] = []
     let onFocus: () -> Void
     let onToggleWatched: () -> Void
     let onMarkWatchedUpTo: () -> Void
@@ -7161,14 +7197,38 @@ private struct TvEpisodeCard: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
-                    HStack(spacing: 8) {
-                        if let ratingText {
-                            Text("IMDb")
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(.white.opacity(0.78))
-                            Text(ratingText)
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(Color(red: 0.96, green: 0.77, blue: 0.22))
+                    HStack(spacing: 16) {
+                        ForEach(episodeRatingItems) { item in
+                            HStack(spacing: 6) {
+                                if let iconUrl = item.iconUrl {
+                                    AsyncImage(url: iconUrl) { phase in
+                                        if let image = phase.image {
+                                            image
+                                                .resizable()
+                                                .scaledToFit()
+                                        } else {
+                                            Image(systemName: "star.fill")
+                                                .resizable()
+                                                .scaledToFit()
+                                                .foregroundColor(item.color)
+                                        }
+                                    }
+                                    .frame(width: 22, height: 22)
+                                } else if let assetName = item.assetName {
+                                    Image(assetName)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(height: 20)
+                                } else {
+                                    Text(item.displayName)
+                                        .font(.system(size: 20, weight: .bold))
+                                        .foregroundColor(.white.opacity(0.78))
+                                }
+
+                                Text(item.valueText)
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundColor(item.color)
+                            }
                         }
 
                         Spacer(minLength: 12)
@@ -7371,14 +7431,38 @@ private struct TvEpisodeCard: View {
 
             Spacer(minLength: 8)
 
-            HStack(spacing: 8) {
-                if let ratingText {
-                    Text("IMDb")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(.white.opacity(0.78))
-                    Text(ratingText)
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(Color(red: 0.96, green: 0.77, blue: 0.22))
+            HStack(spacing: 16) {
+                ForEach(episodeRatingItems) { item in
+                    HStack(spacing: 6) {
+                        if let iconUrl = item.iconUrl {
+                            AsyncImage(url: iconUrl) { phase in
+                                if let image = phase.image {
+                                    image
+                                        .resizable()
+                                        .scaledToFit()
+                                } else {
+                                    Image(systemName: "star.fill")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .foregroundColor(item.color)
+                                }
+                            }
+                            .frame(width: 22, height: 22)
+                        } else if let assetName = item.assetName {
+                            Image(assetName)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 20)
+                        } else {
+                            Text(item.displayName)
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundColor(.white.opacity(0.78))
+                        }
+
+                        Text(item.valueText)
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundColor(item.color)
+                    }
                 }
 
                 Spacer(minLength: 12)
@@ -7394,11 +7478,46 @@ private struct TvEpisodeCard: View {
         .frame(width: cardWidth, height: 232, alignment: .topLeading)
     }
 
+    private var episodeRatingItems: [TvEpisodeRatingItem] {
+        var items: [TvEpisodeRatingItem] = []
+
+        for rating in episodeRatings {
+            let formatted = AddonRatingsService.formatRating(value: rating.value, max: rating.max)
+            items.append(
+                TvEpisodeRatingItem(
+                    id: rating.source,
+                    source: rating.source,
+                    displayName: rating.name ?? rating.source.capitalized,
+                    valueText: formatted,
+                    iconUrl: rating.iconUrl.flatMap { URL(string: $0) },
+                    assetName: nil,
+                    color: Color(red: 0.96, green: 0.77, blue: 0.22)
+                )
+            )
+        }
+
+        if let ratingText {
+            items.append(
+                TvEpisodeRatingItem(
+                    id: "imdb",
+                    source: "imdb",
+                    displayName: "IMDb",
+                    valueText: ratingText,
+                    iconUrl: nil,
+                    assetName: "rating_imdb",
+                    color: Color(red: 0.96, green: 0.77, blue: 0.22)
+                )
+            )
+        }
+
+        return AddonRatingsService.sortRatings(items, by: { $0.source })
+    }
+
     private var ratingText: String? {
         if let r = video.rating?.trimmingCharacters(in: .whitespaces), !r.isEmpty {
             return r
         }
-        if let fb = fallbackRating {
+        if episodeRatings.isEmpty, let fb = fallbackRating {
             return String(format: "%.1f", fb)
         }
         return nil
@@ -7512,6 +7631,9 @@ private struct TvStreamPickerOverlay: View {
     @State private var refreshToastTask: Task<Void, Never>?
     @State private var unavailableAlertMessage: String?
     @State private var didPresentInitialAvailabilityMessage = false
+    @State private var episodeRatings: [NuvioExternalRating] = []
+    @State private var ratingOrderRevision: UInt64 = 0
+
 
     private let filterAllKey = "filter::all"
     private let sortKey = "filter::sort"
@@ -7686,6 +7808,18 @@ private struct TvStreamPickerOverlay: View {
             .onExitCommand(perform: onDismiss)
         }
         .background(Color.black.ignoresSafeArea())
+        .onReceive(NotificationCenter.default.publisher(for: AddonRatingsService.ratingOrderChangedNotification).receive(on: RunLoop.main)) { _ in
+            ratingOrderRevision &+= 1
+        }
+        .task(id: episode?.id) {
+            guard let episode else {
+                episodeRatings = []
+                return
+            }
+            let episodeId = meta.canonicalEpisodeStreamId(for: episode)
+            let ratings = await AddonRatingsService.fetchRatingsForEpisode(episodeId: episodeId)
+            episodeRatings = ratings
+        }
         .task(id: streamCardPresentationCacheKey, priority: .utility) {
             await rebuildStreamCardPresentations()
         }
@@ -7801,6 +7935,44 @@ private struct TvStreamPickerOverlay: View {
                         .lineSpacing(6)
                         .multilineTextAlignment(.center)
                         .lineLimit(3)
+
+                    if !episodeRatingItems.isEmpty {
+                        HStack(spacing: 16) {
+                            ForEach(episodeRatingItems) { item in
+                                HStack(spacing: 6) {
+                                    if let iconUrl = item.iconUrl {
+                                        AsyncImage(url: iconUrl) { phase in
+                                            if let image = phase.image {
+                                                image
+                                                    .resizable()
+                                                    .scaledToFit()
+                                            } else {
+                                                Image(systemName: "star.fill")
+                                                    .resizable()
+                                                    .scaledToFit()
+                                                    .foregroundColor(item.color)
+                                            }
+                                        }
+                                        .frame(width: 24, height: 24)
+                                    } else if let assetName = item.assetName {
+                                        Image(assetName)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(height: 22)
+                                    } else {
+                                        Text(item.displayName)
+                                            .font(.system(size: 22, weight: .bold))
+                                            .foregroundColor(.white.opacity(0.78))
+                                    }
+
+                                    Text(item.valueText)
+                                        .font(.system(size: 22, weight: .bold))
+                                        .foregroundColor(item.color)
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
                 }
                 .frame(width: 560, alignment: .center)
             } else if !summaryItems.isEmpty {
@@ -7812,6 +7984,43 @@ private struct TvStreamPickerOverlay: View {
                     .frame(width: 560, alignment: .center)
             }
         }
+    }
+
+    private var episodeRatingItems: [TvEpisodeRatingItem] {
+        _ = ratingOrderRevision
+        guard let episode else { return [] }
+        var items: [TvEpisodeRatingItem] = []
+
+        for rating in episodeRatings {
+            let formatted = AddonRatingsService.formatRating(value: rating.value, max: rating.max)
+            items.append(
+                TvEpisodeRatingItem(
+                    id: rating.source,
+                    source: rating.source,
+                    displayName: rating.name ?? rating.source.capitalized,
+                    valueText: formatted,
+                    iconUrl: rating.iconUrl.flatMap { URL(string: $0) },
+                    assetName: nil,
+                    color: Color(red: 0.96, green: 0.77, blue: 0.22)
+                )
+            )
+        }
+
+        if let ratingText = episode.rating?.trimmingCharacters(in: .whitespaces), !ratingText.isEmpty {
+            items.append(
+                TvEpisodeRatingItem(
+                    id: "imdb",
+                    source: "imdb",
+                    displayName: "IMDb",
+                    valueText: ratingText,
+                    iconUrl: nil,
+                    assetName: "rating_imdb",
+                    color: Color(red: 0.96, green: 0.77, blue: 0.22)
+                )
+            )
+        }
+
+        return AddonRatingsService.sortRatings(items, by: { $0.source })
     }
 
     private var filterRow: some View {

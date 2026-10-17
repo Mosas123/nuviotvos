@@ -160,6 +160,7 @@ enum SettingsKey {
     /// Empty means all available catalog rows.
     static let heroCatalogs = "nuvio.tv.settings.layout.heroCatalogs"
     static let fullscreenHeroBackdrop = "nuvio.tv.settings.layout.fullscreenHeroBackdrop"
+    static let homeHeroRatingSource = "nuvio.tv.settings.layout.homeHeroRatingSource"
     static let posterLabels = "nuvio.tv.settings.layout.posterLabels"
     static let catalogAddonNames = "nuvio.tv.settings.layout.catalogAddonNames"
     static let landscapePosters = "nuvio.tv.settings.layout.landscapePosters"
@@ -226,6 +227,7 @@ enum SettingsKey {
     static let mdbListUseAudience = "nuvio.tv.settings.integrations.mdbListUseAudience"
     static let mdbListUseMyAnimeList = "nuvio.tv.settings.integrations.mdbListUseMyAnimeList"
     static let mdbListUseTvdb = "nuvio.tv.settings.integrations.mdbListUseTvdb"
+    static let ratingOrder = "nuvio.tv.settings.ratings.order"
     static let debridProvider = "nuvio.tv.settings.integrations.debridProvider"
     static let debridApiKey = "nuvio.tv.settings.integrations.debridApiKey"
     static let debridEnabled = "nuvio.tv.settings.integrations.debridEnabled"
@@ -344,7 +346,7 @@ enum SettingsKey {
         profileName, profilePinEnabled, profileAutoSelectLast, profileRequireSelectionAfterBackground,
         accountSyncWatchState,
         theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
-        homeLayout, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
+        homeLayout, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, homeHeroRatingSource, posterLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
         searchStyle, preferAddonArtworkInSearch,
         continueWatchingVisible, continueWatchingLandscape, continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp,
         cardCornerRadius, cardSize, liquidGlassCards,
@@ -2541,6 +2543,7 @@ private struct HomeLayoutLivePreview: View {
     let layout: String
     let heroEnabled: Bool
     var fullscreenHeroBackdrop: Bool = true
+    var heroRatingSource: String = "imdb"
     let posterLabels: Bool
     let catalogAddonNames: Bool
     var landscapePosters: Bool = false
@@ -2717,6 +2720,7 @@ private struct HomeLayoutLivePreview: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.80), value: layout)
         .animation(.spring(response: 0.32, dampingFraction: 0.80), value: heroEnabled)
         .animation(.spring(response: 0.32, dampingFraction: 0.80), value: fullscreenHeroBackdrop)
+        .animation(.spring(response: 0.32, dampingFraction: 0.80), value: heroRatingSource)
         .animation(.spring(response: 0.32, dampingFraction: 0.80), value: posterLabels)
         .animation(.spring(response: 0.32, dampingFraction: 0.80), value: catalogAddonNames)
         .animation(.spring(response: 0.32, dampingFraction: 0.80), value: cardCornerRadius)
@@ -2726,7 +2730,9 @@ private struct HomeLayoutLivePreview: View {
     // MARK: - Hero Details Section (Matches Modern Home reference)
 
     private var heroDetailsSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let ratingPart = AddonRatingsService.sampleRatingString(for: heroRatingSource)
+
+        return VStack(alignment: .leading, spacing: 4) {
             // Glowing stylized title logo
             Text("DUNE: PART TWO")
                 .font(.system(size: 24, weight: .black, design: .rounded))
@@ -2740,7 +2746,7 @@ private struct HomeLayoutLivePreview: View {
 
             // Metadata line
             HStack(spacing: 5) {
-                Text("Movie · Sci-Fi · 2h 46m · Mar 1, 2024 · IMDb 8.6")
+                Text("Movie · Sci-Fi · 2h 46m · Mar 1, 2024 · \(ratingPart)")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.white.opacity(0.70))
             }
@@ -3046,6 +3052,7 @@ private struct LayoutDiscoverySettingsView: View {
     @AppStorage(SettingsKey.heroEnabled) private var heroEnabled = true
     @AppStorage(SettingsKey.heroCatalogs) private var heroCatalogsData = Data()
     @AppStorage(SettingsKey.fullscreenHeroBackdrop) private var fullscreenHeroBackdrop = true
+    @AppStorage(SettingsKey.homeHeroRatingSource) private var homeHeroRatingSource = "imdb"
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
     @AppStorage(SettingsKey.catalogAddonNames) private var catalogAddonNames = true
     @AppStorage(SettingsKey.landscapePosters) private var landscapePosters = false
@@ -3071,6 +3078,9 @@ private struct LayoutDiscoverySettingsView: View {
     private let searchStyles = ["Netflix", "Classic", "Native", "Grid"]
     private let continueWatchingSorts = ["Default", "Streaming Style", "Separate Upcoming Row"]
 
+    @State private var heroRatingSourceOptions: [HeroRatingSourceOption] = AddonRatingsService.builtInHeroRatingSources
+
+
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             SettingsGroup(
@@ -3084,6 +3094,7 @@ private struct LayoutDiscoverySettingsView: View {
                     layout: homeLayout,
                     heroEnabled: heroEnabled,
                     fullscreenHeroBackdrop: fullscreenHeroBackdrop,
+                    heroRatingSource: homeHeroRatingSource,
                     posterLabels: posterLabels,
                     catalogAddonNames: catalogAddonNames,
                     landscapePosters: landscapePosters,
@@ -3151,6 +3162,20 @@ private struct LayoutDiscoverySettingsView: View {
                         fallback: "Expand the hero backdrop to fill the entire screen."
                     ),
                     isOn: $fullscreenHeroBackdrop,
+                    accentColor: accentColor
+                )
+                .opacity(heroEnabled ? 1 : 0.46)
+                .disabled(!heroEnabled)
+
+                SettingsChoiceRow(
+                    title: L10n.string("tvos_layout_hero_rating_source", fallback: "Hero Rating Source"),
+                    subtitle: L10n.string(
+                        "tvos_layout_hero_rating_source_subtitle",
+                        fallback: "Choose which rating provider is displayed in the hero info"
+                    ),
+                    selection: $homeHeroRatingSource,
+                    options: heroRatingSourceOptions.map(\.id),
+                    optionLabels: Dictionary(uniqueKeysWithValues: heroRatingSourceOptions.map { ($0.id, $0.displayName) }),
                     accentColor: accentColor
                 )
                 .opacity(heroEnabled ? 1 : 0.46)
@@ -3421,8 +3446,10 @@ private struct LayoutDiscoverySettingsView: View {
                 )
             }
         }
+        .task {
+            heroRatingSourceOptions = await AddonRatingsService.availableHeroRatingSources()
+        }
     }
-
 }
 
 /// Grid View-only multi-select for choosing which Home catalogs feed the hero
@@ -4637,6 +4664,60 @@ private struct TmdbOptionsSheet: View {
     }
 }
 
+private struct RatingProviderRowItem: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let isAddon: Bool
+    var isEnabled: Bool
+}
+
+private struct RatingProviderOrderRow: View {
+    let item: RatingProviderRowItem
+    let accentColor: Color
+    let canToggle: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onToggle: () -> Void
+    let onMove: (Bool) -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Button(action: onToggle) {
+                SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(item.title)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(item.isEnabled ? .white : .white.opacity(0.46))
+                            .lineLimit(1)
+                        Text(item.subtitle)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(.white.opacity(item.isEnabled ? 0.56 : 0.36))
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 20)
+
+                    Text(item.isEnabled ? L10n.string("settings_fusion_badge_url_active", fallback: "Active") : L10n.string("tvos_settings_disabled", fallback: "Disabled"))
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(item.isEnabled ? accentColor : .white.opacity(0.35))
+                        .lineLimit(1)
+                }
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .disabled(!canToggle)
+            .focused($isFocused)
+            .focusEffectDisabledIfAvailable()
+            .entryLockable()
+
+            AddonReorderButton(systemImage: "chevron.up", disabled: !canMoveUp) { onMove(true) }
+            AddonReorderButton(systemImage: "chevron.down", disabled: !canMoveDown) { onMove(false) }
+        }
+    }
+}
+
 private struct MdbListOptionsSheet: View {
     let accentColor: Color
 
@@ -4655,6 +4736,7 @@ private struct MdbListOptionsSheet: View {
     @AppStorage(SettingsKey.mdbListUseMyAnimeList) private var mdbListUseMyAnimeList = true
     @AppStorage(SettingsKey.mdbListUseTvdb) private var mdbListUseTvdb = true
     @State private var addonRatingSources: [AddonRatingSourceSummary] = []
+    @State private var ratingProviderRows: [RatingProviderRowItem] = []
 
     var body: some View {
         ZStack {
@@ -4699,97 +4781,35 @@ private struct MdbListOptionsSheet: View {
                     }
 
                     SettingsGroup(
-                        title: L10n.string("settings_mdblist_rating_providers_title", fallback: "Rating Providers"),
-                        subtitle: L10n.string("settings_mdblist_rating_providers_subtitle", fallback: "Choose which Android TV rating badges are shown")
+                        title: L10n.string("settings_mdblist_rating_providers_title", fallback: "Rating Providers & Order"),
+                        subtitle: L10n.string("settings_mdblist_rating_providers_order_subtitle", fallback: "Reorder and choose rating badges shown on Details and episodes")
                     ) {
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_imdb", fallback: "IMDb"),
-                            subtitle: L10n.string("settings_rating_provider_imdb_subtitle", fallback: "IMDb user rating"),
-                            isOn: $mdbListUseImdb,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_tmdb", fallback: "TMDB"),
-                            subtitle: L10n.string("settings_rating_provider_tmdb_subtitle", fallback: "The Movie Database rating"),
-                            isOn: $mdbListUseTmdb,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_rotten_tomatoes", fallback: "Rotten Tomatoes"),
-                            subtitle: L10n.string("settings_rating_provider_rotten_tomatoes_subtitle", fallback: "Tomatometer score"),
-                            isOn: $mdbListUseTomatoes,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_metacritic", fallback: "Metacritic"),
-                            subtitle: L10n.string("settings_rating_provider_metacritic_subtitle", fallback: "Metacritic score"),
-                            isOn: $mdbListUseMetacritic,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_trakt", fallback: "Trakt"),
-                            subtitle: L10n.string("settings_rating_provider_trakt_subtitle", fallback: "Trakt rating"),
-                            isOn: $mdbListUseTrakt,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_letterboxd", fallback: "Letterboxd"),
-                            subtitle: L10n.string("settings_rating_provider_letterboxd_subtitle", fallback: "Letterboxd rating"),
-                            isOn: $mdbListUseLetterboxd,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_audience_score", fallback: "Audience Score"),
-                            subtitle: L10n.string("settings_rating_provider_audience_score_subtitle", fallback: "Audience score"),
-                            isOn: $mdbListUseAudience,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_myanimelist", fallback: "MyAnimeList"),
-                            subtitle: L10n.string("settings_rating_provider_myanimelist_subtitle", fallback: "MyAnimeList score"),
-                            isOn: $mdbListUseMyAnimeList,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
-                        SettingsToggleRow(
-                            title: L10n.string("settings_rating_provider_tvdb", fallback: "TVDB"),
-                            subtitle: L10n.string("settings_rating_provider_tvdb_subtitle", fallback: "TheTVDB community rating"),
-                            isOn: $mdbListUseTvdb,
-                            accentColor: accentColor,
-                            enabled: mdbListControlsEnabled
-                        )
+                        if ratingProviderRows.isEmpty {
+                            SettingsInfoRow(title: L10n.string("tvos_settings_no_ratings", fallback: "No rating providers found"), value: "")
+                        } else {
+                            ForEach(Array(ratingProviderRows.enumerated()), id: \.element.id) { index, item in
+                                RatingProviderOrderRow(
+                                    item: item,
+                                    accentColor: accentColor,
+                                    canToggle: item.isAddon ? true : mdbListControlsEnabled,
+                                    canMoveUp: index > 0,
+                                    canMoveDown: index < ratingProviderRows.count - 1,
+                                    onToggle: { toggleProvider(item) },
+                                    onMove: { up in moveProvider(index, up: up) }
+                                )
+                            }
+                        }
                     }
 
                     if !addonRatingSources.isEmpty {
                         SettingsGroup(
-                            title: L10n.string("settings_addon_rating_providers_title", fallback: "Add-on Rating Providers"),
-                            subtitle: L10n.string("settings_addon_rating_providers_subtitle", fallback: "Choose rating badges provided by installed Stremio add-ons")
+                            title: L10n.string("settings_addon_rating_custom_icons_title", fallback: "Add-on Custom Icons"),
+                            subtitle: L10n.string("settings_addon_rating_custom_icons_subtitle", fallback: "Optional image URL overrides for add-on badges")
                         ) {
                             ForEach($addonRatingSources) { $source in
-                                SettingsToggleRow(
-                                    title: source.name,
-                                    subtitle: L10n.format("settings_addon_rating_provider_from", fallback: "%@ (from %@)", source.name, source.addonName),
-                                    isOn: Binding(
-                                        get: { source.isEnabled },
-                                        set: { newValue in
-                                            source.isEnabled = newValue
-                                            AddonRatingsService.setSourceEnabled(source.source, enabled: newValue)
-                                        }
-                                    ),
-                                    accentColor: accentColor,
-                                    enabled: true
-                                )
-
                                 SettingsNativeTextFieldRow(
-                                    title: L10n.string("settings_addon_rating_custom_icon", fallback: "Custom Icon URL"),
-                                    subtitle: L10n.string("settings_addon_rating_custom_icon_subtitle", fallback: "Optional image URL override (e.g. GitHub raw link)"),
+                                    title: L10n.format("settings_addon_rating_custom_icon_format", fallback: "%@ Custom Icon URL", source.name),
+                                    subtitle: L10n.format("settings_addon_rating_provider_from", fallback: "%@ (from %@)", source.name, source.addonName),
                                     placeholder: source.manifestIcon ?? L10n.string("debrid_not_set", fallback: "Not set"),
                                     text: Binding(
                                         get: { source.userIconOverride ?? "" },
@@ -4803,7 +4823,8 @@ private struct MdbListOptionsSheet: View {
                                                 manifestIcon: source.manifestIcon,
                                                 userIconOverride: trimmed.isEmpty ? nil : trimmed,
                                                 max: source.max,
-                                                isEnabled: source.isEnabled
+                                                isEnabled: source.isEnabled,
+                                                episodes: source.episodes
                                             )
                                         }
                                     )
@@ -4817,16 +4838,95 @@ private struct MdbListOptionsSheet: View {
             }
             .focusSection()
         }
-        .onAppear(perform: normalizeMdbListApiKey)
+        .onAppear {
+            normalizeMdbListApiKey()
+            buildRatingProviderRows()
+        }
         .task {
             addonRatingSources = await AddonRatingsService.availableRatingSources()
+            buildRatingProviderRows()
         }
         .onChange(of: mdbListApiKey) { _, _ in
             if !mdbListHasApiKey {
                 mdbListEnabled = false
             }
+            buildRatingProviderRows()
+        }
+        .onChange(of: mdbListEnabled) { _, _ in
+            buildRatingProviderRows()
         }
         .onExitCommand { dismiss() }
+    }
+
+    private func buildRatingProviderRows() {
+        let builtInDefs: [(id: String, title: String, subtitle: String, isEnabled: Bool)] = [
+            ("imdb", L10n.string("settings_rating_provider_imdb", fallback: "IMDb"), L10n.string("settings_rating_provider_imdb_subtitle", fallback: "IMDb user rating"), mdbListUseImdb),
+            ("tmdb", L10n.string("settings_rating_provider_tmdb", fallback: "TMDB"), L10n.string("settings_rating_provider_tmdb_subtitle", fallback: "The Movie Database rating"), mdbListUseTmdb),
+            ("tomatoes", L10n.string("settings_rating_provider_rotten_tomatoes", fallback: "Rotten Tomatoes"), L10n.string("settings_rating_provider_rotten_tomatoes_subtitle", fallback: "Tomatometer score"), mdbListUseTomatoes),
+            ("metacritic", L10n.string("settings_rating_provider_metacritic", fallback: "Metacritic"), L10n.string("settings_rating_provider_metacritic_subtitle", fallback: "Metacritic score"), mdbListUseMetacritic),
+            ("trakt", L10n.string("settings_rating_provider_trakt", fallback: "Trakt"), L10n.string("settings_rating_provider_trakt_subtitle", fallback: "Trakt rating"), mdbListUseTrakt),
+            ("letterboxd", L10n.string("settings_rating_provider_letterboxd", fallback: "Letterboxd"), L10n.string("settings_rating_provider_letterboxd_subtitle", fallback: "Letterboxd rating"), mdbListUseLetterboxd),
+            ("audience", L10n.string("settings_rating_provider_audience_score", fallback: "Audience Score"), L10n.string("settings_rating_provider_audience_score_subtitle", fallback: "Audience score"), mdbListUseAudience),
+            ("myanimelist", L10n.string("settings_rating_provider_myanimelist", fallback: "MyAnimeList"), L10n.string("settings_rating_provider_myanimelist_subtitle", fallback: "MyAnimeList score"), mdbListUseMyAnimeList),
+            ("tvdb", L10n.string("settings_rating_provider_tvdb", fallback: "TVDB"), L10n.string("settings_rating_provider_tvdb_subtitle", fallback: "TheTVDB community rating"), mdbListUseTvdb)
+        ]
+
+        var items: [RatingProviderRowItem] = builtInDefs.map { def in
+            RatingProviderRowItem(
+                id: def.id,
+                title: def.title,
+                subtitle: def.subtitle,
+                isAddon: false,
+                isEnabled: def.isEnabled
+            )
+        }
+
+        for source in addonRatingSources {
+            items.append(
+                RatingProviderRowItem(
+                    id: source.source.lowercased(),
+                    title: source.name,
+                    subtitle: L10n.format("settings_addon_rating_provider_from", fallback: "%@ (from %@)", source.name, source.addonName),
+                    isAddon: true,
+                    isEnabled: source.isEnabled
+                )
+            )
+        }
+
+        ratingProviderRows = AddonRatingsService.sortRatings(items, by: { $0.id })
+    }
+
+    private func toggleProvider(_ item: RatingProviderRowItem) {
+        let newEnabled = !item.isEnabled
+        if let idx = ratingProviderRows.firstIndex(where: { $0.id == item.id }) {
+            ratingProviderRows[idx].isEnabled = newEnabled
+        }
+        if item.isAddon {
+            AddonRatingsService.setSourceEnabled(item.id, enabled: newEnabled)
+            if let idx = addonRatingSources.firstIndex(where: { $0.source.lowercased() == item.id }) {
+                addonRatingSources[idx].isEnabled = newEnabled
+            }
+        } else {
+            switch item.id {
+            case "imdb": mdbListUseImdb = newEnabled
+            case "tmdb": mdbListUseTmdb = newEnabled
+            case "tomatoes": mdbListUseTomatoes = newEnabled
+            case "metacritic": mdbListUseMetacritic = newEnabled
+            case "trakt": mdbListUseTrakt = newEnabled
+            case "letterboxd": mdbListUseLetterboxd = newEnabled
+            case "audience": mdbListUseAudience = newEnabled
+            case "myanimelist": mdbListUseMyAnimeList = newEnabled
+            case "tvdb": mdbListUseTvdb = newEnabled
+            default: break
+            }
+        }
+    }
+
+    private func moveProvider(_ index: Int, up: Bool) {
+        let target = up ? index - 1 : index + 1
+        guard ratingProviderRows.indices.contains(index), ratingProviderRows.indices.contains(target) else { return }
+        ratingProviderRows.swapAt(index, target)
+        AddonRatingsService.setRatingOrder(ratingProviderRows.map(\.id))
     }
 
     private var mdbListHasApiKey: Bool {
@@ -14562,6 +14662,7 @@ private struct SettingsChoiceRow: View {
     let subtitle: String
     @Binding var selection: String
     let options: [String]
+    var optionLabels: [String: String]? = nil
     let accentColor: Color
 
     @FocusState private var isFocused: Bool
@@ -14575,7 +14676,7 @@ private struct SettingsChoiceRow: View {
                 Spacer(minLength: 24)
 
                 HStack(spacing: 10) {
-                    Text(L10n.optionLabel(currentStored))
+                    Text(displayLabel(for: currentStored))
                         .font(.system(size: 19, weight: .bold))
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -14594,9 +14695,16 @@ private struct SettingsChoiceRow: View {
         .entryLockable()
         .confirmationDialog(title, isPresented: $showOptions, titleVisibility: .visible) {
             ForEach(options, id: \.self) { option in
-                Button(L10n.optionLabel(option)) { selection = option }
+                Button(displayLabel(for: option)) { selection = option }
             }
         }
+    }
+
+    private func displayLabel(for option: String) -> String {
+        if let custom = optionLabels?[option] {
+            return custom
+        }
+        return L10n.optionLabel(option)
     }
 
     private var currentStored: String {

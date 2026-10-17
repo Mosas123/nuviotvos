@@ -5027,9 +5027,13 @@ struct TVHomeView: View {
     }
 
     private var focusRows: [TVHomeFocusRow] {
-        visibleSections.filter { !$0.isLoadingPlaceholder }.map { section in
+        visibleSections.map { section in
             let keys: [String]
-            if !section.collectionFolders.isEmpty {
+            if section.isLoadingPlaceholder {
+                keys = (0..<12).map {
+                    TVHomeCardIdentity.placeholderKey(rowID: section.id, index: $0)
+                }
+            } else if !section.collectionFolders.isEmpty {
                 keys = section.collectionFolders.map {
                     TVHomeCardIdentity.folderKey(rowID: section.id, folder: $0)
                 }
@@ -5272,7 +5276,11 @@ struct TVHomeView: View {
     }
 
     private var initialDefaultFocusCardID: String? {
-        store.lastFocusedCardID ?? focusWork.pendingOverlayRestoreCardID ?? profileGateStartupFocusTargetCardKey
+        if let raw = store.lastFocusedCardID ?? focusWork.pendingOverlayRestoreCardID,
+           let valid = validRestoreTarget(raw) {
+            return valid
+        }
+        return store.lastFocusedCardID ?? focusWork.pendingOverlayRestoreCardID ?? profileGateStartupFocusTargetCardKey
     }
 
     private var profileGateStartupFocusTargetCardKey: String? {
@@ -5744,13 +5752,19 @@ struct TVHomeView: View {
     ) -> some View {
         if section.isLoadingPlaceholder {
             TVLoadingCatalogRow(
+                id: section.id,
                 title: section.title,
                 tileShape: effectiveTileShape(for: section),
                 requestsFocus: false,
                 addonName: section.addonName,
                 showAddonName: catalogAddonNames,
                 horizontalEdgeInset: horizontalEdgeInset,
-                onFocus: {
+                initialScrollIndex: rowScrollStore.index(for: section.id),
+                onScrollIndexChange: { newIndex in
+                    rowScrollStore.setIndex(newIndex, for: section.id)
+                },
+                externalFocus: $focusedCardID,
+                onFocus: { placeholderIndex in
                     focusWork.upwardFocusTask?.cancel()
                     recordFocusTransition()
                     let changedRow = focusedSectionId != section.id || focusedRowIndex != index
@@ -5774,6 +5788,9 @@ struct TVHomeView: View {
                             verticalScrollProxy.scrollTo(section.id, anchor: .top)
                         }
                     }
+                    let cardKey = TVHomeCardIdentity.placeholderKey(rowID: section.id, index: placeholderIndex)
+                    focusedCardID = cardKey
+                    store.lastFocusedCardID = cardKey
                 },
             )
             .equatable()
@@ -6841,12 +6858,31 @@ struct TVHomeView: View {
             } else {
                 TVHomeDebugTrace.log("home.publishHomeSections store.sections unchanged (\(visible.count) sections)")
             }
-            let newHero = composed.lazy.compactMap { $0.items.first }.first
-            if store.hero?.id != newHero?.id {
+            if let newHero = composed.lazy.compactMap({ $0.items.first }).first, store.hero?.id != newHero.id {
                 store.hero = newHero
             }
 
-            guard wasEmpty && resetFocusIfEmpty else { return }
+            if let currentSectionId = focusedSectionId,
+               let loadedSection = visible.first(where: { $0.id == currentSectionId && !$0.isLoadingPlaceholder && $0.hasContent }) {
+                let savedIndex = rowScrollStore.index(for: currentSectionId)
+                let targetCardKey: String?
+                if !loadedSection.collectionFolders.isEmpty {
+                    let folderIndex = min(max(savedIndex, 0), loadedSection.collectionFolders.count - 1)
+                    targetCardKey = TVHomeCardIdentity.folderKey(rowID: currentSectionId, folder: loadedSection.collectionFolders[folderIndex])
+                } else if !loadedSection.items.isEmpty {
+                    let itemIndex = min(max(savedIndex, 0), loadedSection.items.count - 1)
+                    targetCardKey = TVHomeCardIdentity.key(rowID: currentSectionId, item: loadedSection.items[itemIndex])
+                } else {
+                    targetCardKey = nil
+                }
+                if let targetCardKey, store.lastFocusedCardID != targetCardKey {
+                    TVHomeDebugTrace.log("home.publishHomeSections maintaining focus on newly loaded section=\(currentSectionId) target=\(targetCardKey)")
+                    store.lastFocusedCardID = targetCardKey
+                    focusedCardID = targetCardKey
+                }
+            }
+
+            guard wasEmpty && resetFocusIfEmpty && focusedSectionId == nil else { return }
             store.lastFocusedCardID = nil
             focusedMeta = store.hero
             focusedSectionId = nil
@@ -9832,9 +9868,11 @@ private struct TVGridHeroSlideshowView: View {
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
     @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
     @AppStorage(SettingsKey.trailerDelay) private var trailerDelay = 7
+    @AppStorage(SettingsKey.homeHeroRatingSource) private var homeHeroRatingSource = "imdb"
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var focusedTarget: GridHeroFocusTarget?
     @State private var isInLibraryCache = false
+    @State private var gridHeroRatings: [String: [NuvioExternalRating]] = [:]
     @State private var lastFocusChangeTime: CFTimeInterval = 0
     @State private var activeTrailerPreviewIdentity: String?
     @State private var finishedTrailerPreviewIdentity: String?
@@ -10164,6 +10202,16 @@ private struct TVGridHeroSlideshowView: View {
             updateLibraryStatus()
         }
         .focusSection()
+        .task(id: "\(activeItem?.id ?? "")-\(homeHeroRatingSource)") {
+            guard let item = activeItem,
+                  homeHeroRatingSource != "imdb",
+                  item.externalRatings == nil || item.externalRatings?.isEmpty == true,
+                  gridHeroRatings[item.id] == nil else { return }
+            let ratings = await AddonRatingsService.fetchHomeHeroRatings(for: item)
+            if !ratings.isEmpty {
+                gridHeroRatings[item.id] = ratings
+            }
+        }
         .task(id: playTargetTaskIdentity) {
             await resolveCurrentHeroPlayTarget()
         }
@@ -10418,8 +10466,11 @@ private struct TVGridHeroSlideshowView: View {
                 heroBadge(cert)
             } else if let badge = item.statusBadgeLabel, !badge.isEmpty {
                 heroBadge(badge)
-            } else if let rating = item.rating {
-                heroBadge(String(format: "IMDb %.1f", rating))
+            } else {
+                let effectiveRatings = (item.externalRatings?.isEmpty == false ? item.externalRatings : nil) ?? gridHeroRatings[item.id]
+                if let ratingStr = AddonRatingsService.heroRatingString(for: item, source: homeHeroRatingSource, ratings: effectiveRatings) {
+                    heroBadge(ratingStr)
+                }
             }
         }
         .shadow(color: .black.opacity(0.6), radius: 4, y: 2)
@@ -10576,8 +10627,9 @@ private struct TVGridHeroSlideshowView: View {
         if isInLibraryCache {
             return L10n.string("details_in_library", fallback: "In your library")
         }
-        if let rating = item.rating {
-            return String(format: "IMDb %.1f • 4K Ultra HD • HDR", rating)
+        let effectiveRatings = (item.externalRatings?.isEmpty == false ? item.externalRatings : nil) ?? gridHeroRatings[item.id]
+        if let ratingStr = AddonRatingsService.heroRatingString(for: item, source: homeHeroRatingSource, ratings: effectiveRatings) {
+            return "\(ratingStr) • 4K Ultra HD • HDR"
         }
         return "4K Ultra HD • HDR • Dolby Atmos"
     }
@@ -10700,6 +10752,8 @@ private struct TVHeroMetaLine: View {
     /// items so the line reads "S1 E3 · Title • Crime • 2026–".
     var episodeLine: String? = nil
     @AppStorage(SettingsKey.showFullDates) private var showFullDates = true
+    @AppStorage(SettingsKey.homeHeroRatingSource) private var homeHeroRatingSource = "imdb"
+    @State private var fetchedRatings: [NuvioExternalRating] = []
 
     var body: some View {
         let values = [
@@ -10710,7 +10764,8 @@ private struct TVHeroMetaLine: View {
         ].compactMap { $0 }.filter { !$0.isEmpty }
 
         let badge = meta.statusBadgeLabel
-        let rating = meta.rating.map { String(format: "IMDb %.1f", $0) }
+        let effectiveRatings = (meta.externalRatings?.isEmpty == false ? meta.externalRatings : nil) ?? (fetchedRatings.isEmpty ? nil : fetchedRatings)
+        let rating = AddonRatingsService.heroRatingString(for: meta, source: homeHeroRatingSource, ratings: effectiveRatings)
         // Movies have no status badge, so their rating would sit alone on the
         // second line; ride it on the primary line right after the date instead.
         let isMovie = !meta.isSeries
@@ -10721,38 +10776,45 @@ private struct TVHeroMetaLine: View {
         // catalog row (e.g. "The Chi" → "gg"). Collapse entirely when blank.
         let hasPrimary = !primaryValues.isEmpty
 
-        if hasPrimary || showSecondLine {
-            VStack(alignment: .leading, spacing: 10) {
-                if hasPrimary {
-                    Text(primaryValues.joined(separator: "  •  "))
-                        .font(.custom("Inter-SemiBold", size: 22))
-                        .foregroundColor(.white.opacity(0.66))
-                        .lineLimit(1)
-                }
+        Group {
+            if hasPrimary || showSecondLine {
+                VStack(alignment: .leading, spacing: 10) {
+                    if hasPrimary {
+                        Text(primaryValues.joined(separator: "  •  "))
+                            .font(.custom("Inter-SemiBold", size: 22))
+                            .foregroundColor(.white.opacity(0.66))
+                            .lineLimit(1)
+                    }
 
-                // Second line, like the Android hero: "[ONGOING] • IMDb 7.4".
-                if showSecondLine {
-                    HStack(spacing: 14) {
-                        if let badge {
-                            Text(badge)
-                                .font(.custom("Inter-SemiBold", size: 17))
-                                .foregroundColor(.white.opacity(0.88))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .stroke(Color.white.opacity(0.45), lineWidth: 1.5)
-                                )
-                        }
+                    // Second line, like the Android hero: "[ONGOING] • IMDb 7.4".
+                    if showSecondLine {
+                        HStack(spacing: 14) {
+                            if let badge {
+                                Text(badge)
+                                    .font(.custom("Inter-SemiBold", size: 17))
+                                    .foregroundColor(.white.opacity(0.88))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(Color.white.opacity(0.45), lineWidth: 1.5)
+                                    )
+                            }
 
-                        if let rating {
-                            Text(badge != nil ? "•  \(rating)" : rating)
-                                .font(.custom("Inter-SemiBold", size: 22))
-                                .foregroundColor(.white.opacity(0.66))
-                                .lineLimit(1)
+                            if let rating {
+                                Text(badge != nil ? "•  \(rating)" : rating)
+                                    .font(.custom("Inter-SemiBold", size: 22))
+                                    .foregroundColor(.white.opacity(0.66))
+                                    .lineLimit(1)
+                            }
                         }
                     }
                 }
+            }
+        }
+        .task(id: "\(meta.id)-\(homeHeroRatingSource)") {
+            if homeHeroRatingSource != "imdb" && (meta.externalRatings == nil || meta.externalRatings?.isEmpty == true) {
+                fetchedRatings = await AddonRatingsService.fetchHomeHeroRatings(for: meta)
             }
         }
     }

@@ -74,7 +74,7 @@ struct NuvioCatalog: Identifiable, Codable {
 }
 
 /// A rating returned by an external metadata provider such as IMDb, TMDB, or Stremio add-on.
-struct NuvioExternalRating: Codable, Hashable, Identifiable {
+struct NuvioExternalRating: Codable, Hashable, Identifiable, Sendable {
     let source: String
     let value: Double
     let url: String?
@@ -400,7 +400,7 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable, Sendable {
             status: resolvedStatus,
             videos: videos,
             trailerYtIds: trailerYtIds,
-            externalRatings: externalRatings,
+            externalRatings: externalRatings ?? fullMeta.externalRatings,
             posterShape: posterShape ?? fullMeta.posterShape,
             isFromAddon: isFromAddon ?? fullMeta.isFromAddon,
             landscapePosterUrl: resolvedLandscape

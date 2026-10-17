@@ -223,6 +223,20 @@ final class HomeLayoutSettingsTests: XCTestCase {
         XCTAssertNil(TVHomeFocusRestoration.target(saved: row.keys[0], rows: [], preferredIndex: 0))
     }
 
+    func testRestoreRestoresLoadedTitleFromPlaceholderKey() {
+        let rowID = "top-picks-movies"
+        let placeholderKey = TVHomeCardIdentity.placeholderKey(rowID: rowID, index: 1)
+        let loadedRow = TVHomeFocusRow(id: rowID, keys: [
+            "\(rowID)\u{1}title:movie:m1",
+            "\(rowID)\u{1}title:movie:m2",
+            "\(rowID)\u{1}title:movie:m3"
+        ])
+        XCTAssertEqual(
+            TVHomeFocusRestoration.target(saved: placeholderKey, rows: [loadedRow], preferredIndex: 1),
+            "\(rowID)\u{1}title:movie:m2"
+        )
+    }
+
     func testRestoreSupportsRowIDsContainingSeparators() {
         let row = TVHomeFocusRow(id: "row\u{1}nested", keys: ["row\u{1}nested\u{1}b"])
         let other = TVHomeFocusRow(id: "row", keys: ["row\u{1}a"])

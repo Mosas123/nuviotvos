@@ -71,6 +71,10 @@ enum TVHomeCardIdentity {
         "\(rowID)\u{1}folder:\(folder.id)"
     }
 
+    static func placeholderKey(rowID: String, index: Int) -> String {
+        "\(rowID)\u{1}placeholder:\(index)"
+    }
+
     static func uniqueTitles(_ items: [NuvioMeta]) -> [NuvioMeta] {
         var seen = Set<String>()
         return items.filter { seen.insert(titleID($0)).inserted }
@@ -206,13 +210,17 @@ enum CollectionFolderGridMetrics {
 /// skeleton strip, sized exactly like `TVCatalogRow` so the row keeps its height
 /// and the rows below it do not jump when the real cards arrive.
 struct TVLoadingCatalogRow: View {
+    let id: String
     let title: String
     var tileShape: CollectionTileShape = .poster
     var requestsFocus: Bool = false
     var addonName: String? = nil
     var showAddonName: Bool = true
     var horizontalEdgeInset: CGFloat = 0
-    var onFocus: (() -> Void)? = nil
+    var initialScrollIndex: Int = 0
+    var onScrollIndexChange: ((Int) -> Void)? = nil
+    var externalFocus: FocusState<String?>.Binding? = nil
+    var onFocus: ((Int) -> Void)? = nil
     var onMove: ((MoveCommandDirection) -> Void)? = nil
 
     @FocusState private var focusedPlaceholderIndex: Int?
@@ -223,6 +231,35 @@ struct TVLoadingCatalogRow: View {
     @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
+
+    init(
+        id: String = "",
+        title: String,
+        tileShape: CollectionTileShape = .poster,
+        requestsFocus: Bool = false,
+        addonName: String? = nil,
+        showAddonName: Bool = true,
+        horizontalEdgeInset: CGFloat = 0,
+        initialScrollIndex: Int = 0,
+        onScrollIndexChange: ((Int) -> Void)? = nil,
+        externalFocus: FocusState<String?>.Binding? = nil,
+        onFocus: ((Int) -> Void)? = nil,
+        onMove: ((MoveCommandDirection) -> Void)? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.tileShape = tileShape
+        self.requestsFocus = requestsFocus
+        self.addonName = addonName
+        self.showAddonName = showAddonName
+        self.horizontalEdgeInset = horizontalEdgeInset
+        self.initialScrollIndex = initialScrollIndex
+        self.onScrollIndexChange = onScrollIndexChange
+        self.externalFocus = externalFocus
+        self.onFocus = onFocus
+        self.onMove = onMove
+        _scrollIndex = State(initialValue: initialScrollIndex)
+    }
 
     private var cardWidth: CGFloat {
         TVCollectionFolderCardLayout.cardWidth(shape: tileShape, layoutMode: homeLayout)
@@ -271,6 +308,7 @@ struct TVLoadingCatalogRow: View {
                 // from tvOS's focus graph, so moving down from the row
                 // above is rejected or snaps focus back to the top.
                 ForEach(0..<visibleCardCount, id: \.self) { index in
+                    let placeholderKey = TVHomeCardIdentity.placeholderKey(rowID: id, index: index)
                     Button(action: {}) {
                         LoadingPosterCard(
                             width: cardWidth,
@@ -282,6 +320,7 @@ struct TVLoadingCatalogRow: View {
                     .buttonStyle(PosterCardButtonStyle())
                     .focusable(true)
                     .focused($focusedPlaceholderIndex, equals: index)
+                    .modifier(ExternalFocusBinding(binding: externalFocus, id: placeholderKey))
                     .accessibilityLabel("\(title), loading")
                     .modifier(OptionalMoveCommandHandler(handler: onMove))
                 }
@@ -311,7 +350,8 @@ struct TVLoadingCatalogRow: View {
                         scrollIndex = newIndex
                     }
                 }
-                onFocus?()
+                onScrollIndexChange?(newIndex)
+                onFocus?(newIndex)
             }
             .onChange(of: requestsFocus, initial: true) { _, requested in
                 guard requested else { return }
@@ -322,19 +362,22 @@ struct TVLoadingCatalogRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .focusSection()
-        .defaultFocusIfAvailable($focusedPlaceholderIndex, 0)
+        .defaultFocusIfAvailable($focusedPlaceholderIndex, scrollIndex)
+        .defaultFocusIfAvailable(externalFocus, TVHomeCardIdentity.placeholderKey(rowID: id, index: scrollIndex))
         .modifier(OptionalMoveCommandHandler(handler: onMove))
     }
 }
 
 extension TVLoadingCatalogRow: Equatable {
     static func == (lhs: TVLoadingCatalogRow, rhs: TVLoadingCatalogRow) -> Bool {
-        lhs.title == rhs.title
+        lhs.id == rhs.id
+            && lhs.title == rhs.title
             && lhs.tileShape == rhs.tileShape
             && lhs.requestsFocus == rhs.requestsFocus
             && lhs.addonName == rhs.addonName
             && lhs.showAddonName == rhs.showAddonName
             && lhs.horizontalEdgeInset == rhs.horizontalEdgeInset
+            && lhs.initialScrollIndex == rhs.initialScrollIndex
     }
 }
 

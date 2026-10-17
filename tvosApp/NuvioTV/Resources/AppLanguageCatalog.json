@@ -16669,6 +16669,8 @@
     "tvos_layout_full_dates_subtitle": "Prefer exact dates when metadata provides them",
     "tvos_layout_hero": "Hero Section",
     "tvos_layout_hero_subtitle": "Show featured artwork above catalog rows",
+    "tvos_layout_hero_rating_source": "Hero Rating Source",
+    "tvos_layout_hero_rating_source_subtitle": "Choose which rating provider is displayed in the hero info",
     "tvos_layout_hide_unreleased": "Hide Unreleased Content",
     "tvos_layout_grid_rows": "Grid Rows",
     "tvos_layout_grid_rows_subtitle": "Number of movie and TV show rows displayed per catalog (1–10)",
