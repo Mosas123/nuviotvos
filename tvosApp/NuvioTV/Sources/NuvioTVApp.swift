@@ -3361,9 +3361,10 @@ private struct TVMainTabView: View {
             }
             if !genreCollectionDestinations.isEmpty {
                 if #available(tvOS 27.0, *) {
-                    // Native expansion keeps child tabs mounted/identifiable,
-                    // including the selected genre while its section is closed.
-                    genreTabSection.defaultSectionExpansion(.collapsed)
+                    // tvOS supports the automatic policy, but not an explicit
+                    // collapsed default. Keep the system's native behavior;
+                    // header interaction still needs verification on Apple TV.
+                    genreTabSection.defaultSectionExpansion(.automatic)
                 } else {
                     // Earlier systems retain a usable, expanded native section.
                     genreTabSection
