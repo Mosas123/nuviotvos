@@ -206,7 +206,7 @@ enum TmdbDetailsService {
         let context = RequestContext(
             apiKey: rawKey.isEmpty ? nil : rawKey,
             isEnabled: (store.object(forKey: SettingsKey.tmdbEnabled) as? Bool) ?? false,
-            language: normalizedLanguage(store.string(forKey: SettingsKey.tmdbLanguage)),
+            language: TmdbMetadataLanguage.resolvedLanguage(in: store),
             flags: flags
         )
         return await $requestContext.withValue(context) { await operation() }
@@ -257,9 +257,7 @@ enum TmdbDetailsService {
 
     static var preferredLanguage: String {
         if let requestContext { return requestContext.language }
-        return normalizedLanguage(
-            ProfileSettings.current.string(forKey: SettingsKey.tmdbLanguage)
-        )
+        return TmdbMetadataLanguage.resolvedLanguage(in: ProfileSettings.current)
     }
 
     static var useTrailers: Bool { tmdbBoolean(SettingsKey.tmdbUseTrailers) }
@@ -1325,18 +1323,6 @@ enum TmdbDetailsService {
             let decoded = try? JSONDecoder().decode(TmdbMovieReleaseDatesContainer.self, from: data)
             return selectMovieAgeRating(from: decoded?.results, language: preferredLanguage)
         }
-    }
-
-    private static func normalizedLanguage(_ value: String?) -> String {
-        let raw = value?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "_", with: "-") ?? ""
-        guard !raw.isEmpty else { return "en" }
-        let parts = raw.split(separator: "-", omittingEmptySubsequences: true)
-        guard let language = parts.first else { return "en" }
-        if raw.caseInsensitiveCompare("es-419") == .orderedSame { return "es-MX" }
-        guard parts.count > 1 else { return language.lowercased() }
-        return "\(language.lowercased())-\(parts[1].uppercased())"
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

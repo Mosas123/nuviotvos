@@ -202,6 +202,7 @@ enum SettingsKey {
     static let tmdbEnabled = "nuvio.tv.settings.integrations.tmdbEnabled"
     static let tmdbApiKey = "nuvio.tv.settings.integrations.tmdbApiKey"
     static let tmdbLanguage = "nuvio.tv.settings.integrations.tmdbLanguage"
+    static let tmdbFollowAppLanguage = "nuvio.tv.settings.integrations.tmdbFollowAppLanguage"
     static let tmdbUseTrailers = "nuvio.tv.settings.integrations.tmdbUseTrailers"
     static let tmdbUseArtwork = "nuvio.tv.settings.integrations.tmdbUseArtwork"
     static let tmdbUseBasicInfo = "nuvio.tv.settings.integrations.tmdbUseBasicInfo"
@@ -336,7 +337,7 @@ enum SettingsKey {
     /// and never enter the account settings payload.
     static let deviceLocal = Set([
         traktConnected, traktClientID, traktClientSecret, simklClientID, wetrakrClientID, wetrakrClientSecret, wetrakrConnected, aiSubtitlesGeminiAPIKey,
-        p2pConsentAccepted, iCloudSyncEnabled, iCloudLastSyncDate
+        p2pConsentAccepted, iCloudSyncEnabled, iCloudLastSyncDate, tmdbFollowAppLanguage
     ])
 
     static let all = [
@@ -354,7 +355,7 @@ enum SettingsKey {
         traktLibrarySourceMode, traktMoreLikeThisSource,
         simklClientID, simklAccessToken, simklRefreshToken, simklPlanToWatchHomeCatalogs,
         wetrakrClientID, wetrakrClientSecret, wetrakrAccessToken, wetrakrRefreshToken, wetrakrConnected,
-        tmdbEnabled, tmdbApiKey, tmdbLanguage,
+        tmdbEnabled, tmdbApiKey, tmdbLanguage, tmdbFollowAppLanguage,
         tmdbUseTrailers, tmdbUseArtwork, tmdbUseBasicInfo, tmdbUseDetails, tmdbUseCredits,
         tmdbUseProductions, tmdbUseNetworks, tmdbUseEpisodes, tmdbUseSeasonPosters,
         tmdbUseMoreLikeThis, tmdbUseCollections, tmdbApplyToHome,
@@ -4368,6 +4369,7 @@ private struct TmdbOptionsSheet: View {
     @AppStorage(SettingsKey.tmdbEnabled) private var tmdbEnabled = false
     @AppStorage(SettingsKey.tmdbApiKey) private var tmdbApiKey = ""
     @AppStorage(SettingsKey.tmdbLanguage) private var tmdbLanguage = "en"
+    @AppStorage(SettingsKey.tmdbFollowAppLanguage) private var tmdbFollowAppLanguage = true
     @AppStorage(SettingsKey.tmdbUseTrailers) private var tmdbUseTrailers = true
     @AppStorage(SettingsKey.tmdbUseArtwork) private var tmdbUseArtwork = true
     @AppStorage(SettingsKey.tmdbUseBasicInfo) private var tmdbUseBasicInfo = true
@@ -4585,9 +4587,10 @@ private struct TmdbOptionsSheet: View {
     }
 
     private var tmdbLanguageOptions: [String] {
-        AppLanguage.pickerLanguages
+        let manualLanguages = AppLanguage.pickerLanguages
             .filter { $0 != .system }
             .map(\.nativeDisplayName)
+        return [automaticTmdbLanguageLabel] + manualLanguages
     }
 
     private var tmdbHasApiKey: Bool {
@@ -4608,16 +4611,29 @@ private struct TmdbOptionsSheet: View {
     private var tmdbLanguageSelection: Binding<String> {
         Binding(
             get: {
+                if TmdbMetadataLanguage.followsApp(in: ProfileSettings.current) {
+                    return automaticTmdbLanguageLabel
+                }
                 let language = AppLanguage.fromStored(tmdbLanguage)
                 return (language == .system ? AppLanguage.english : language).nativeDisplayName
             },
             set: { displayName in
+                if displayName == automaticTmdbLanguageLabel {
+                    tmdbFollowAppLanguage = true
+                    return
+                }
                 let language = AppLanguage.pickerLanguages.first {
                     $0 != .system && $0.nativeDisplayName == displayName
                 } ?? .english
                 tmdbLanguage = language.tag
+                tmdbFollowAppLanguage = false
             }
         )
+    }
+
+    private var automaticTmdbLanguageLabel: String {
+        L10n.string("tvos_settings_option_auto", fallback: "Auto") + " — "
+            + L10n.string("appearance_language", fallback: "App Language")
     }
 }
 

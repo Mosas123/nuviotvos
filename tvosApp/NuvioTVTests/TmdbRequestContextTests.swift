@@ -51,6 +51,7 @@ final class TmdbRequestContextTests: XCTestCase {
         let suiteName = "tmdb-context-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("en", forKey: SettingsKey.language)
 
         let inherited = await TmdbDetailsService.withRequestContext(defaults: defaults) {
             defaults.set("fr-FR", forKey: SettingsKey.tmdbLanguage)
