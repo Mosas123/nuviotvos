@@ -1771,7 +1771,7 @@ struct ContentView: View {
                                     folder,
                                     collectionTitle: collectionTitle
                                 ),
-                                collectionContext: collectionContext(id: meta.id, type: meta.type, folder: folder)
+                                collectionContext: self.collectionContext(id: meta.id, type: meta.type, folder: folder)
                             )
                         }
                     },
