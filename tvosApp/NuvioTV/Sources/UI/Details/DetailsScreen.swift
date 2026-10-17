@@ -7504,6 +7504,8 @@ private struct TvStreamPickerOverlay: View {
     /// on the All chip; this drives the hand-off once results exist, once.
     @State private var didSeedStreamFocus = false
     @State private var restoredSourceFocusID: String?
+    @State private var lastFocusedPickerItemID: String?
+    @State private var focusRecoveryGeneration: UInt64 = 0
     @State private var pickerProfileID: String?
     @State private var pickerIsVisible = false
     @State private var streamBadgeSettings = StreamBadgeSettingsStore.snapshot
@@ -7667,12 +7669,15 @@ private struct TvStreamPickerOverlay: View {
             // snaps focus back to the first stream (the reported bug), so we
             // debounce and bail when focus has already landed somewhere.
             .onChange(of: focusedItem) { _, newValue in
+                focusRecoveryGeneration &+= 1
+                if let newValue { lastFocusedPickerItemID = newValue }
                 if let newValue, newValue != filterAllKey, !didSeedStreamFocus {
                     didSeedStreamFocus = true
                 }
                 guard newValue == nil else { return }
+                let generation = focusRecoveryGeneration
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    if focusedItem == nil {
+                    if pickerIsVisible, generation == focusRecoveryGeneration, focusedItem == nil {
                         seedInitialFocus()
                     }
                 }
@@ -7682,7 +7687,10 @@ private struct TvStreamPickerOverlay: View {
                 streamBadgeSettings = StreamBadgeSettingsStore.snapshot
                 streamBadgeSettingsRevision &+= 1
             }
-            .onDisappear { pickerIsVisible = false }
+            .onDisappear {
+                pickerIsVisible = false
+                focusRecoveryGeneration &+= 1
+            }
             .onExitCommand(perform: onDismiss)
         }
         .background(Color.black.ignoresSafeArea())
@@ -8127,10 +8135,22 @@ private struct TvStreamPickerOverlay: View {
             refreshDisplayedStreamsIfNeeded()
             guard focusedItem == nil || focusedItem == filterAllKey else { return }
             if didSeedStreamFocus {
-                let restored = restoredSourceFocusID.flatMap { id in
-                    activeDisplayedStreams.contains(where: { $0.id == id }) ? id : nil
+                var filters = Set(filterGroups.map { filterKey($0.addonId) })
+                filters.formUnion([filterAllKey, sortKey])
+                if showsCachedOnlyFilter { filters.insert(cachedKey) }
+                let target = StreamPickerFocusRecovery.target(
+                    lastFocusedID: lastFocusedPickerItemID,
+                    restoredSourceID: restoredSourceFocusID,
+                    streamIDs: activeDisplayedStreams.map(\.id),
+                    filterIDs: filters, fallbackFilterID: filterAllKey
+                )
+                // A cache refresh can shrink the materialized page while focus
+                // is nil. Mount and scroll to the recovered card before requesting it.
+                if let index = activeDisplayedStreams.firstIndex(where: { $0.id == target }) {
+                    visibleStreamLimit = max(visibleStreamLimit, index + 1)
+                    restoredSourceFocusID = target
                 }
-                grabFocus(restored ?? activeDisplayedStreams.first?.id ?? filterAllKey, attempt: 0)
+                grabFocus(target, attempt: 0)
             } else if let id = initialStreamFocusID() {
                 didSeedStreamFocus = true
                 grabFocus(id, attempt: 0)
@@ -8155,14 +8175,15 @@ private struct TvStreamPickerOverlay: View {
     /// view may not be hit-testable on the very first runloop tick after it
     /// renders. `id` is captured by value (never reads a stale `streams`), and
     /// it stops the moment focus lands.
-    private func grabFocus(_ id: String, attempt: Int) {
-        guard pickerIsVisible else { return }
+    private func grabFocus(_ id: String, attempt: Int, generation: UInt64? = nil) {
+        let generation = generation ?? focusRecoveryGeneration
+        guard pickerIsVisible, generation == focusRecoveryGeneration else { return }
         if attempt > 0, let current = focusedItem, current != id { return }
         if focusedItem == id { return }
         focusedItem = id
         guard attempt < 12 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) {
-            grabFocus(id, attempt: attempt + 1)
+            grabFocus(id, attempt: attempt + 1, generation: generation)
         }
     }
 
@@ -8170,6 +8191,8 @@ private struct TvStreamPickerOverlay: View {
         guard !isResolvingDebrid else { return }
         didSeedStreamFocus = false
         restoredSourceFocusID = nil
+        lastFocusedPickerItemID = nil
+        focusRecoveryGeneration &+= 1
         isRefreshing = true
         withAnimation(.easeInOut(duration: 0.25)) {
             showRefreshToast = true
