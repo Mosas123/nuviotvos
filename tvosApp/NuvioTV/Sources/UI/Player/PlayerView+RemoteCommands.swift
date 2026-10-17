@@ -14,6 +14,7 @@ extension PlayerView {
                 viewModel.togglePlayPause()
             }
             .onExitCommand {
+                PlaybackTimelineRecorder.record(.backPressed, engine: viewModel.activeEngineKind)
                 if viewModel.isSceneDetailVisible {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         viewModel.closeSceneDetail()
