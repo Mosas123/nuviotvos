@@ -7,6 +7,10 @@ enum LastManualSourceStore {
     private static let storageKey = "nuvio.tv.manualSourceFocus.v1"
     private static let maximumEntries = 400
 
+    private static func isEnabled(_ preferences: UserDefaults?) -> Bool {
+        (preferences ?? ProfileSettings.current).bool(forKey: SettingsKey.rememberLastSourceFocus)
+    }
+
     private struct Entry: Codable {
         let sourceDigest: String
         let updatedAt: Date
@@ -14,9 +18,10 @@ enum LastManualSourceStore {
 
     static func remember(
         sourceID: String, profileID: String, metaID: String, type: String,
-        season: Int?, episode: Int?, store: UserDefaults = .standard
+        season: Int?, episode: Int?, store: UserDefaults = .standard, preferences: UserDefaults? = nil
     ) {
-        guard let key = contentKey(profileID: profileID, metaID: metaID, type: type,
+        guard isEnabled(preferences),
+              let key = contentKey(profileID: profileID, metaID: metaID, type: type,
                                    season: season, episode: episode),
               isPlayableIdentity(sourceID) else { return }
         var entries = read(store)
@@ -33,9 +38,10 @@ enum LastManualSourceStore {
 
     static func hasRememberedSource(
         profileID: String, metaID: String, type: String, season: Int?, episode: Int?,
-        store: UserDefaults = .standard
+        store: UserDefaults = .standard, preferences: UserDefaults? = nil
     ) -> Bool {
-        guard let key = contentKey(profileID: profileID, metaID: metaID, type: type,
+        guard isEnabled(preferences),
+              let key = contentKey(profileID: profileID, metaID: metaID, type: type,
                                    season: season, episode: episode) else { return false }
         return read(store)[key] != nil
     }
@@ -43,9 +49,10 @@ enum LastManualSourceStore {
     /// An ambiguous identity deliberately falls back to normal picker behavior.
     static func matchingID(
         in sourceIDs: [String], profileID: String, metaID: String, type: String,
-        season: Int?, episode: Int?, store: UserDefaults = .standard
+        season: Int?, episode: Int?, store: UserDefaults = .standard, preferences: UserDefaults? = nil
     ) -> String? {
-        guard let key = contentKey(profileID: profileID, metaID: metaID, type: type,
+        guard isEnabled(preferences),
+              let key = contentKey(profileID: profileID, metaID: metaID, type: type,
                                    season: season, episode: episode),
               let entry = read(store)[key] else { return nil }
         let matches = sourceIDs.filter { isPlayableIdentity($0) && digest($0) == entry.sourceDigest }

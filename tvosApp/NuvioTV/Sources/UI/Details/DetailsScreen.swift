@@ -8099,7 +8099,8 @@ private struct TvStreamPickerOverlay: View {
     }
 
     private func initialStreamFocusID() -> String? {
-        guard let scope = rememberedSourceScope else { return activeDisplayedStreams.first?.id }
+        guard ProfileSettings.current.bool(forKey: SettingsKey.rememberLastSourceFocus),
+              let scope = rememberedSourceScope else { return activeDisplayedStreams.first?.id }
         let candidates = activeDisplayedStreams.filter { !$0.isNotPlayable && $0.unavailabilityReason == nil }
         if let id = LastManualSourceStore.matchingID(
             in: candidates.map(\.id), profileID: scope.profileID, metaID: meta.id, type: meta.type,

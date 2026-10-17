@@ -5774,7 +5774,8 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func rememberManualSourceIfReady() {
-        guard !didRememberManualSource, !isLiveStream, !isTrailerPlaybackSession,
+        guard ProfileSettings.current.bool(forKey: SettingsKey.rememberLastSourceFocus),
+              !didRememberManualSource, !isLiveStream, !isTrailerPlaybackSession,
               hasRenderedFirstFrame, !isAwaitingStreamStart,
               !isSwitchingSource, !isReloadingStream, !isFailingOver,
               !sessionCoordinator.isProgressSaveSuspended,

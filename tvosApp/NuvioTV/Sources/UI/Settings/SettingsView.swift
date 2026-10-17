@@ -270,6 +270,7 @@ enum SettingsKey {
     static let smartStreamSelection = "nuvio.tv.settings.playback.smartStreamSelection"
     static let reuseLastLink = "nuvio.tv.settings.playback.reuseLastLink"
     static let reuseLastLinkCacheHours = "nuvio.tv.settings.playback.reuseLastLinkCacheHours"
+    static let rememberLastSourceFocus = "nuvio.tv.settings.playback.rememberLastSourceFocus"
     static let smartStreamUseTopResult = "nuvio.tv.settings.playback.smartStreamUseTopResult"
     static let smartStreamQuality = "nuvio.tv.settings.playback.smartStreamQuality"
     static let smartSubtitleMatching = "nuvio.tv.settings.playback.smartSubtitleMatching"
@@ -372,7 +373,7 @@ enum SettingsKey {
         cinemetaDisabled, deletedLocalAddons,
         smbServers, smbLibraryIndex, smbLocalRowEnabled,
         jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
-        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, rememberLastSourceFocus, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         backgroundStreamPreFetch,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
@@ -7609,6 +7610,7 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
     @AppStorage(SettingsKey.reuseLastLink) private var reuseLastLink = false
     @AppStorage(SettingsKey.reuseLastLinkCacheHours) private var reuseLastLinkCacheHours = 24
+    @AppStorage(SettingsKey.rememberLastSourceFocus) private var rememberLastSourceFocus = false
     @AppStorage(SettingsKey.smartStreamUseTopResult) private var smartStreamUseTopResult = false
     @AppStorage(SettingsKey.backgroundStreamPreFetch) private var backgroundStreamPreFetch = true
     @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
@@ -7952,6 +7954,16 @@ private struct PlaybackSettingsView: View {
                 )
                 .opacity(reuseLastLink ? 1 : 0.46)
                 .disabled(!reuseLastLink)
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_remember_last_source_focus", fallback: "Remember Last Source Focus"),
+                    subtitle: L10n.string(
+                        "tvos_settings_remember_last_source_focus_subtitle",
+                        fallback: "Focus the last-played source when picking manually for this movie or episode. Does not start playback. Off by default."
+                    ),
+                    isOn: $rememberLastSourceFocus,
+                    accentColor: accentColor
+                )
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_background_prefetch", fallback: "Background Pre-fetch"),
