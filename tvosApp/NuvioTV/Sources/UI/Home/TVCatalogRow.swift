@@ -967,6 +967,8 @@ struct TVHomeCatalogBrowseView: View {
     let section: TVHomeSection
     let repository: CatalogRepository
     let watchedTitleKeys: Set<String>
+    let collectionSource: NuvioCollectionSource?
+    let collectionProfileID: String?
     let onDismiss: () -> Void
     let onSelect: (NuvioMeta) -> Void
     var onLongPress: ((NuvioMeta) -> Void)? = nil
@@ -976,6 +978,9 @@ struct TVHomeCatalogBrowseView: View {
     @State private var nextSkip: Int
     @State private var hasMore: Bool
     @State private var isLoadingMore = false
+    @State private var collectionPageFailed = false
+    @State private var collectionPageTask: Task<Void, Never>?
+    @State private var collectionPageGeneration: UInt = 0
     @FocusState private var focusedItemID: String?
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
@@ -987,6 +992,8 @@ struct TVHomeCatalogBrowseView: View {
         section: TVHomeSection,
         repository: CatalogRepository,
         watchedTitleKeys: Set<String>,
+        collectionSource: NuvioCollectionSource? = nil,
+        collectionProfileID: String? = nil,
         onDismiss: @escaping () -> Void,
         onSelect: @escaping (NuvioMeta) -> Void,
         onLongPress: ((NuvioMeta) -> Void)?
@@ -994,6 +1001,8 @@ struct TVHomeCatalogBrowseView: View {
         self.section = section
         self.repository = repository
         self.watchedTitleKeys = watchedTitleKeys
+        self.collectionSource = collectionSource
+        self.collectionProfileID = collectionProfileID
         self.onDismiss = onDismiss
         self.onSelect = onSelect
         self.onLongPress = onLongPress
@@ -1045,6 +1054,16 @@ struct TVHomeCatalogBrowseView: View {
                             }
                         }
 
+                        if collectionPageFailed {
+                            Button {
+                                guard let collectionSource, let collectionProfileID else { return }
+                                loadMoreCollection(source: collectionSource, profileID: collectionProfileID)
+                            } label: {
+                                Label(L10n.string("action_retry", fallback: "Retry"), systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(PosterCardButtonStyle())
+                        }
+
                         if isLoadingMore {
                             ProgressView()
                                 .tint(.white)
@@ -1066,6 +1085,13 @@ struct TVHomeCatalogBrowseView: View {
             }
         }
         .onExitCommand(perform: onDismiss)
+        .onDisappear {
+            guard collectionSource != nil else { return }
+            collectionPageGeneration &+= 1
+            collectionPageTask?.cancel()
+            collectionPageTask = nil
+            isLoadingMore = false
+        }
     }
 
     @MainActor
@@ -1074,6 +1100,12 @@ struct TVHomeCatalogBrowseView: View {
               !isLoadingMore,
               let index = items.firstIndex(where: { $0.id == currentItem.id }),
               index >= max(items.count - TVHomeRowPrefetchThreshold, 0) else { return }
+
+        if let collectionSource {
+            guard !collectionPageFailed, let collectionProfileID else { return }
+            loadMoreCollection(source: collectionSource, profileID: collectionProfileID)
+            return
+        }
 
         if !pendingItems.isEmpty {
             let batchCount = min(50, pendingItems.count)
@@ -1120,6 +1152,48 @@ struct TVHomeCatalogBrowseView: View {
             }
         }
     }
+
+    /// Collection rows may be TMDB, Trakt or custom add-on sources. Their
+    /// provider cursor cannot be reconstructed from Home catalog identifiers.
+    @MainActor
+    private func loadMoreCollection(source: NuvioCollectionSource, profileID: String) {
+        guard !isLoadingMore, hasMore,
+              CollectionsStore.activeProfileId == profileID else { return }
+        isLoadingMore = true
+        let cursor = nextSkip
+        collectionPageGeneration &+= 1
+        let generation = collectionPageGeneration
+        collectionPageTask = Task { @MainActor in
+            defer {
+                if collectionPageGeneration == generation { isLoadingMore = false }
+            }
+            do {
+                let page = try await CollectionSourceResolver(
+                    repository: repository,
+                    settings: ProfileSettings.store(for: profileID)
+                ).browse(source, cursor: cursor)
+                guard !Task.isCancelled, collectionPageGeneration == generation,
+                      CollectionsStore.activeProfileId == profileID else { return }
+                let pagination = CollectionFolderBrowseView.calculatePagination(
+                    page: page, source: source, requestedCursor: cursor
+                )
+                var seen = Set(items.map(\.homeTitleIdentity))
+                items.append(contentsOf: pagination.displayItems.filter {
+                    seen.insert($0.homeTitleIdentity).inserted
+                })
+                nextSkip = pagination.nextCursor
+                hasMore = pagination.hasMore && pagination.nextCursor > cursor
+                collectionPageFailed = false
+            } catch {
+                guard !Task.isCancelled, collectionPageGeneration == generation,
+                      CollectionsStore.activeProfileId == profileID else { return }
+                // Keep the cursor and existing posters so Retry fetches only
+                // the failed page. Its focus target remains mounted in flight.
+                collectionPageFailed = true
+            }
+        }
+    }
+
 }
 
 enum TVCollectionFolderCardLayout {

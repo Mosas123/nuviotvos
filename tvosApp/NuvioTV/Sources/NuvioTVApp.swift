@@ -269,31 +269,32 @@ private enum DetailsReturnDestination {
     case collectionFolder(TVCollectionFolderItem, collectionTitle: String)
 }
 
-enum TVTab: String, CaseIterable, Identifiable {
-    case profile = "Profile"
-    case home = "Home"
-    case search = "Search"
-    case library = "Library"
-    case settings = "Settings"
+enum TVTab: Hashable, Identifiable, CaseIterable {
+    case profile, home, search, library, settings
+    case collection(CollectionHomeID)
 
+    static var allCases: [Self] { [.profile, .home, .search, .library, .settings] }
     var id: String { rawValue }
-
-    /// Localized tab label (rawValue remains stable for selection identity).
-    var title: String {
+    var rawValue: String {
         switch self {
-        case .profile:
-            return L10n.string("settings_profiles", fallback: "Profile")
-        case .home:
-            return L10n.string("nav_home", fallback: "Home")
-        case .search:
-            return L10n.string("nav_search", fallback: "Search")
-        case .library:
-            return L10n.string("nav_library", fallback: "Library")
-        case .settings:
-            return L10n.string("nav_settings", fallback: "Settings")
+        case .profile: return "Profile"
+        case .home: return "Home"
+        case .search: return "Search"
+        case .library: return "Library"
+        case .settings: return "Settings"
+        case .collection(let id): return "Collection:\(id.key)"
         }
     }
-
+    var title: String {
+        switch self {
+        case .profile: return L10n.string("settings_profiles", fallback: "Profile")
+        case .home: return L10n.string("nav_home", fallback: "Home")
+        case .search: return L10n.string("nav_search", fallback: "Search")
+        case .library: return L10n.string("nav_library", fallback: "Library")
+        case .settings: return L10n.string("nav_settings", fallback: "Settings")
+        case .collection: return L10n.string("tmdb_collections_title", fallback: "Collections")
+        }
+    }
     var symbol: String {
         switch self {
         case .profile: return "person.crop.circle"
@@ -301,6 +302,7 @@ enum TVTab: String, CaseIterable, Identifiable {
         case .search: return "magnifyingglass"
         case .library: return "rectangle.stack"
         case .settings: return "gearshape"
+        case .collection: return "rectangle.stack.fill"
         }
     }
 }
@@ -3110,6 +3112,8 @@ private struct TVMainTabView: View {
     @AppStorage(SettingsKey.searchStyle) private var searchStyle = "Netflix"
     @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
+    @State private var collectionDestinations: [CollectionHomeDestination] = []
+    @StateObject private var collectionSidebarArtwork = CollectionSidebarArtwork()
     @StateObject private var profileTabAvatar = ProfileTabAvatarRenderer()
     @State private var showingReauthSheet = false
 
@@ -3176,110 +3180,194 @@ private struct TVMainTabView: View {
         }
     }
 
-    private var tabs: some View {
+    private func collectionTabTitle(_ destination: CollectionHomeDestination) -> String {
+        let duplicates = collectionDestinations.filter {
+            $0.folder.title.caseInsensitiveCompare(destination.folder.title) == .orderedSame
+        }.count
+        return duplicates > 1
+            ? "\(destination.folder.title) • \(destination.collectionTitle)"
+            : destination.folder.title
+    }
+
+    private func refreshCollectionDestinations() {
+        collectionDestinations = CollectionHomeDestination.configured(
+            profileID: activeProfile?.id ?? "none"
+        )
+        if case .collection(let id) = selectedTab,
+           !collectionDestinations.contains(where: { $0.id == id }) {
+            selectedTab = .home
+        }
+    }
+
+    private var profileTabLabel: some View {
+        Label {
+            Text(profileTabTitle)
+        } icon: {
+            if sessionNeedsReauthentication {
+                Image(systemName: "person.crop.circle.badge.exclamationmark")
+            } else if let avatar = profileTabAvatar.image {
+                Image(uiImage: avatar).renderingMode(.original)
+            } else {
+                Image(systemName: ProfileAvatarCatalog.symbolName(for: displayedProfile?.avatarId))
+            }
+        }
+    }
+
+    private var homeTabContent: some View {
+        TVHomeView(
+            store: homeStore,
+            repository: CinemetaCatalogRepository(),
+            isActive: selectedTab == .home,
+            isFullScreenOverlayPresented: isFullScreenOverlayPresented,
+            detailsDidDisappearGeneration: detailsDidDisappearGeneration,
+            isProfileFocusPending: isProfileFocusPending,
+            profileGateGeneration: profileGateGeneration,
+            onProfileGateReadinessChange: onProfileGateReadinessChange,
+            contentIdentity: TVHomeContentIdentity(
+                profileId: activeProfile?.id ?? "none",
+                catalogRevision: homeCatalogRevision
+            ),
+            collectionsRevision: homeCollectionsRevision,
+            sessionNeedsReauthentication: sessionNeedsReauthentication,
+            onNavigateToDetails: onNavigateToDetails,
+            onPlayTitle: onPlayTitle,
+            onOpenCollectionFolder: onOpenCollectionFolder,
+            onResumePlayback: onResumePlayback,
+            onPlayContinueWatchingManually: onPlayContinueWatchingManually,
+            onStartContinueWatchingFromBeginning: onStartContinueWatchingFromBeginning,
+            onRemoveFromContinueWatching: onRemoveFromContinueWatching,
+            onLongPressCard: onLongPressCard,
+            onLongPressContinueWatching: onLongPressContinueWatching,
+            onRequestAccountRefresh: onRequestAccountRefresh,
+            onRequestReauth: { showingReauthSheet = true }
+        )
+            .id(activeProfile?.id ?? "none")
+    }
+
+    private var libraryTabContent: some View {
+        LibraryView(
+            viewModel: libraryViewModel,
+            store: ProfileSettings.store(for: activeProfile?.id),
+            onContentClick: onNavigateToDetails,
+            onLongPress: onLongPressCard,
+            onOpenCloudLibrary: onOpenCloudLibrary,
+            onPlayCloudFile: onPlayCloudFile
+        )
+            .id(activeProfile?.id ?? "none")
+    }
+
+    private var settingsTabContent: some View {
+        SettingsView(
+            activeProfile: displayedProfile,
+            accountEmail: accountEmail,
+            isAuthenticated: isAuthenticated,
+            sessionNeedsReauthentication: sessionNeedsReauthentication,
+            onChangeProfileName: onChangeProfileName,
+            onChangeProfileAvatar: onChangeProfileAvatar,
+            onChangeProfilePin: onChangeProfilePin,
+            onVerifyProfilePin: onVerifyProfilePin,
+            onSignIn: {
+                if sessionNeedsReauthentication {
+                    showingReauthSheet = true
+                } else {
+                    onSignIn()
+                }
+            },
+            onSignOut: onSignOut
+        )
+    }
+
+    private func collectionTabContent(_ destination: CollectionHomeDestination) -> some View {
+        CollectionHomeTab(
+            destination: destination,
+            catalogRevision: homeCatalogRevision,
+            isActive: selectedTab == .collection(destination.id),
+            isFullScreenOverlayPresented: isFullScreenOverlayPresented,
+            detailsDidDisappearGeneration: detailsDidDisappearGeneration,
+            onNavigateToDetails: onNavigateToDetails,
+            onPlayTitle: onPlayTitle,
+            onLongPressCard: onLongPressCard
+        )
+        .id(destination.revision)
+    }
+
+    private func collectionTabLabel(_ destination: CollectionHomeDestination) -> some View {
+        Label {
+            Text(collectionTabTitle(destination))
+        } icon: {
+            if let image = collectionSidebarArtwork.images[destination.id] {
+                Image(uiImage: image).renderingMode(.original)
+            } else {
+                Image(systemName: "rectangle.stack")
+            }
+        }
+    }
+
+    private var settingsTabLabel: some View {
+        Label(
+            TVTab.settings.title,
+            systemImage: sessionNeedsReauthentication ? "exclamationmark.circle" : TVTab.settings.symbol
+        )
+    }
+
+    // Compatibility shell for systems predating native tab sections.
+    private var standardTabs: some View {
         TabView(selection: $selectedTab) {
-            // Keep profile switching as a regular tab on every supported tvOS
-            // version. This compiles with the tvOS 26.5 SDK and remains visible
-            // when the app is sideloaded onto tvOS 27.
-            // The tab label carries the profile name + avatar icon so the menu
-            // shows who's signed in instead of a generic "Profile" entry. Its
-            // content stays empty: selecting it goes straight to profile
-            // switching, while editing now lives in Settings.
-            Color.clear
-                .tabItem {
-                    Label {
-                        Text(profileTabTitle)
-                    } icon: {
-                        if sessionNeedsReauthentication {
-                            Image(systemName: "person.crop.circle.badge.exclamationmark")
-                        } else if let avatar = profileTabAvatar.image {
-                            Image(uiImage: avatar).renderingMode(.original)
-                        } else {
-                            Image(systemName: ProfileAvatarCatalog.symbolName(for: displayedProfile?.avatarId))
+            Color.clear.tabItem { profileTabLabel }.tag(TVTab.profile)
+            homeTabContent
+                .tabItem { Label(TVTab.home.title, systemImage: TVTab.home.symbol) }
+                .tag(TVTab.home)
+            searchTab
+                .tabItem { Label(TVTab.search.title, systemImage: TVTab.search.symbol) }
+                .tag(TVTab.search)
+            libraryTabContent
+                .tabItem { Label(TVTab.library.title, systemImage: TVTab.library.symbol) }
+                .tag(TVTab.library)
+            settingsTabContent.tabItem { settingsTabLabel }.tag(TVTab.settings)
+        }
+    }
+
+    @available(tvOS 18.0, *)
+    private var groupedCollectionTabs: some View {
+        TabView(selection: $selectedTab) {
+            Tab(value: TVTab.profile) { Color.clear } label: { profileTabLabel }
+            Tab(TVTab.home.title, systemImage: TVTab.home.symbol, value: TVTab.home) {
+                homeTabContent
+            }
+            Tab(TVTab.search.title, systemImage: TVTab.search.symbol, value: TVTab.search) {
+                searchTab
+            }
+            Tab(TVTab.library.title, systemImage: TVTab.library.symbol, value: TVTab.library) {
+                libraryTabContent
+            }
+            Tab(value: TVTab.settings) { settingsTabContent } label: { settingsTabLabel }
+            if !collectionDestinations.isEmpty {
+                TabSection {
+                    ForEach(collectionDestinations) { destination in
+                        Tab(value: TVTab.collection(destination.id)) {
+                            collectionTabContent(destination)
+                        } label: {
+                            collectionTabLabel(destination)
                         }
                     }
+                } header: {
+                    Text(L10n.string("tmdb_collections_title", fallback: "Collections"))
                 }
-                .tag(TVTab.profile)
-
-            TVHomeView(
-                store: homeStore,
-                repository: CinemetaCatalogRepository(),
-                isActive: selectedTab == .home,
-                isFullScreenOverlayPresented: isFullScreenOverlayPresented,
-                detailsDidDisappearGeneration: detailsDidDisappearGeneration,
-                isProfileFocusPending: isProfileFocusPending,
-                profileGateGeneration: profileGateGeneration,
-                onProfileGateReadinessChange: onProfileGateReadinessChange,
-                contentIdentity: TVHomeContentIdentity(
-                    profileId: activeProfile?.id ?? "none",
-                    catalogRevision: homeCatalogRevision
-                ),
-                collectionsRevision: homeCollectionsRevision,
-                sessionNeedsReauthentication: sessionNeedsReauthentication,
-                onNavigateToDetails: onNavigateToDetails,
-                onPlayTitle: onPlayTitle,
-                onOpenCollectionFolder: onOpenCollectionFolder,
-                onResumePlayback: onResumePlayback,
-                onPlayContinueWatchingManually: onPlayContinueWatchingManually,
-                onStartContinueWatchingFromBeginning: onStartContinueWatchingFromBeginning,
-                onRemoveFromContinueWatching: onRemoveFromContinueWatching,
-                onLongPressCard: onLongPressCard,
-                onLongPressContinueWatching: onLongPressContinueWatching,
-                onRequestAccountRefresh: onRequestAccountRefresh,
-                onRequestReauth: { showingReauthSheet = true }
-            )
-                .id(activeProfile?.id ?? "none")
-                .tabItem {
-                    Label(TVTab.home.title, systemImage: TVTab.home.symbol)
-                }
-                .tag(TVTab.home)
-
-            searchTab
-                .tabItem {
-                    Label(TVTab.search.title, systemImage: TVTab.search.symbol)
-                }
-                .tag(TVTab.search)
-
-            LibraryView(
-                viewModel: libraryViewModel,
-                store: ProfileSettings.store(for: activeProfile?.id),
-                onContentClick: onNavigateToDetails,
-                onLongPress: onLongPressCard,
-                onOpenCloudLibrary: onOpenCloudLibrary,
-                onPlayCloudFile: onPlayCloudFile
-            )
-                .id(activeProfile?.id ?? "none")
-                .tabItem {
-                    Label(TVTab.library.title, systemImage: TVTab.library.symbol)
-                }
-                .tag(TVTab.library)
-
-            SettingsView(
-                activeProfile: displayedProfile,
-                accountEmail: accountEmail,
-                isAuthenticated: isAuthenticated,
-                sessionNeedsReauthentication: sessionNeedsReauthentication,
-                onChangeProfileName: onChangeProfileName,
-                onChangeProfileAvatar: onChangeProfileAvatar,
-                onChangeProfilePin: onChangeProfilePin,
-                onVerifyProfilePin: onVerifyProfilePin,
-                onSignIn: {
-                    if sessionNeedsReauthentication {
-                        showingReauthSheet = true
-                    } else {
-                        onSignIn()
-                    }
-                },
-                onSignOut: onSignOut
-            )
-                .tabItem {
-                    Label(
-                        TVTab.settings.title,
-                        systemImage: sessionNeedsReauthentication ? "exclamationmark.circle" : TVTab.settings.symbol
-                    )
-                }
-                .tag(TVTab.settings)
+            }
         }
+    }
+
+    @ViewBuilder
+    private var tabShell: some View {
+        if #available(tvOS 18.0, *) {
+            groupedCollectionTabs
+        } else {
+            standardTabs
+        }
+    }
+
+    private var tabs: some View {
+        tabShell
         .background(Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea())
         .sheet(isPresented: $showingReauthSheet) {
             ReauthSheet(auth: authManager) {
@@ -3288,6 +3376,7 @@ private struct TVMainTabView: View {
         }
         .onAppear {
             TVHomeDebugTrace.startWatchdogIfNeeded()
+            refreshCollectionDestinations()
             AvatarCatalogStore.shared.loadIfNeeded()
             profileTabAvatar.refresh(avatarId: displayedProfile?.avatarId)
             if sessionNeedsReauthentication {
@@ -3298,6 +3387,17 @@ private struct TVMainTabView: View {
             if needsReauth {
                 showingReauthSheet = true
             }
+        }
+        .onChange(of: activeProfile?.id) { _, _ in refreshCollectionDestinations() }
+        .task(id: collectionDestinations.map(\.revision)) {
+            await collectionSidebarArtwork.load(collectionDestinations)
+        }
+        .onChange(of: homeCollectionsRevision) { _, _ in refreshCollectionDestinations() }
+        .onReceive(NotificationCenter.default.publisher(for: CollectionsStore.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshCollectionDestinations()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CollectionSidebarPreferences.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshCollectionDestinations()
         }
         .onChange(of: displayedProfile?.avatarId) { _, newValue in
             profileTabAvatar.refresh(avatarId: newValue)
@@ -3662,6 +3762,7 @@ struct TVHomeView: View {
     let onPlayTitle: (String, String) -> Void
     let onOpenCollectionFolder: (TVCollectionFolderItem, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
+    var collectionHome: CollectionHomeModel? = nil
     var onPlayContinueWatchingManually: ((ContinueWatchingItem) -> Void)? = nil
     var onStartContinueWatchingFromBeginning: ((ContinueWatchingItem) -> Void)? = nil
     var onRemoveFromContinueWatching: ((ContinueWatchingItem) -> Void)? = nil
@@ -4114,10 +4215,11 @@ struct TVHomeView: View {
                     .allowsHitTesting(false)
             }
         }
-        .task(id: "\(contentIdentity.profileId):\(contentIdentity.catalogRevision):\(tmdbHomeSettingsKey)") {
+        .task(id: "\(contentIdentity.profileId):\(contentIdentity.catalogRevision):\(tmdbHomeSettingsKey):\(collectionHome == nil || isActive)") {
+            guard collectionHome == nil || isActive else { return }
             let isLoaded = store.isLoaded(for: contentIdentity)
             await loadWithAutomaticRetry(for: contentIdentity, forceReload: !isLoaded)
-            if !isLoaded {
+            if !isLoaded, collectionHome == nil {
                 // Add-on metadata providers are configured by the time Home has
                 // loaded, so this is the pass that recovers titles an earlier sync
                 // could not resolve. Mirrors the phone's
@@ -4173,6 +4275,7 @@ struct TVHomeView: View {
         // changes (progress saved during playback, item finished/removed).
         .onReceive(NotificationCenter.default.publisher(for: ContinueWatchingStore.changedNotification)
             .debounce(for: .milliseconds(30), scheduler: RunLoop.main)) { _ in
+            guard collectionHome == nil else { return }
             guard isActive else { return }
             if isFullScreenOverlayPresented {
                 pendingContinueWatchingRefreshAfterOverlay = true
@@ -4184,6 +4287,7 @@ struct TVHomeView: View {
         // where the displayed list belongs to the provider and only changes on
         // the next fetch.
         .onReceive(NotificationCenter.default.publisher(for: ContinueWatchingDismissStore.changedNotification).receive(on: RunLoop.main)) { _ in
+            guard collectionHome == nil else { return }
             guard isActive && !isFullScreenOverlayPresented else { return }
             let all = continueWatching + upcomingItems
             let remaining = all.filter { !ContinueWatchingDismissStore.isDismissed($0) }
@@ -4197,6 +4301,7 @@ struct TVHomeView: View {
             scheduleTraktWatchedHistorySync()
         }
         .onReceive(NotificationCenter.default.publisher(for: TraktSettingsStore.continueWatchingChangedNotification).receive(on: RunLoop.main)) { _ in
+            guard collectionHome == nil else { return }
             guard isActive else { return }
             if isFullScreenOverlayPresented {
                 pendingContinueWatchingRefreshAfterOverlay = true
@@ -4262,6 +4367,7 @@ struct TVHomeView: View {
                 logRowWindow("home became active")
                 #endif
             } else {
+                collectionHome?.cancel()
                 // Details and Player leave Home selected; a real tab change
                 // must never carry their one-card restoration lock back Home.
                 overlayRestoreGeneration &+= 1
@@ -4295,6 +4401,7 @@ struct TVHomeView: View {
             }
         }
         .onChange(of: showUnairedNextUp) { _, _ in
+            guard collectionHome == nil else { return }
             // Local Next Up cards are derived from the episode guide, so the
             // preference must rebuild that row rather than merely re-sort the
             // already materialized cards. Remote rows need a fresh fetch because
@@ -4306,6 +4413,7 @@ struct TVHomeView: View {
             }
         }
         .onChange(of: upNextFromFurthestEpisode) { _, _ in
+            guard collectionHome == nil else { return }
             if usesRemoteProgress {
                 scheduleContinueWatchingRefresh()
             } else {
@@ -4313,6 +4421,10 @@ struct TVHomeView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: WatchedStore.changedNotification).receive(on: RunLoop.main)) { _ in
+            if collectionHome != nil {
+                refreshWatchedTitles()
+                return
+            }
             guard isActive else { return }
             if isFullScreenOverlayPresented {
                 pendingContinueWatchingRefreshAfterOverlay = true
@@ -4322,12 +4434,19 @@ struct TVHomeView: View {
             // A watched mark can be the only history left for a completed
             // series. Rebuild the local row so a newly aired episode can seed a
             // fresh "Airs Today" card even after the old row was retired.
-            if !usesRemoteProgress {
+            if collectionHome == nil, !usesRemoteProgress {
                 ContinueWatchingBuilder.scheduleRebuild(reason: "watched state changed")
             }
         }
         // Settings → Home Catalogs reorder applies to the mounted Home live.
         .onReceive(NotificationCenter.default.publisher(for: TVHomeCatalogOrder.changedNotification).receive(on: RunLoop.main)) { _ in
+            if collectionHome != nil {
+                guard isActive, !isFullScreenOverlayPresented else { return }
+                homeReloadTask?.cancel()
+                let identity = contentIdentity
+                homeReloadTask = Task { @MainActor in await load(for: identity, forceReload: true) }
+                return
+            }
             guard isActive && !isFullScreenOverlayPresented else { return }
             let reordered = homeOrderedSections(store.sections)
             if reordered.map(\.id) != store.sections.map(\.id) {
@@ -4399,6 +4518,7 @@ struct TVHomeView: View {
         }
         .onDisappear {
             focusWork.cancelAll()
+            collectionHome?.cancel()
             // The profile-focus retry is owned by a `.task(id:)` and cancels
             // automatically when this Home view leaves the hierarchy.
             homeReloadTask?.cancel()
@@ -4585,6 +4705,8 @@ struct TVHomeView: View {
                 section: section,
                 repository: repository,
                 watchedTitleKeys: watchedTitleKeys,
+                collectionSource: collectionHome?.source(for: section.id),
+                collectionProfileID: collectionHome?.destination.id.profileID,
                 onDismiss: { browsingSection = nil },
                 onSelect: { meta in
                     browsingSection = nil
@@ -4792,7 +4914,7 @@ struct TVHomeView: View {
                         } else {
                             TVHomeCatalogGridSection(
                                 section: section,
-                                customPosterScreen: .home,
+                                customPosterScreen: collectionHome == nil ? .home : .collections,
                                 watchedTitleKeys: watchedTitleKeys,
                                 initialFocusCardKey: initialFocusCardKey,
                                 externalFocus: $focusedCardID,
@@ -5741,7 +5863,7 @@ struct TVHomeView: View {
         } else {
             TVCatalogRow(
                 id: section.id,
-                customPosterScreen: .home,
+                customPosterScreen: collectionHome == nil ? .home : .collections,
                 title: section.title,
                 addonName: section.addonName,
                 showAddonName: catalogAddonNames,
@@ -6163,7 +6285,7 @@ struct TVHomeView: View {
         let pinnedSections = ((continueWatching.isEmpty || !continueWatchingVisible) ? [] : [resumeSection])
             + ((upcomingMetas.isEmpty || !continueWatchingVisible) ? [] : [upcomingSection])
             + [localTitlesSection, jellyfinSection].compactMap { $0 }
-        let allSections = pinnedSections + store.sections
+        let allSections = collectionHome == nil ? pinnedSections + store.sections : store.sections
 
         let result: [TVHomeSection]
         if !hideUnreleased {
@@ -6280,7 +6402,7 @@ struct TVHomeView: View {
             $0.id != TVHomeSection.continueWatchingId && $0.id != TVHomeSection.upcomingId && $0.collectionFolders.isEmpty
         }
         let selectedIDs = (try? JSONDecoder().decode([String].self, from: heroCatalogsData)) ?? []
-        let selectedSet = Set(selectedIDs)
+        let selectedSet = collectionHome == nil ? Set(selectedIDs) : Set<String>()
         let selectedSections = catalogSections.filter { selectedSet.contains($0.id) }
         // Empty is the default "all catalogs" state. If saved catalogs are no
         // longer available, also fall back to all rows instead of losing Hero.
@@ -6368,6 +6490,10 @@ struct TVHomeView: View {
         for identity: TVHomeContentIdentity,
         forceReload: Bool = false
     ) async {
+        if collectionHome != nil {
+            await load(for: identity, forceReload: forceReload)
+            return
+        }
         if isProfileFocusPending, contentIdentity == identity {
             profileGateFailedLoadIdentity = nil
         }
@@ -6427,6 +6553,18 @@ struct TVHomeView: View {
         for identity: TVHomeContentIdentity,
         forceReload: Bool = false
     ) async {
+        if let collectionHome {
+            guard isActive else { return }
+            isLoading = true
+            errorMessage = nil
+            let failure = await collectionHome.load(identity: identity, force: forceReload)
+            guard !Task.isCancelled, isActive, contentIdentity == identity else { return }
+            errorMessage = failure
+            isLoading = false
+            if focusedMeta == nil { focusedMeta = store.hero }
+            refreshWatchedTitles()
+            return
+        }
         guard identity.profileId != "none" && !identity.profileId.isEmpty else {
             isLoading = false
             return
@@ -6558,6 +6696,10 @@ struct TVHomeView: View {
 
     @MainActor
     private func reloadHomeAfterSyncedInputs(for identity: TVHomeContentIdentity) async {
+        if collectionHome != nil {
+            await load(for: identity, forceReload: true)
+            return
+        }
         TVHomeDebugTrace.log("home.reloadHomeAfterSyncedInputs started for \(identity.profileId):\(identity.catalogRevision)")
         guard identity.profileId != "none" && !identity.profileId.isEmpty else { return }
         // Do not overlap the revision-owned load. Waiting preserves its useful
@@ -6642,6 +6784,7 @@ struct TVHomeView: View {
     /// row positions may arrange the remainder, but can never push a pinned
     /// collection below a catalog.
     private func homeOrderedSections(_ sections: [TVHomeSection]) -> [TVHomeSection] {
+        guard collectionHome == nil else { return sections }
         let pinnedCollections = sections.filter {
             $0.isCollectionRow && $0.isPinnedCollection
         }
@@ -6835,6 +6978,7 @@ struct TVHomeView: View {
     /// Re-resolves collection rows in place after a sync pull / local edit
     /// lands while Home is already loaded, without disturbing catalog rows.
     private func refreshCollectionSections(for identity: TVHomeContentIdentity) async {
+        guard collectionHome == nil else { return }
         guard identity.profileId != "none" && !identity.profileId.isEmpty else { return }
         // The revision is retained even if it changes during the initial catalog
         // request. Wait for that identity to finish, then apply the latest store
@@ -7060,6 +7204,11 @@ struct TVHomeView: View {
 
     @MainActor
     private func loadMoreSectionIfNeeded(sectionId: String, currentItem: NuvioMeta) {
+        if let collectionHome {
+            guard isActive, !isFullScreenOverlayPresented else { return }
+            collectionHome.loadMore(rowID: sectionId, currentItem: currentItem)
+            return
+        }
         // The resume row is built locally from the ledger rather than fetched
         // from an add-on catalog, so it pages through its own path.
         if sectionId == TVHomeSection.continueWatchingId {
@@ -7148,6 +7297,12 @@ struct TVHomeView: View {
 
     private func checkAndTriggerAutoRefresh() {
         guard isActive && !isFullScreenOverlayPresented else { return }
+        if let collectionHome, collectionHome.requiresReload {
+            homeReloadTask?.cancel()
+            let identity = contentIdentity
+            homeReloadTask = Task { @MainActor in await load(for: identity, forceReload: true) }
+            return
+        }
         guard let lastLoaded = store.lastLoadedAt else { return }
 
         let thresholdSeconds: TimeInterval?
@@ -7178,6 +7333,12 @@ struct TVHomeView: View {
 
     @MainActor
     private func refreshHomeSection(sectionId: String) {
+        if collectionHome != nil {
+            homeReloadTask?.cancel()
+            let identity = contentIdentity
+            homeReloadTask = Task { @MainActor in await load(for: identity, forceReload: true) }
+            return
+        }
         if sectionId == TVHomeSection.continueWatchingId {
             scheduleContinueWatchingRefresh()
             onRequestAccountRefresh(true)
@@ -7409,6 +7570,7 @@ struct TVHomeView: View {
     }
 
     private func refreshContinueWatching() {
+        guard collectionHome == nil else { return }
         TVHomeDebugTrace.measure("home.refreshContinueWatching") {
             guard !usesRemoteProgress else {
                 print("[ContinueWatching][Home] refreshContinueWatching: usesRemoteProgress=true (\(selectedProgressSource.rawValue))")
@@ -7499,6 +7661,7 @@ struct TVHomeView: View {
     }
 
     private func scheduleContinueWatchingRefresh() {
+        guard collectionHome == nil else { return }
         continueWatchingRefreshTask?.cancel()
         continueWatchingRefreshTask = Task {
             await refreshContinueWatchingFromSelectedSource()
@@ -7510,6 +7673,7 @@ struct TVHomeView: View {
     /// service coalesces overlapping requests and the captured profile keeps a
     /// late response from refreshing another profile's UI.
     private func scheduleTraktWatchedHistorySync() {
+        guard collectionHome == nil else { return }
         traktWatchedHistorySyncTask?.cancel()
         guard isActive,
               let profileID = WatchedStore.activeProfileId,
@@ -7533,6 +7697,7 @@ struct TVHomeView: View {
 
     @MainActor
     private func refreshContinueWatchingFromSelectedSource() async {
+        guard collectionHome == nil else { return }
         continueWatchingRefreshGeneration &+= 1
         let generation = continueWatchingRefreshGeneration
         let profileID = ContinueWatchingStore.activeProfileId
@@ -7679,6 +7844,7 @@ struct TVHomeView: View {
 
     @MainActor
     private func loadLocalTitlesSection() async {
+        guard collectionHome == nil else { return }
         guard contentIdentity.profileId != "none" && !contentIdentity.profileId.isEmpty else {
             localTitlesSection = nil
             return
@@ -7718,6 +7884,7 @@ struct TVHomeView: View {
 
     @MainActor
     private func loadJellyfinSection() async {
+        guard collectionHome == nil else { return }
         guard contentIdentity.profileId != "none" && !contentIdentity.profileId.isEmpty else {
             jellyfinSection = nil
             return
@@ -8603,9 +8770,8 @@ enum TVHomeCatalogOrder {
         guard let key = row.settingsKey else { return }
         if key.hasPrefix(TVHomeSection.collectionIdPrefix) {
             let id = String(key.dropFirst(TVHomeSection.collectionIdPrefix.count))
-            var ids = disabledCollectionIds()
-            if isEnabled { ids.remove(id) } else { ids.insert(id) }
-            persist(ids, forKey: SettingsKey.homeCollectionDisabled)
+            setCollectionEnabled(id, isEnabled: isEnabled)
+            return
         } else {
             var keys = disabledCatalogKeys()
             var explicitlyEnabled = localExplicitHomeCatalogKeys()
@@ -8619,6 +8785,25 @@ enum TVHomeCatalogOrder {
             persist(keys, forKey: SettingsKey.homeCatalogDisabled)
             persist(explicitlyEnabled, forKey: SettingsKey.homeCatalogExplicitEnabled)
         }
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    /// Also used before Home has recorded a snapshot for a newly added collection.
+    static func setCollectionEnabled(_ id: String, isEnabled: Bool) {
+        guard !id.isEmpty else { return }
+        var ids = disabledCollectionIds()
+        if isEnabled { ids.remove(id) } else { ids.insert(id) }
+        if isEnabled {
+            // The collection manager can restore a row even after Home Catalogs
+            // deleted its snapshot entry. Remove only this collection's marker
+            // so the next Home snapshot can record the restored row again.
+            let key = TVHomeSection.collectionIdPrefix + id
+            var deleted = deletedCatalogKeys()
+            if deleted.remove(key) != nil {
+                persist(deleted, forKey: SettingsKey.homeCatalogDeleted)
+            }
+        }
+        persist(ids, forKey: SettingsKey.homeCollectionDisabled)
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -8855,6 +9040,7 @@ enum CatalogHomeVisibilityResolver {
 struct TVHomeContentIdentity: Hashable {
     let profileId: String
     let catalogRevision: UInt
+    var collectionScope: String? = nil
 }
 
 enum TVProfileGateReadiness: Equatable {
