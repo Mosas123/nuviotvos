@@ -529,13 +529,12 @@ final class CinemetaCatalogRepository: CatalogRepository {
             )
         })
 
-        // Load the independent Cinemeta rows concurrently. Previously one
-        // transient failure aborted the complete Home request, leaving the
-        // screen empty until switching profiles happened to start it again.
+        // Load only Cinemeta rows eligible for Home. Hidden rows must not
+        // consume requests or delay the visible catalogs and add-ons.
         var pages = Array<[NuvioMeta]?>(repeating: nil, count: specs.count)
-        if cinemetaEnabled {
+        if !eligibleBuiltInIndices.isEmpty {
             await withTaskGroup(of: (Int, [NuvioMeta]?).self) { group in
-                for (index, spec) in specs.enumerated() {
+                for (index, spec) in specs.enumerated() where eligibleBuiltInIndices.contains(index) {
                     group.addTask {
                         let page = try? await self.fetchCatalog(
                             type: spec.type,
@@ -590,8 +589,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // Retry only missing rows once after a short backoff. Successful rows
         // remain usable and are never discarded because a sibling host request
         // failed.
-        let missing = pages.indices.filter { pages[$0] == nil }
-        if cinemetaEnabled && !missing.isEmpty {
+        let missing = pages.indices.filter { eligibleBuiltInIndices.contains($0) && pages[$0] == nil }
+        if !missing.isEmpty {
             try await Task.sleep(nanoseconds: 600_000_000)
             try Task.checkCancellation()
             await withTaskGroup(of: (Int, [NuvioMeta]?).self) { group in
