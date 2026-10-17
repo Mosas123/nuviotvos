@@ -7500,6 +7500,9 @@ private struct TvStreamPickerOverlay: View {
     /// mounts while discovery is still running, so the first seed can only land
     /// on the All chip; this drives the hand-off once results exist, once.
     @State private var didSeedStreamFocus = false
+    @State private var restoredSourceFocusID: String?
+    @State private var pickerProfileID: String?
+    @State private var pickerIsVisible = false
     @State private var streamBadgeSettings = StreamBadgeSettingsStore.snapshot
     @State private var showRefreshToast = false
     @State private var isRefreshing = false
@@ -7627,6 +7630,8 @@ private struct TvStreamPickerOverlay: View {
             // lands on the All chip; seedStreamFocusIfNeeded hands focus to the
             // first card once results exist.
             .onAppear {
+                pickerIsVisible = true
+                pickerProfileID = ProfileSettings.activeProfileID
                 refreshDisplayedStreamsIfNeeded()
                 seedInitialFocus()
                 if !didPresentInitialAvailabilityMessage {
@@ -7642,6 +7647,7 @@ private struct TvStreamPickerOverlay: View {
             }
             .onChange(of: isLoading) { _, loading in
                 if !loading {
+                    seedStreamFocusIfNeeded()
                     withAnimation(.easeInOut(duration: 0.25)) {
                         isRefreshing = false
                     }
@@ -7658,6 +7664,9 @@ private struct TvStreamPickerOverlay: View {
             // snaps focus back to the first stream (the reported bug), so we
             // debounce and bail when focus has already landed somewhere.
             .onChange(of: focusedItem) { _, newValue in
+                if let newValue, newValue != filterAllKey, !didSeedStreamFocus {
+                    didSeedStreamFocus = true
+                }
                 guard newValue == nil else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     if focusedItem == nil {
@@ -7670,6 +7679,7 @@ private struct TvStreamPickerOverlay: View {
                 streamBadgeSettings = StreamBadgeSettingsStore.snapshot
                 streamBadgeSettingsRevision &+= 1
             }
+            .onDisappear { pickerIsVisible = false }
             .onExitCommand(perform: onDismiss)
         }
         .background(Color.black.ignoresSafeArea())
@@ -7737,7 +7747,8 @@ private struct TvStreamPickerOverlay: View {
         )
         displayedStreams = refreshedStreams
         displayedStreamsCacheKey = key
-        visibleStreamLimit = StreamPickerListBuilder.defaultPageSize
+        let focusedIndex = focusedItem.flatMap { id in refreshedStreams.firstIndex { $0.id == id } }
+        visibleStreamLimit = max(StreamPickerListBuilder.defaultPageSize, (focusedIndex ?? -1) + 1)
     }
 
     @MainActor
@@ -7913,60 +7924,69 @@ private struct TvStreamPickerOverlay: View {
                 }
                 .padding(.horizontal, 40)
             } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 28) {
-                        ForEach(streamsToShow) { stream in
-                            // Focus appearance is owned by the card via local
-                            // @FocusState + ExternalFocusBinding so only the
-                            // old/new cards pay for outline/scale updates.
-                            TvStreamCard(
-                                stream: stream,
-                                presentation: streamCardPresentations[stream.id]
-                                    ?? TvStreamCardPresentation(pending: badgeSettings),
-                                externalFocus: $focusedItem,
-                                action: { select(stream, player: nil) },
-                                onSelectPlayer: { player in select(stream, player: player) }
-                            )
-                            .onAppear {
-                                if let index = streamsToShow.firstIndex(where: { $0.id == stream.id }),
-                                   index >= streamsToShow.count - 4,
-                                   hasMore {
-                                    loadMoreStreams()
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(spacing: 28) {
+                            ForEach(streamsToShow) { stream in
+                                // Focus appearance is owned by the card via local
+                                // @FocusState + ExternalFocusBinding so only the
+                                // old/new cards pay for outline/scale updates.
+                                TvStreamCard(
+                                    stream: stream,
+                                    presentation: streamCardPresentations[stream.id]
+                                        ?? TvStreamCardPresentation(pending: badgeSettings),
+                                    externalFocus: $focusedItem,
+                                    action: { select(stream, player: nil) },
+                                    onSelectPlayer: { player in select(stream, player: player) }
+                                )
+                                .id(stream.id)
+                                .onAppear {
+                                    if let index = streamsToShow.firstIndex(where: { $0.id == stream.id }),
+                                       index >= streamsToShow.count - 4,
+                                       hasMore {
+                                        loadMoreStreams()
+                                    }
                                 }
                             }
-                        }
 
-                        if hasMore {
-                            HStack(spacing: 16) {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                    .scaleEffect(1.0)
-                                Text(L10n.format("details_showing_sources_format", fallback: "Showing %1$d of %2$d sources…", streamsToShow.count, totalCount))
-                                    .font(.system(size: 24, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.60))
+                            if hasMore {
+                                HStack(spacing: 16) {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                        .scaleEffect(1.0)
+                                    Text(L10n.format("details_showing_sources_format", fallback: "Showing %1$d of %2$d sources…", streamsToShow.count, totalCount))
+                                        .font(.system(size: 24, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.60))
+                                }
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.top, 12)
+                                .padding(.bottom, 20)
+                                .onAppear {
+                                    loadMoreStreams()
+                                }
+                            } else if isLoading {
+                                HStack(spacing: 18) {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                    Text(L10n.string("details_checking_more_addons", fallback: "Checking more add-ons…"))
+                                        .font(.system(size: 26, weight: .medium))
+                                        .foregroundColor(.white.opacity(0.62))
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 8)
+                                .padding(.bottom, 12)
                             }
-                            .frame(maxWidth: .infinity, alignment: .center)
-                            .padding(.top, 12)
-                            .padding(.bottom, 20)
-                            .onAppear {
-                                loadMoreStreams()
-                            }
-                        } else if isLoading {
-                            HStack(spacing: 18) {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                Text(L10n.string("details_checking_more_addons", fallback: "Checking more add-ons…"))
-                                    .font(.system(size: 26, weight: .medium))
-                                    .foregroundColor(.white.opacity(0.62))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 8)
-                            .padding(.bottom, 12)
                         }
+                        .padding(40)
                     }
-                    .padding(40)
+                    .focusSection()
+                    .onAppear {
+                        if let id = restoredSourceFocusID { proxy.scrollTo(id, anchor: .center) }
+                    }
+                    .onChange(of: restoredSourceFocusID) { _, id in
+                        if let id { proxy.scrollTo(id, anchor: .center) }
+                    }
                 }
-                .focusSection()
             }
 
             // Torrent streams take a moment to cache/unrestrict on the debrid
@@ -8072,35 +8092,60 @@ private struct TvStreamPickerOverlay: View {
         return items
     }
 
-    /// Seeds focus when the picker appears. The picker is only mounted once
-    /// streams are available, so this first appearance is a fresh focus
-    /// transition where tvOS hasn't committed focus yet — setting `focusedItem`
-    /// here wins, landing on the first stream (or the "All" chip if none).
+    private var rememberedSourceScope: (profileID: String, season: Int?, episode: Int?)? {
+        guard let profileID = pickerProfileID,
+              profileID == ProfileSettings.activeProfileID else { return nil }
+        return (profileID, episode?.season, episode?.episode)
+    }
+
+    private func initialStreamFocusID() -> String? {
+        guard ProfileSettings.current.bool(forKey: SettingsKey.rememberLastSourceFocus),
+              let scope = rememberedSourceScope else { return activeDisplayedStreams.first?.id }
+        let candidates = activeDisplayedStreams.filter { !$0.isNotPlayable && $0.unavailabilityReason == nil }
+        if let id = LastManualSourceStore.matchingID(
+            in: candidates.map(\.id), profileID: scope.profileID, metaID: meta.id, type: meta.type,
+            season: scope.season, episode: scope.episode
+        ), let index = activeDisplayedStreams.firstIndex(where: { $0.id == id }) {
+            visibleStreamLimit = max(visibleStreamLimit, index + 1)
+            restoredSourceFocusID = id
+            return id
+        }
+        // Let progressive discovery finish before deciding the saved source is absent.
+        if isLoading, LastManualSourceStore.hasRememberedSource(
+            profileID: scope.profileID, metaID: meta.id, type: meta.type,
+            season: scope.season, episode: scope.episode
+        ) { return nil }
+        return activeDisplayedStreams.first?.id
+    }
+
     private func seedInitialFocus() {
         DispatchQueue.main.async {
+            guard pickerIsVisible else { return }
             refreshDisplayedStreamsIfNeeded()
-            if let firstID = activeDisplayedStreams.first?.id {
+            guard focusedItem == nil || focusedItem == filterAllKey else { return }
+            if didSeedStreamFocus {
+                let restored = restoredSourceFocusID.flatMap { id in
+                    activeDisplayedStreams.contains(where: { $0.id == id }) ? id : nil
+                }
+                grabFocus(restored ?? activeDisplayedStreams.first?.id ?? filterAllKey, attempt: 0)
+            } else if let id = initialStreamFocusID() {
                 didSeedStreamFocus = true
-                grabFocus(firstID, attempt: 0)
+                grabFocus(id, attempt: 0)
             } else {
                 grabFocus(filterAllKey, attempt: 0)
             }
         }
     }
 
-    /// Hands focus to the first stream once discovery produces one, for the
-    /// common case where the picker opened empty and had to seed the All chip.
-    ///
-    /// Runs once. Anything the user did in the meantime wins: if focus has moved
-    /// off the chip the picker itself seeded — another add-on, sort, or a card
-    /// that arrived earlier — the hand-off is dropped rather than yanking focus
-    /// out from under them mid-scroll.
     private func seedStreamFocusIfNeeded() {
-        guard !didSeedStreamFocus,
-              let firstID = activeDisplayedStreams.first?.id else { return }
+        guard !didSeedStreamFocus else { return }
+        guard focusedItem == nil || focusedItem == filterAllKey else {
+            didSeedStreamFocus = true
+            return
+        }
+        guard let id = initialStreamFocusID() else { return }
         didSeedStreamFocus = true
-        guard focusedItem == nil || focusedItem == filterAllKey else { return }
-        grabFocus(firstID, attempt: 0)
+        grabFocus(id, attempt: 0)
     }
 
     /// Asserts focus on `id` and retries for a short window, because the target
@@ -8108,6 +8153,8 @@ private struct TvStreamPickerOverlay: View {
     /// renders. `id` is captured by value (never reads a stale `streams`), and
     /// it stops the moment focus lands.
     private func grabFocus(_ id: String, attempt: Int) {
+        guard pickerIsVisible else { return }
+        if attempt > 0, let current = focusedItem, current != id { return }
         if focusedItem == id { return }
         focusedItem = id
         guard attempt < 12 else { return }
@@ -8119,6 +8166,7 @@ private struct TvStreamPickerOverlay: View {
     private func performRefresh() {
         guard !isResolvingDebrid else { return }
         didSeedStreamFocus = false
+        restoredSourceFocusID = nil
         isRefreshing = true
         withAnimation(.easeInOut(duration: 0.25)) {
             showRefreshToast = true
