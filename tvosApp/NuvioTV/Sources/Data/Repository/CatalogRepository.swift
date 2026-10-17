@@ -320,6 +320,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
         let disabled = TVHomeCatalogOrder.disabledCatalogKeys()
             .sorted()
             .joined(separator: ",")
+        let disabledAddonIDs = TVHomeCatalogOrder.disabledAddonIDs().sorted().joined(separator: ",")
+        let disabledAddonNames = TVHomeCatalogOrder.disabledAddonNames().sorted().joined(separator: ",")
         let deleted = TVHomeCatalogOrder.deletedCatalogKeys()
             .sorted()
             .joined(separator: ",")
@@ -337,7 +339,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }).sorted().joined(separator: "|")
         let explicitHomeKeys = visibility.explicitHomeKeys.sorted().joined(separator: ",")
         let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
-        return "cinemeta:\(cinemetaEnabled) simklPlan:\(simklPlanEnabled) urls:[\(urls)] disabled:[\(disabled)] deleted:[\(deleted)] order:[\(order)] customTitles:[\(customTitles)] folderSources:[\(folderSources)] explicitHome:[\(explicitHomeKeys)] showType:\(showType) metadata:[\(Self.metadataCacheContext)] homeTmdb:\(TmdbDetailsService.useHomeEnrichment)"
+        return "cinemeta:\(cinemetaEnabled) simklPlan:\(simklPlanEnabled) urls:[\(urls)] disabled:[\(disabled)] disabledAddonIDs:[\(disabledAddonIDs)] disabledAddonNames:[\(disabledAddonNames)] deleted:[\(deleted)] order:[\(order)] customTitles:[\(customTitles)] folderSources:[\(folderSources)] explicitHome:[\(explicitHomeKeys)] showType:\(showType) metadata:[\(Self.metadataCacheContext)] homeTmdb:\(TmdbDetailsService.useHomeEnrichment)"
     }
     private let baseURL = URL(string: "https://v3-cinemeta.strem.io")!
     private static var cachedMetaById: [String: NuvioMeta] = [:]
@@ -499,13 +501,24 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
     }
 
+    /// Home placement is separate from enabling an add-on for streams or
+    /// collection pages. Match the provider-level filters used by Home's UI.
+    private static func isAddonVisibleOnHome(id: String, name: String) -> Bool {
+        !TVHomeCatalogOrder.disabledAddonIDs().contains(id)
+            && !TVHomeCatalogOrder.disabledAddonNames().contains(
+                TVHomeCatalogOrder.normalizedAddonSourceName(name)
+            )
+    }
+
     private func loadHomeCatalogs(
         onUpdate: (([NuvioCatalog]) -> Void)? = nil
     ) async throws -> [NuvioCatalog] {
         let metadataContext = Self.metadataCacheContext
         homeCatalogLoadWasPartial = false
         homeCatalogFailureSignature = nil
-        let cinemetaEnabled = Self.isCinemetaEnabled
+        let cinemetaEnabled = Self.isCinemetaEnabled && Self.isAddonVisibleOnHome(
+            id: Self.cinemetaAddonId, name: Self.cinemetaDisplayName
+        )
         let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
         let customTitles = TVHomeCatalogOrder.customCatalogTitles()
         let specs: [(id: String, name: String, type: String, catalogId: String)] = [
@@ -670,6 +683,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
     private func simklPlanToWatchCatalogs() async -> [NuvioCatalog] {
         let metadataContext = Self.metadataCacheContext
         guard SimklSettingsStore.isPlanToWatchHomeCatalogsEnabled,
+              Self.isAddonVisibleOnHome(id: "simkl", name: "Simkl"),
               SimklRuntimeSession.authenticatedState() != nil else {
             return []
         }
@@ -824,6 +838,12 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 addonName: addonDisplayName,
                 with: registeredRows
             )
+
+            // Keep discovery rows available in Settings, but do not fetch
+            // catalog contents for a provider hidden from Home as a group.
+            guard Self.isAddonVisibleOnHome(id: manifest.id, name: addonDisplayName) else {
+                continue
+            }
 
             let eligible = manifestEligible.filter { catalog in
                 CatalogHomeVisibilityResolver.shouldInclude(
