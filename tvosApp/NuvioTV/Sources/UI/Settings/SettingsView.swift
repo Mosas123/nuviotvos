@@ -8938,6 +8938,8 @@ private struct LanguagePickerListRow: View {
 private struct AdvancedSettingsView: View {
     let accentColor: Color
 
+    @AppStorage(PlaybackTimelineRecorder.enabledKey) private var timelineEnabled = false
+    @State private var showingPlaybackHistory = false
     @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
     @AppStorage(SettingsKey.playbackDiagnostics) private var playbackDiagnostics = false
     @AppStorage(SettingsKey.playbackDebug) private var playbackDebug = false
@@ -8978,6 +8980,25 @@ private struct AdvancedSettingsView: View {
                     isOn: $playbackDiagnostics,
                     accentColor: accentColor
                 )
+
+                #if os(tvOS)
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_persistent_playback_history", fallback: "Persistent Playback History"),
+                    subtitle: L10n.string("tvos_settings_persistent_playback_history_detail", fallback: "Save recent playback actions on this Apple TV for troubleshooting. Off by default; no automatic upload."),
+                    isOn: Binding(get: { timelineEnabled }, set: { enabled in
+                        PlaybackTimelineRecorder.setEnabled(enabled)
+                        timelineEnabled = enabled
+                    }),
+                    accentColor: accentColor
+                )
+                SettingsActionRow(
+                    title: L10n.string("tvos_settings_view_playback_history", fallback: "View / Export Diagnostic History"),
+                    subtitle: L10n.string("tvos_settings_view_playback_history_detail", fallback: "Inspect, delete or download recent diagnostic history from this Apple TV"),
+                    value: L10n.string("action_open", fallback: "Open"),
+                    accentColor: accentColor,
+                    action: { showingPlaybackHistory = true }
+                )
+                #endif
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_playback_debug_overlay", fallback: "Playback Debug Overlay"),
@@ -9082,6 +9103,11 @@ private struct AdvancedSettingsView: View {
                 )
             }
         }
+        #if os(tvOS)
+        .fullScreenCover(isPresented: $showingPlaybackHistory) {
+            PlaybackDiagnosticHistoryView(accentColor: accentColor)
+        }
+        #endif
     }
 
     private var cacheActionValue: String {
@@ -9110,6 +9136,8 @@ private struct AdvancedSettingsView: View {
     private func resetSettings() {
         // Reset only the active profile's settings, not other profiles'.
         let defaults = ProfileSettings.current
+        PlaybackTimelineRecorder.setEnabled(false)
+        defaults.removeObject(forKey: PlaybackTimelineRecorder.enabledKey)
         SettingsKey.all.forEach { defaults.removeObject(forKey: $0) }
         defaults.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
         defaults.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonNames)
