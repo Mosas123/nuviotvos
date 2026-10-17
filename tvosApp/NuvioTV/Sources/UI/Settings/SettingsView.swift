@@ -11345,6 +11345,8 @@ private struct CollectionsSettingsSection: View {
     let accentColor: Color
 
     @State private var collections: [[String: Any]] = []
+    @State private var sidebarCollectionIDs: Set<String> = []
+    @State private var disabledHomeCollectionIDs: Set<String> = []
     @State private var activeSheet: CollectionsSheet?
     @State private var statusToast: String?
     @State private var toastClearTask: Task<Void, Never>?
@@ -11377,6 +11379,36 @@ private struct CollectionsSettingsSection: View {
                         onTogglePin: { togglePin(index) },
                         onDelete: { remove(index) }
                     )
+                    if let id = collection["id"] as? String, !id.isEmpty {
+                        SettingsToggleRow(
+                            title: L10n.string("nav_home", fallback: "Home"),
+                            subtitle: (collection["title"] as? String) ?? "Collection",
+                            isOn: Binding(
+                                get: { !disabledHomeCollectionIDs.contains(id) },
+                                set: { enabled in
+                                    TVHomeCatalogOrder.setCollectionEnabled(id, isEnabled: enabled)
+                                    disabledHomeCollectionIDs = TVHomeCatalogOrder.disabledCollectionIds()
+                                    NuvioSyncManager.current?.noteHomeCatalogSettingsChangedLocally()
+                                }
+                            ),
+                            accentColor: accentColor
+                        )
+                        if #available(tvOS 18.0, *) {
+                            SettingsToggleRow(
+                                title: L10n.string("collection_home_sidebar_title", fallback: "Collection pages in sidebar"),
+                                subtitle: L10n.string("collection_home_sidebar_subtitle", fallback: "Browse each collection folder with your Home layout. Your Home stays customizable."),
+                                isOn: Binding(
+                                    get: { sidebarCollectionIDs.contains(id) },
+                                    set: { enabled in
+                                        let profileID = CollectionsStore.activeProfileId
+                                        CollectionSidebarPreferences.setEnabled(enabled, collectionID: id, profileID: profileID)
+                                        sidebarCollectionIDs = CollectionSidebarPreferences.collectionIDs(profileID: profileID)
+                                    }
+                                ),
+                                accentColor: accentColor
+                            )
+                        }
+                    }
                 }
             }
 
@@ -11387,9 +11419,18 @@ private struct CollectionsSettingsSection: View {
                     .transition(.opacity)
             }
         }
-        .onAppear { collections = CollectionsStore.rawCollections() }
+        .onAppear(perform: reloadPlacement)
         .onReceive(NotificationCenter.default.publisher(for: CollectionsStore.changedNotification).receive(on: RunLoop.main)) { _ in
-            collections = CollectionsStore.rawCollections()
+            reloadPlacement()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TVHomeCatalogOrder.changedNotification).receive(on: RunLoop.main)) { _ in
+            reloadPlacement()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NuvioSyncManager.homeContentSyncedNotification).receive(on: RunLoop.main)) { _ in
+            reloadPlacement()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CollectionSidebarPreferences.changedNotification).receive(on: RunLoop.main)) { _ in
+            reloadPlacement()
         }
         .sheet(item: $activeSheet) { sheet in
             Group {
@@ -11403,7 +11444,7 @@ private struct CollectionsSettingsSection: View {
                         collections.append(payload)
                         CollectionsStore.saveLocalEdit(collections)
                         let title = (payload["title"] as? String) ?? "Collection"
-                        showToast("Added \(title) to Home")
+                        showToast(title)
                     }
                 case .editor(let index):
                     CollectionEditorSheet(
@@ -11427,6 +11468,12 @@ private struct CollectionsSettingsSection: View {
             // Let liquid glass frost over Settings instead of an opaque sheet plate.
             .modifier(ClearPresentationBackgroundIfAvailable())
         }
+    }
+
+    private func reloadPlacement() {
+        collections = CollectionsStore.rawCollections()
+        sidebarCollectionIDs = CollectionSidebarPreferences.collectionIDs(profileID: CollectionsStore.activeProfileId)
+        disabledHomeCollectionIDs = TVHomeCatalogOrder.disabledCollectionIds()
     }
 
     private func detailText(for collection: [String: Any]) -> String {

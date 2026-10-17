@@ -1,5 +1,7 @@
 {
   "ar": {
+    "collection_home_sidebar_title": "صفحات المجموعات في الشريط الجانبي",
+    "collection_home_sidebar_subtitle": "تصفّح كل مجلد مجموعة بتخطيط الشاشة الرئيسية الذي اخترته. تبقى الشاشة الرئيسية قابلة للتخصيص.",
     "about_check_updates": "التحقق من التحديثات",
     "about_check_updates_subtitle": "تحميل أحدث إصدار",
     "about_licenses_attributions": "التراخيص والإسناد",
@@ -2143,6 +2145,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "bg": {
+    "collection_home_sidebar_title": "Страници на колекциите в страничната лента",
+    "collection_home_sidebar_subtitle": "Разглеждайте всяка папка от колекция с избрания изглед на началния екран. Началният екран остава персонализируем.",
     "about_check_updates": "Провери за актуализации",
     "about_check_updates_subtitle": "Изтегли най-новата версия",
     "about_licenses_attributions": "Лицензи и атрибути",
@@ -4286,6 +4290,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "bs": {
+    "collection_home_sidebar_title": "Stranice kolekcija u bočnoj traci",
+    "collection_home_sidebar_subtitle": "Pregledajte svaku fasciklu kolekcije uz odabrani izgled početnog ekrana. Početni ekran i dalje možete prilagođavati.",
     "about_check_updates": "Provjeri ažuriranja",
     "about_check_updates_subtitle": "Preuzmi najnoviju verziju",
     "about_licenses_attributions": "Licence & Attribution",
@@ -6429,6 +6435,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "cs": {
+    "collection_home_sidebar_title": "Stránky kolekcí v postranním panelu",
+    "collection_home_sidebar_subtitle": "Procházejte každou složku kolekce se zvoleným rozvržením úvodní obrazovky. Úvodní obrazovku můžete nadále přizpůsobovat.",
     "about_check_updates": "Zkontrolovat aktualizace",
     "about_check_updates_subtitle": "Stáhnout nejnovější verzi",
     "about_licenses_attributions": "Licence a atribuce",
@@ -8572,6 +8580,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "da": {
+    "collection_home_sidebar_title": "Samlingssider i sidepanelet",
+    "collection_home_sidebar_subtitle": "Gennemse hver samlingsmappe med dit valgte startlayout. Du kan stadig tilpasse startskærmen.",
     "about_check_updates": "Søg efter opdateringer",
     "about_check_updates_subtitle": "Download nyeste version",
     "about_licenses_attributions": "Licenser & attributioner",
@@ -10715,6 +10725,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "de": {
+    "collection_home_sidebar_title": "Sammlungsseiten in der Seitenleiste",
+    "collection_home_sidebar_subtitle": "Durchsuche jeden Sammlungsordner mit deinem Startseitenlayout. Deine Startseite bleibt anpassbar.",
     "about_check_updates": "Nach Updates suchen",
     "about_check_updates_subtitle": "Neueste Version herunterladen",
     "about_licenses_attributions": "Lizenzen & Quellen",
@@ -12858,6 +12870,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "el": {
+    "collection_home_sidebar_title": "Σελίδες συλλογών στην πλαϊνή στήλη",
+    "collection_home_sidebar_subtitle": "Περιηγηθείτε σε κάθε φάκελο συλλογής με τη διάταξη αρχικής οθόνης που επιλέξατε. Η αρχική οθόνη παραμένει προσαρμόσιμη.",
     "about_check_updates": "Έλεγχος ενημερώσεων",
     "about_check_updates_subtitle": "Λήψη τελευταίας έκδοσης",
     "about_licenses_attributions": "Άδειες & αναγνώριση",
@@ -15001,6 +15015,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "en": {
+    "collection_home_sidebar_title": "Collection pages in sidebar",
+    "collection_home_sidebar_subtitle": "Browse each collection folder with your Home layout. Your Home stays customizable.",
     "about_check_updates": "Check for updates",
     "about_check_updates_subtitle": "Download latest release",
     "about_licenses_attributions": "Licenses & Attribution",
@@ -17146,6 +17162,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "es": {
+    "collection_home_sidebar_title": "Páginas de colecciones en el menú lateral",
+    "collection_home_sidebar_subtitle": "Explora cada carpeta de colección con tu diseño de Inicio. Puedes seguir personalizando Inicio.",
     "about_check_updates": "Buscar actualizaciones",
     "about_check_updates_subtitle": "Descargar la última versión",
     "about_licenses_attributions": "Licencias y atribución",
@@ -19289,6 +19307,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "es-419": {
+    "collection_home_sidebar_title": "Páginas de colecciones en el menú lateral",
+    "collection_home_sidebar_subtitle": "Explora cada carpeta de colección con tu diseño de Inicio. Puedes seguir personalizando Inicio.",
     "about_check_updates": "Buscar actualizaciones",
     "about_check_updates_subtitle": "Descargar la última versión",
     "about_licenses_attributions": "Licencias y atribuciones",
@@ -21432,6 +21452,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "fr": {
+    "collection_home_sidebar_title": "Pages des collections dans la barre latérale",
+    "collection_home_sidebar_subtitle": "Parcourez chaque dossier de collection avec la disposition de votre accueil. Votre accueil reste personnalisable.",
     "about_check_updates": "Vérifier les mises à jour",
     "about_check_updates_subtitle": "Télécharger la dernière version",
     "about_licenses_attributions": "Licences & attributions",
@@ -23575,6 +23597,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "he": {
+    "collection_home_sidebar_title": "דפי אוספים בסרגל הצד",
+    "collection_home_sidebar_subtitle": "עיון בכל תיקיית אוסף בפריסת מסך הבית שבחרת. מסך הבית נשאר ניתן להתאמה אישית.",
     "about_check_updates": "בדוק עדכונים",
     "about_check_updates_subtitle": "הורד את הגרסה האחרונה",
     "about_licenses_attributions": "רישיונות וקרדיטים",
@@ -25718,6 +25742,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "hi": {
+    "collection_home_sidebar_title": "साइडबार में संग्रह के पेज",
+    "collection_home_sidebar_subtitle": "अपने होम लेआउट के साथ हर संग्रह फ़ोल्डर देखें। होम को अपनी पसंद के अनुसार बदलना जारी रख सकते हैं।",
     "about_check_updates": "अपडेट जांचें",
     "about_check_updates_subtitle": "नवीनतम रिलीज़ डाउनलोड करें",
     "about_licenses_attributions": "लाइसेंस और एट्रिब्यूशन",
@@ -27861,6 +27887,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "hu": {
+    "collection_home_sidebar_title": "Gyűjteményoldalak az oldalsávban",
+    "collection_home_sidebar_subtitle": "Böngészd a gyűjteménymappákat a kiválasztott kezdőképernyő-elrendezéssel. A kezdőképernyő továbbra is testreszabható.",
     "about_check_updates": "Frissítések keresése",
     "about_check_updates_subtitle": "A legújabb verzió letöltése",
     "about_licenses_attributions": "Licencek és forrásmegjelölések",
@@ -30004,6 +30032,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "in": {
+    "collection_home_sidebar_title": "Halaman koleksi di bilah samping",
+    "collection_home_sidebar_subtitle": "Jelajahi setiap folder koleksi dengan tata letak Beranda pilihan Anda. Beranda tetap dapat disesuaikan.",
     "about_check_updates": "Periksa pembaruan",
     "about_check_updates_subtitle": "Unduh rilis terbaru",
     "about_licenses_attributions": "Lisensi & Atribusi",
@@ -32147,6 +32177,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "it": {
+    "collection_home_sidebar_title": "Pagine delle raccolte nella barra laterale",
+    "collection_home_sidebar_subtitle": "Esplora ogni cartella delle raccolte con il layout scelto per la schermata Home. Puoi continuare a personalizzare la Home.",
     "about_check_updates": "Controlla aggiornamenti",
     "about_check_updates_subtitle": "Scarica l'ultima versione",
     "about_licenses_attributions": "Licenze e attribuzioni",
@@ -34290,6 +34322,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ja": {
+    "collection_home_sidebar_title": "サイドバーにコレクションページを表示",
+    "collection_home_sidebar_subtitle": "各コレクションフォルダを選択したホームのレイアウトで閲覧できます。ホームは引き続きカスタマイズできます。",
     "about_check_updates": "アップデートを確認",
     "about_check_updates_subtitle": "最新リリースをダウンロード",
     "about_licenses_attributions": "ライセンス & 帰属",
@@ -36433,6 +36467,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "lt": {
+    "collection_home_sidebar_title": "Kolekcijų puslapiai šoninėje juostoje",
+    "collection_home_sidebar_subtitle": "Naršykite kiekvieną kolekcijos aplanką naudodami pasirinktą pradžios ekrano išdėstymą. Pradžios ekraną ir toliau galima tinkinti.",
     "about_check_updates": "Tikrinti atnaujinimus",
     "about_check_updates_subtitle": "Atsisiųsti naujausią versiją",
     "about_licenses_attributions": "Licencijos ir priskyrimas",
@@ -38576,6 +38612,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "nl": {
+    "collection_home_sidebar_title": "Collectiepagina’s in de zijbalk",
+    "collection_home_sidebar_subtitle": "Blader door elke collectiemap met je gekozen indeling voor het startscherm. Je kunt je startscherm blijven aanpassen.",
     "about_check_updates": "Controleren op updates",
     "about_check_updates_subtitle": "Download de nieuwste versie",
     "about_licenses_attributions": "Licenties en toeschrijving",
@@ -40719,6 +40757,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "no": {
+    "collection_home_sidebar_title": "Samlingssider i sidepanelet",
+    "collection_home_sidebar_subtitle": "Bla gjennom hver samlingsmappe med ditt valgte startoppsett. Du kan fortsatt tilpasse startskjermen.",
     "about_check_updates": "Se etter oppdateringer",
     "about_check_updates_subtitle": "Last ned siste versjon",
     "about_licenses_attributions": "Lisenser og attribusjon",
@@ -42862,6 +42902,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "pl": {
+    "collection_home_sidebar_title": "Strony kolekcji na pasku bocznym",
+    "collection_home_sidebar_subtitle": "Przeglądaj każdy folder kolekcji w wybranym układzie ekranu głównego. Ekran główny nadal można dostosowywać.",
     "about_check_updates": "Sprawdź aktualizacje",
     "about_check_updates_subtitle": "Pobierz najnowsze wydanie",
     "about_licenses_attributions": "Licencje i atrybucje",
@@ -45005,6 +45047,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "pt-BR": {
+    "collection_home_sidebar_title": "Páginas de coleções na barra lateral",
+    "collection_home_sidebar_subtitle": "Explore cada pasta de coleção com o layout escolhido para o Início. Você pode continuar personalizando o Início.",
     "about_check_updates": "Verificar atualizações",
     "about_check_updates_subtitle": "Baixar a versão mais recente",
     "about_licenses_attributions": "Licenças e Atribuições",
@@ -47148,6 +47192,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "pt-PT": {
+    "collection_home_sidebar_title": "Páginas de coleções na barra lateral",
+    "collection_home_sidebar_subtitle": "Explore cada pasta de coleção com a disposição escolhida para o Início. Pode continuar a personalizar o Início.",
     "about_check_updates": "Procurar atualizações",
     "about_check_updates_subtitle": "Transferir a versão mais recente",
     "about_licenses_attributions": "Licenças e atribuição",
@@ -49291,6 +49337,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ro": {
+    "collection_home_sidebar_title": "Pagini ale colecțiilor în bara laterală",
+    "collection_home_sidebar_subtitle": "Explorează fiecare dosar de colecție cu aspectul ales pentru ecranul principal. Ecranul principal rămâne personalizabil.",
     "about_check_updates": "Verifică actualizările",
     "about_check_updates_subtitle": "Descarcă cea mai recentă versiune",
     "about_licenses_attributions": "Licențe și atribuire",
@@ -51434,6 +51482,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ru": {
+    "collection_home_sidebar_title": "Страницы коллекций в боковом меню",
+    "collection_home_sidebar_subtitle": "Просматривайте каждую папку коллекции с выбранным оформлением главного экрана. Главный экран по-прежнему можно настраивать.",
     "about_check_updates": "Проверить обновления",
     "about_check_updates_subtitle": "Загрузить последний релиз",
     "about_licenses_attributions": "Лицензии и указание авторства",
@@ -53577,6 +53627,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "sk": {
+    "collection_home_sidebar_title": "Stránky kolekcií na bočnom paneli",
+    "collection_home_sidebar_subtitle": "Prehliadajte každý priečinok kolekcie so zvoleným rozložením úvodnej obrazovky. Úvodnú obrazovku môžete naďalej prispôsobovať.",
     "about_check_updates": "Skontrolovať aktualizácie",
     "about_check_updates_subtitle": "Stiahnuť najnovšiu verziu",
     "about_licenses_attributions": "Licencie a atribúcie",
@@ -55720,6 +55772,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "sl": {
+    "collection_home_sidebar_title": "Strani zbirk v stranski vrstici",
+    "collection_home_sidebar_subtitle": "Brskajte po vsaki mapi zbirke z izbrano postavitvijo začetnega zaslona. Začetni zaslon lahko še naprej prilagajate.",
     "about_check_updates": "Preveri za posodobitve",
     "about_check_updates_subtitle": "Prenesi najnovejšo različico",
     "about_licenses_attributions": "Licence in avtorstvo",
@@ -57863,6 +57917,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "sv": {
+    "collection_home_sidebar_title": "Samlingssidor i sidofältet",
+    "collection_home_sidebar_subtitle": "Bläddra i varje samlingsmapp med din valda startlayout. Du kan fortfarande anpassa startskärmen.",
     "about_check_updates": "Sök efter uppdateringar",
     "about_check_updates_subtitle": "Ladda ner senaste versionen",
     "about_licenses_attributions": "Licenser och erkännande",
@@ -60006,6 +60062,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "ta": {
+    "collection_home_sidebar_title": "பக்கப்பட்டியில் தொகுப்புப் பக்கங்கள்",
+    "collection_home_sidebar_subtitle": "நீங்கள் தேர்ந்தெடுத்த முகப்புத் தளவமைப்பில் ஒவ்வொரு தொகுப்புக் கோப்புறையையும் உலாவுங்கள். முகப்பைத் தொடர்ந்து தனிப்பயனாக்கலாம்.",
     "about_check_updates": "புதுப்பிப்புகளை சரிபார்",
     "about_check_updates_subtitle": "சமீபத்திய வெளியீட்டை பதிவிறக்கு",
     "about_licenses_attributions": "உரிமங்கள் & நன்றிக்குறிப்புகள்",
@@ -62149,6 +62207,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "tr": {
+    "collection_home_sidebar_title": "Kenar çubuğunda koleksiyon sayfaları",
+    "collection_home_sidebar_subtitle": "Her koleksiyon klasörüne seçtiğiniz ana ekran düzeniyle göz atın. Ana ekranınızı özelleştirmeye devam edebilirsiniz.",
     "about_check_updates": "Güncellemeleri kontrol et",
     "about_check_updates_subtitle": "En son sürümü indir",
     "about_licenses_attributions": "Lisanslar ve Atıflar",
@@ -64292,6 +64352,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "uk": {
+    "collection_home_sidebar_title": "Сторінки колекцій у бічному меню",
+    "collection_home_sidebar_subtitle": "Переглядайте кожну папку колекції з вибраним оформленням головного екрана. Головний екран і надалі можна налаштовувати.",
     "about_check_updates": "Перевірити оновлення",
     "about_check_updates_subtitle": "Завантажити останній реліз",
     "about_licenses_attributions": "Ліцензії та зазначення авторства",
@@ -66435,6 +66497,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "vi": {
+    "collection_home_sidebar_title": "Trang bộ sưu tập trong thanh bên",
+    "collection_home_sidebar_subtitle": "Duyệt từng thư mục bộ sưu tập bằng bố cục Trang chủ bạn đã chọn. Bạn vẫn có thể tùy chỉnh Trang chủ.",
     "about_check_updates": "Kiểm tra cập nhật",
     "about_check_updates_subtitle": "Tải phiên bản mới nhất",
     "about_licenses_attributions": "Giấy phép & Ghi công",
@@ -68578,6 +68642,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "zh-CN": {
+    "collection_home_sidebar_title": "在侧边栏显示合集页面",
+    "collection_home_sidebar_subtitle": "使用你选择的主页布局浏览每个合集文件夹。主页仍可自由定制。",
     "about_check_updates": "检查更新",
     "about_check_updates_subtitle": "下载最新版本",
     "about_licenses_attributions": "许可与出处",
@@ -70721,6 +70787,8 @@
     "settings_addon_rating_custom_icon_subtitle": "Optional image URL override (e.g. GitHub raw link)"
   },
   "zh-TW": {
+    "collection_home_sidebar_title": "在側邊欄顯示收藏集頁面",
+    "collection_home_sidebar_subtitle": "使用你選擇的首頁版面瀏覽每個收藏集資料夾。首頁仍可自由自訂。",
     "about_check_updates": "檢查更新",
     "about_check_updates_subtitle": "下載最新版本",
     "about_licenses_attributions": "授權與出處",
