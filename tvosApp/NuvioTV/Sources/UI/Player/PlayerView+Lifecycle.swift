@@ -108,7 +108,7 @@ extension PlayerView {
                    !viewModel.isAdvancingEpisode,
                    !didReportPlaybackStarted {
                     didReportPlaybackStarted = true
-                    viewModel.completeStartupBenchmark()
+                    _ = viewModel.completeStartupBenchmark()
                     if !viewModel.showControls {
                         focusRemoteInput()
                     }
@@ -132,7 +132,7 @@ extension PlayerView {
                    !viewModel.isAdvancingEpisode,
                    !didReportPlaybackStarted {
                     didReportPlaybackStarted = true
-                    viewModel.completeStartupBenchmark()
+                    _ = viewModel.completeStartupBenchmark()
                     if !viewModel.showControls {
                         focusRemoteInput()
                     }

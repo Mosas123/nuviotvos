@@ -1515,7 +1515,7 @@ struct TraktProgressService {
                 store: context.store,
                 profileScope: context.profileScope
             ) else { return nil }
-            return await finalizeContinueWatchingFetch(items, context: context)
+            return finalizeContinueWatchingFetch(items, context: context)
         }
 
         if source == .mdblist {
@@ -1525,7 +1525,7 @@ struct TraktProgressService {
                 store: context.store,
                 profileScope: context.profileScope
             ) else { return nil }
-            return await finalizeContinueWatchingFetch(items, context: context)
+            return finalizeContinueWatchingFetch(items, context: context)
         }
 
         if source == .wetrakr {
@@ -1534,7 +1534,7 @@ struct TraktProgressService {
                 repository: repository,
                 store: context.store
             ) else { return nil }
-            return await finalizeContinueWatchingFetch(items, context: context)
+            return finalizeContinueWatchingFetch(items, context: context)
         }
 
         guard source == .trakt,
@@ -1673,7 +1673,7 @@ struct TraktProgressService {
             }
         }
         let items = indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
-        guard let resolvedItems = await finalizeContinueWatchingFetch(items, context: context) else {
+        guard let resolvedItems = finalizeContinueWatchingFetch(items, context: context) else {
             return nil
         }
         #if DEBUG

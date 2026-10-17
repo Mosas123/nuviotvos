@@ -80,6 +80,14 @@ final class WatchProgressFixtureCleanupTests: XCTestCase {
         }
 
         let exactMeta = makeSeriesMeta(id: "tt8888889", name: "Rewatch Series", tmdbId: 301, year: 2024)
+        let strippedMeta = NuvioMeta(
+            id: "tt8888889", name: "Rewatch Series", imdbId: nil, tmdbId: nil,
+            type: "series", year: nil
+        )
+        let sameIMDbAndTitleDifferentId = NuvioMeta(
+            id: "series-same-imdb-same-title", name: "Rewatch Series", imdbId: "tt8888889",
+            tmdbId: nil, type: "series", year: nil
+        )
         let sameIMDbDifferentTitle = makeSeriesMeta(
             id: "series-same-imdb-title", name: "Rewatch Series Remastered", tmdbId: 301, year: 2024
         )
@@ -92,6 +100,8 @@ final class WatchProgressFixtureCleanupTests: XCTestCase {
         let watchedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let watchedItems = [
             WatchedStoreItem(meta: exactMeta, watchedAt: watchedAt, season: 1, episode: 1),
+            WatchedStoreItem(meta: strippedMeta, watchedAt: watchedAt.addingTimeInterval(-0.5), season: 1, episode: 1),
+            WatchedStoreItem(meta: sameIMDbAndTitleDifferentId, watchedAt: watchedAt.addingTimeInterval(-0.75), season: 1, episode: 1),
             WatchedStoreItem(meta: sameIMDbDifferentTitle, watchedAt: watchedAt.addingTimeInterval(-1), season: 1, episode: 1),
             WatchedStoreItem(meta: sameIMDbDifferentTMDB, watchedAt: watchedAt.addingTimeInterval(-2), season: 1, episode: 1),
             WatchedStoreItem(meta: sameIMDbDifferentYear, watchedAt: watchedAt.addingTimeInterval(-3), season: 1, episode: 1),
@@ -107,8 +117,9 @@ final class WatchProgressFixtureCleanupTests: XCTestCase {
         let seeds = ContinueWatchingBuilder.watchedHistorySeeds()
         let seedKeys = Set(seeds.map { "\($0.contentId)|\($0.season ?? 0)|\($0.episode ?? 0)" })
 
-        XCTAssertFalse(seedKeys.contains("tt8888889|1|1"), "Only the exact legacy episode row is excluded")
+        XCTAssertFalse(seedKeys.contains("tt8888889|1|1"), "Both exact and stripped legacy episode rows are excluded")
         XCTAssertTrue(seedKeys.contains("tt8888889|1|2"), "Another episode of the same series remains eligible")
+        XCTAssertTrue(seedKeys.contains("series-same-imdb-same-title|1|1"), "A shared IMDb ID alone does not hide a legitimate row")
         XCTAssertTrue(seedKeys.contains("series-same-imdb-title|1|1"))
         XCTAssertTrue(seedKeys.contains("series-same-imdb-tmdb|1|1"))
         XCTAssertTrue(seedKeys.contains("series-same-imdb-year|1|1"))

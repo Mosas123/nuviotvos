@@ -541,11 +541,8 @@ final class ASSRenderCoordinator {
                     return true
                 }
                 guard shouldRegister else { continue }
-                if let provider = CGDataProvider(data: font.data as CFData),
-                   let cgFont = CGFont(provider) {
-                    var error: Unmanaged<CFError>?
-                    _ = CTFontManagerRegisterGraphicsFont(cgFont, &error)
-                }
+                var error: Unmanaged<CFError>?
+                CTFontManagerRegisterFontsForURL(directory.appendingPathComponent(name) as CFURL, .process, &error)
             }
 
             guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }

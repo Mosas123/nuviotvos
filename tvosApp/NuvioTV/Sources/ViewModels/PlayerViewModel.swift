@@ -4523,7 +4523,7 @@ class PlayerViewModel: ObservableObject {
             let showLanguageOverride = activeMeta.flatMap { ShowAudioLanguageStore.canonicalKey(meta: $0) }
                 .flatMap { ShowAudioLanguageStore.getLanguage(for: $0) }
             let showPrefersDifferentLanguage: Bool
-            if let showLanguageOverride,
+            if showLanguageOverride != nil,
                let target = SubtitleLanguagePreferences.preferredAudioLanguage(meta: activeMeta) {
                 showPrefersDifferentLanguage = !audioTrackMatches(audio, language: target)
             } else {

@@ -1222,7 +1222,6 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
         let videoCodec = getString("current-tracks/video/codec") ?? ""
         let gamma = (getString("video-params/gamma") ?? "").lowercased()
-        let primaries = (getString("video-params/primaries") ?? "").lowercased()
         let dvProfile = getInt("current-tracks/video/dolby-vision-profile")
         let dynamicRange: String
         if dvProfile > 0 {

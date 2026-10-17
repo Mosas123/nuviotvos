@@ -1217,7 +1217,7 @@ enum TmdbDetailsService {
         if parts.count > 1, parts[1].count == 2 {
             regions.append(parts[1].uppercased())
         }
-        let currentRegion = Locale.current.region?.identifier.uppercased() ?? Locale.current.regionCode?.uppercased()
+        let currentRegion = Locale.current.region?.identifier.uppercased()
         if let currentRegion, currentRegion.count == 2, !regions.contains(currentRegion) {
             regions.append(currentRegion)
         }

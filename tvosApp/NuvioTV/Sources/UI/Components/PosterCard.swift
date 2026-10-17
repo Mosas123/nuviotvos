@@ -2428,6 +2428,9 @@ private func downsamplePosterImage(data: Data, maxPixelSize: Int) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
         return UIImage(data: data)
     }
+    guard CGImageSourceGetCount(source) > 0, CGImageSourceGetType(source) != nil else {
+        return UIImage(data: data)
+    }
 
     let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,

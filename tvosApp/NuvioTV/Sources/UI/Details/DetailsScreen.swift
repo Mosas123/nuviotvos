@@ -6349,6 +6349,9 @@ private struct TvDetailsPersonCard: View {
             guard let source = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
                 return UIImage(data: data)
             }
+            guard CGImageSourceGetCount(source) > 0, CGImageSourceGetType(source) != nil else {
+                return UIImage(data: data)
+            }
             let thumbnailOptions: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceShouldCacheImmediately: true,

@@ -2976,6 +2976,10 @@ private func downsampleBackdropImage(data: Data, maxPixelSize: CGFloat) -> UIIma
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
             return nil
         }
+        guard CGImageSourceGetCount(source) > 0,
+              CGImageSourceGetType(source) != nil else {
+            return nil
+        }
         let thumbnailOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
@@ -4309,7 +4313,11 @@ struct TVHomeView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: WatchedStore.changedNotification).receive(on: RunLoop.main)) { _ in
-            guard isActive && !isFullScreenOverlayPresented else { return }
+            guard isActive else { return }
+            if isFullScreenOverlayPresented {
+                pendingContinueWatchingRefreshAfterOverlay = true
+                return
+            }
             refreshWatchedTitles()
             // A watched mark can be the only history left for a completed
             // series. Rebuild the local row so a newly aired episode can seed a
@@ -4435,14 +4443,16 @@ struct TVHomeView: View {
         .onChange(of: isFullScreenOverlayPresented) { oldVal, isPresented in
             if oldVal && !isPresented && isActive {
                 checkAndTriggerAutoRefresh()
-                pendingContinueWatchingRefreshAfterOverlay = false
-                if usesRemoteProgress {
-                    scheduleContinueWatchingRefresh()
-                    scheduleTraktWatchedHistorySync()
-                } else {
-                    ContinueWatchingBuilder.scheduleRebuild(reason: "full-screen overlay dismissed")
-                    refreshContinueWatching()
-                    refreshWatchedTitles()
+                if pendingContinueWatchingRefreshAfterOverlay {
+                    pendingContinueWatchingRefreshAfterOverlay = false
+                    if usesRemoteProgress {
+                        scheduleContinueWatchingRefresh()
+                        scheduleTraktWatchedHistorySync()
+                    } else {
+                        ContinueWatchingBuilder.scheduleRebuild(reason: "full-screen overlay dismissed")
+                        refreshContinueWatching()
+                        refreshWatchedTitles()
+                    }
                 }
             }
         }
@@ -4534,13 +4544,15 @@ struct TVHomeView: View {
         }
         .onChange(of: detailsDidDisappearGeneration) { _, generation in
             guard !isFullScreenOverlayPresented, isActive else { return }
-            pendingContinueWatchingRefreshAfterOverlay = false
-            if usesRemoteProgress {
-                scheduleContinueWatchingRefresh()
-                scheduleTraktWatchedHistorySync()
-            } else {
-                refreshContinueWatching()
-                refreshWatchedTitles()
+            if pendingContinueWatchingRefreshAfterOverlay {
+                pendingContinueWatchingRefreshAfterOverlay = false
+                if usesRemoteProgress {
+                    scheduleContinueWatchingRefresh()
+                    scheduleTraktWatchedHistorySync()
+                } else {
+                    refreshContinueWatching()
+                    refreshWatchedTitles()
+                }
             }
             let savedTarget = overlayRestoreCardID
                 ?? focusWork.pendingOverlayRestoreCardID
@@ -5021,11 +5033,6 @@ struct TVHomeView: View {
             overlayRestoreCardID = target
             TVHomeDebugTrace.log("home.overlay.dismissal fallback restoring to target=\(target) gen=\(overlayRestoreGeneration)")
             restoreOverlayFocus(to: target, generation: overlayRestoreGeneration)
-        }
-
-        if !isPresented {
-            refreshContinueWatching()
-            refreshWatchedTitles()
         }
     }
 

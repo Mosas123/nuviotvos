@@ -186,7 +186,7 @@ enum ContinueWatchingBuilder {
     static private(set) var diagnostic = "not built"
 
     /// Coalesces rebuild requests; the newest request wins. Debounced slightly by default to avoid duplicate builds.
-    static func scheduleRebuild(reason: String, delayMs: UInt64 = 150) {
+    static func scheduleRebuild(reason: String, delayMs: UInt64 = 400) {
         lock.lock()
         rebuildTask?.cancel()
         generation &+= 1
@@ -268,6 +268,17 @@ enum ContinueWatchingBuilder {
         let currentPlan = planEntries(candidates: candidates, seeds: seeds)
         let existingItems = ContinueWatchingStore.items()
         print("[ContinueWatchingBuilder] rebuild: plan count=\(currentPlan.count)")
+
+        let isUnchanged = await MainActor.run {
+            materializedProfileId == profileId
+                && currentPlan == plan
+                && !materialized.isEmpty
+                && existingItems == persistedFirstPageItems
+        }
+        if isUnchanged {
+            print("[ContinueWatchingBuilder] rebuild: plan and items unchanged, skipping re-materialization")
+            return
+        }
 
         let targetCount = min(max(currentPlan.count, pageSize), initialResolutionLimit)
         let page = await materializePage(
@@ -1015,17 +1026,24 @@ enum ContinueWatchingBuilder {
 
     /// This old synthetic watched row is stored by a legacy regression fixture.
     /// Its complete metadata signature is intentionally required so a shared
-    /// IMDb id alone can never hide legitimate watched history.
+    /// IMDb id alone can never hide legitimate watched history, but allows nil
+    /// for optional metadata fields omitted in serialized stored rows.
     private static func isKnownWatchedHistoryFixture(_ item: WatchedStoreItem) -> Bool {
         let meta = item.meta
-        return meta.id == "tt8888889"
-            && meta.imdbId == "tt8888889"
-            && meta.name == "Rewatch Series"
-            && meta.tmdbId == 301
-            && meta.type == "series"
-            && meta.year == 2024
-            && item.season == 1
-            && item.episode == 1
+        guard meta.id == "tt8888889",
+              meta.name == "Rewatch Series",
+              meta.type == "series",
+              item.season == 1,
+              item.episode == 1 else {
+            return false
+        }
+        if let tmdbId = meta.tmdbId, tmdbId != 301 {
+            return false
+        }
+        if let year = meta.year, year != 2024 {
+            return false
+        }
+        return true
     }
 
     /// Merge playback-completion and watched-history seeds without producing a
