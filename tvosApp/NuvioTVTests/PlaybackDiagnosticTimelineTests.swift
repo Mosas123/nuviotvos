@@ -2,6 +2,43 @@ import Foundation
 import XCTest
 @testable import NuvioTV
 
+@MainActor
+private final class ExportServerStateProbe {
+    private var readyExpectation: XCTestExpectation?
+    private var stoppedExpectation: XCTestExpectation?
+    private var readyURL: URL?
+    private var failed = false
+
+    init(readyExpectation: XCTestExpectation, stoppedExpectation: XCTestExpectation) {
+        self.readyExpectation = readyExpectation
+        self.stoppedExpectation = stoppedExpectation
+    }
+
+    func receive(_ state: PlaybackDiagnosticExportServer.State) {
+        let expectationToFulfill: XCTestExpectation?
+        switch state {
+        case .ready(let url):
+            readyURL = url
+            expectationToFulfill = readyExpectation
+            readyExpectation = nil
+        case .failed:
+            failed = true
+            expectationToFulfill = readyExpectation
+            readyExpectation = nil
+        case .stopped:
+            expectationToFulfill = stoppedExpectation
+            stoppedExpectation = nil
+        default:
+            expectationToFulfill = nil
+        }
+        expectationToFulfill?.fulfill()
+    }
+
+    func readiness() -> (url: URL?, failed: Bool) {
+        return (readyURL, failed)
+    }
+}
+
 final class PlaybackDiagnosticTimelineTests: XCTestCase {
     private func session() -> PlaybackDiagnosticTimeline.Session {
         .init(id: UUID(), startedAt: Date(timeIntervalSince1970: 100),
@@ -101,5 +138,42 @@ final class PlaybackDiagnosticTimelineTests: XCTestCase {
         XCTAssertFalse(accepts("GET \(path) HTTP/1.1\r\n\r\nbody"))
         XCTAssertFalse(accepts("GET \(path) HTTP/1.1\r\n"))
         XCTAssertFalse(accepts("GET \(path) HTTP/1.1\r\nX: " + String(repeating: "a", count: 8192) + "\r\n\r\n"))
+    }
+
+    @MainActor
+    func testExportServerServesExactReportAndStops() async throws {
+        let report = Data(#"{"schemaVersion":1,"sessions":[]}"#.utf8)
+        let server = PlaybackDiagnosticExportServer()
+        let ready = expectation(description: "Export listener becomes ready")
+        let stopped = expectation(description: "Export listener stops")
+        let stateProbe = ExportServerStateProbe(readyExpectation: ready, stoppedExpectation: stopped)
+        var didRequestStop = false
+        defer {
+            if !didRequestStop { server.stop() }
+        }
+
+        server.start(report: report) { state in
+            Task { @MainActor in stateProbe.receive(state) }
+        }
+        await fulfillment(of: [ready], timeout: 10)
+        let readiness = stateProbe.readiness()
+        XCTAssertFalse(readiness.failed, "Listener startup should not fail")
+        let url = try XCTUnwrap(readiness.url, "Listener should publish its exact export URL")
+
+        let (body, response) = try await URLSession.shared.data(from: url)
+        let http = try XCTUnwrap(response as? HTTPURLResponse)
+        XCTAssertEqual(http.statusCode, 200)
+        XCTAssertEqual(http.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(body, report)
+
+        let extraPathURL = url.appendingPathComponent("extra")
+        let (extraBody, extraResponse) = try await URLSession.shared.data(from: extraPathURL)
+        let extraHTTP = try XCTUnwrap(extraResponse as? HTTPURLResponse)
+        XCTAssertEqual(extraHTTP.statusCode, 404)
+        XCTAssertTrue(extraBody.isEmpty)
+
+        server.stop()
+        didRequestStop = true
+        await fulfillment(of: [stopped], timeout: 3)
     }
 }

@@ -31,37 +31,37 @@ final class PlaybackDiagnosticExportServer: @unchecked Sendable {
                 let listener = try NWListener(using: parameters, on: .any)
                 listener.newConnectionLimit = 16
                 self.listener = listener
-                listener.stateUpdateHandler = { [weak self, weak listener] state in
-                    guard let self, self.generation == current else { return }
+                listener.stateUpdateHandler = { [weak server = self, weak listener] state in
+                    guard let server, server.generation == current else { return }
                     switch state {
                     case .ready:
                         guard let port = listener?.port,
                               let url = URL(string: "http://\(host):\(port.rawValue)\(path)") else {
-                            self.stopOnQueue()
+                            server.stopOnQueue()
                             changed(.failed)
                             return
                         }
                         changed(.ready(url))
                     case .failed:
-                        self.stopOnQueue()
+                        server.stopOnQueue()
                         changed(.failed)
                     default: break
                     }
                 }
-                listener.newConnectionHandler = { [weak self] connection in
-                    guard let self, self.generation == current, self.connections.count < 4 else {
+                listener.newConnectionHandler = { [weak server = self] connection in
+                    guard let server, server.generation == current, server.connections.count < 4 else {
                         connection.cancel()
                         return
                     }
                     let id = UUID()
-                    self.connections[id] = connection
-                    connection.start(queue: self.queue)
-                    self.receive(connection, id: id, path: path, report: report, buffered: Data())
-                    self.queue.asyncAfter(deadline: .now() + 10) { [weak self] in self?.finish(id) }
+                    server.connections[id] = connection
+                    connection.start(queue: server.queue)
+                    server.receive(connection, id: id, path: path, report: report, buffered: Data())
+                    server.queue.asyncAfter(deadline: .now() + 10) { [weak server] in server?.finish(id) }
                 }
-                let expiry = DispatchWorkItem { [weak self] in
-                    guard let self, self.generation == current else { return }
-                    self.stopOnQueue()
+                let expiry = DispatchWorkItem { [weak server = self] in
+                    guard let server, server.generation == current else { return }
+                    server.stopOnQueue()
                     changed(.stopped)
                 }
                 self.expiry = expiry

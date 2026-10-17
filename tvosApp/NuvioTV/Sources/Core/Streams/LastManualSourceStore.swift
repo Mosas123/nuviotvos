@@ -11,6 +11,10 @@ enum LastManualSourceStore {
         (preferences ?? ProfileSettings.current).bool(forKey: SettingsKey.rememberLastSourceFocus)
     }
 
+    static func eraseAll(store: UserDefaults = .standard) {
+        store.removeObject(forKey: storageKey)
+    }
+
     private struct Entry: Codable {
         let sourceDigest: String
         let updatedAt: Date

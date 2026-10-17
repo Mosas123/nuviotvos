@@ -16,10 +16,12 @@ final class LastManualSourceStoreTests: XCTestCase {
         withStore { store in
             let preference = SettingsKey.rememberLastSourceFocus
             store.removeObject(forKey: preference)
+            @MainActor
             func remember(_ source: String) {
                 LastManualSourceStore.remember(sourceID: source, profileID: "a", metaID: "movie",
                     type: "movie", season: nil, episode: nil, store: store, preferences: store)
             }
+            @MainActor
             func match() -> String? {
                 LastManualSourceStore.matchingID(in: ["hash:first", "hash:second"], profileID: "a",
                     metaID: "movie", type: "movie", season: nil, episode: nil, store: store, preferences: store)
@@ -96,13 +98,61 @@ final class LastManualSourceStoreTests: XCTestCase {
                     profileID: "private-profile", metaID: "movie-\(index)", type: "movie",
                     season: nil, episode: nil, store: store, preferences: store)
             }
-            let data = store.dictionaryRepresentation().values.compactMap { $0 as? Data }.first!
+            guard let data = store.data(forKey: "nuvio.tv.manualSourceFocus.v1") else {
+                XCTFail("Expected persisted manual source history")
+                return
+            }
             let entries = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
             XCTAssertEqual(entries.count, 400)
             let raw = String(decoding: data, as: UTF8.self)
             XCTAssertFalse(raw.contains("private-secret"))
             XCTAssertFalse(raw.contains("private-profile"))
             XCTAssertFalse(raw.contains("example.test"))
+        }
+    }
+
+    func testEraseAllPreventsHistoryLeakWhenAccountReusesProfileID() {
+        withStore { store in
+            let profileID = "1"
+            let titleID = "movie-42"
+            let sourceID = "hash:account-a"
+            let unrelatedPreference = "test.unrelatedPreference"
+            store.set("keep", forKey: unrelatedPreference)
+
+            LastManualSourceStore.remember(
+                sourceID: sourceID,
+                profileID: profileID,
+                metaID: titleID,
+                type: "movie",
+                season: nil,
+                episode: nil,
+                store: store,
+                preferences: store
+            )
+            XCTAssertTrue(LastManualSourceStore.hasRememberedSource(
+                profileID: profileID, metaID: titleID, type: "movie", season: nil, episode: nil,
+                store: store, preferences: store
+            ))
+
+            LastManualSourceStore.eraseAll(store: store)
+            store.set(true, forKey: SettingsKey.rememberLastSourceFocus) // Account B enables the setting.
+
+            XCTAssertFalse(LastManualSourceStore.hasRememberedSource(
+                profileID: profileID, metaID: titleID, type: "movie", season: nil, episode: nil,
+                store: store, preferences: store
+            ))
+            XCTAssertNil(LastManualSourceStore.matchingID(
+                in: [sourceID], profileID: profileID, metaID: titleID, type: "movie",
+                season: nil, episode: nil, store: store, preferences: store
+            ))
+
+            LastManualSourceStore.eraseAll(store: store)
+            XCTAssertTrue(store.bool(forKey: SettingsKey.rememberLastSourceFocus))
+            XCTAssertEqual(store.string(forKey: unrelatedPreference), "keep")
+            XCTAssertFalse(LastManualSourceStore.hasRememberedSource(
+                profileID: profileID, metaID: titleID, type: "movie", season: nil, episode: nil,
+                store: store, preferences: store
+            ))
         }
     }
 }
