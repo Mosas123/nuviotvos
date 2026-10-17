@@ -337,11 +337,32 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }).sorted().joined(separator: "|")
         let explicitHomeKeys = visibility.explicitHomeKeys.sorted().joined(separator: ",")
         let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
-        return "cinemeta:\(cinemetaEnabled) simklPlan:\(simklPlanEnabled) urls:[\(urls)] disabled:[\(disabled)] deleted:[\(deleted)] order:[\(order)] customTitles:[\(customTitles)] folderSources:[\(folderSources)] explicitHome:[\(explicitHomeKeys)] showType:\(showType)"
+        return "cinemeta:\(cinemetaEnabled) simklPlan:\(simklPlanEnabled) urls:[\(urls)] disabled:[\(disabled)] deleted:[\(deleted)] order:[\(order)] customTitles:[\(customTitles)] folderSources:[\(folderSources)] explicitHome:[\(explicitHomeKeys)] showType:\(showType) metadata:[\(Self.metadataCacheContext)] homeTmdb:\(TmdbDetailsService.useHomeEnrichment)"
     }
     private let baseURL = URL(string: "https://v3-cinemeta.strem.io")!
     private static var cachedMetaById: [String: NuvioMeta] = [:]
     private static var cachedFullMetaIds: Set<String> = []
+    private static var cachedMetadataContext: String?
+    // Read live settings, never the TaskLocal snapshot of an older request.
+    static var metadataCacheContext: String {
+        let store = ProfileSettings.current
+        let flags = [SettingsKey.tmdbEnabled, SettingsKey.tmdbUseBasicInfo, SettingsKey.tmdbUseArtwork]
+            .map { "\($0)=\(store.object(forKey: $0) as? Bool ?? ($0 != SettingsKey.tmdbEnabled))" }
+            .joined(separator: ",")
+        return "\(ProfileSettings.activeProfileID ?? "default")|\(TmdbMetadataLanguage.resolvedLanguage(in: store))|\(flags)"
+    }
+
+    // Called only while holding the metadata cache's barrier.
+    private static func prepareMetadataCache(for context: String) -> Bool {
+        guard context == metadataCacheContext else { return false }
+        guard TmdbDetailsService.preferredLanguage == TmdbMetadataLanguage.resolvedLanguage(in: ProfileSettings.current) else { return false }
+        if cachedMetadataContext != context {
+            cachedMetaById.removeAll()
+            cachedFullMetaIds.removeAll()
+            cachedMetadataContext = context
+        }
+        return true
+    }
     private static let metadataCacheQueue = DispatchQueue(label: "nuvio.catalog.metadata-cache", attributes: .concurrent)
     private let genres = [
         "Action", "Adventure", "Animation", "Biography", "Comedy",
@@ -352,24 +373,32 @@ final class CinemetaCatalogRepository: CatalogRepository {
     ]
 
     func cachedMetadata(for id: String) -> NuvioMeta? {
-        Self.metadataCacheQueue.sync { Self.cachedMetaById[id] }
+        let context = Self.metadataCacheContext
+        return Self.metadataCacheQueue.sync {
+            Self.cachedMetadataContext == context ? Self.cachedMetaById[id] : nil
+        }
     }
 
     static func clearMetadataCache() {
         metadataCacheQueue.sync(flags: .barrier) {
             cachedMetaById.removeAll()
             cachedFullMetaIds.removeAll()
+            cachedMetadataContext = nil
         }
     }
 
     func isCachedFullMetadata(id: String) -> Bool {
-        Self.metadataCacheQueue.sync {
-            Self.cachedFullMetaIds.contains(id) && Self.cachedMetaById[id] != nil
+        let context = Self.metadataCacheContext
+        return Self.metadataCacheQueue.sync {
+            Self.cachedMetadataContext == context && Self.cachedFullMetaIds.contains(id) && Self.cachedMetaById[id] != nil
         }
     }
 
-    func cacheMetadata(_ meta: NuvioMeta, requestedID: String? = nil) {
+    func cacheMetadata(_ meta: NuvioMeta, requestedID: String? = nil, context: String? = nil) {
+        let context = context ?? Self.metadataCacheContext
+        guard !Task.isCancelled else { return }
         Self.metadataCacheQueue.sync(flags: .barrier) {
+            guard Self.prepareMetadataCache(for: context) else { return }
             if let requestedID {
                 Self.cachedMetaById[requestedID] = meta
                 Self.cachedFullMetaIds.insert(requestedID)
@@ -419,7 +448,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
     }
 
     static func cacheCatalogMetadata(_ meta: NuvioMeta) {
+        let context = metadataCacheContext
         metadataCacheQueue.sync(flags: .barrier) {
+            guard prepareMetadataCache(for: context) else { return }
             if cachedFullMetaIds.contains(meta.id) {
                 return
             }
@@ -427,8 +458,10 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
     }
 
-    private func cacheMetadata(_ items: [NuvioMeta]) {
+    private func cacheMetadata(_ items: [NuvioMeta], context: String) {
+        guard !Task.isCancelled else { return }
         Self.metadataCacheQueue.sync(flags: .barrier) {
+            guard Self.prepareMetadataCache(for: context) else { return }
             for item in items {
                 if Self.cachedFullMetaIds.contains(item.id) {
                     continue
@@ -469,6 +502,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
     private func loadHomeCatalogs(
         onUpdate: (([NuvioCatalog]) -> Void)? = nil
     ) async throws -> [NuvioCatalog] {
+        let metadataContext = Self.metadataCacheContext
         homeCatalogLoadWasPartial = false
         homeCatalogFailureSignature = nil
         let cinemetaEnabled = Self.isCinemetaEnabled
@@ -525,7 +559,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             var result: [NuvioCatalog] = []
             for (index, spec) in specs.enumerated() {
                 guard eligibleBuiltInIndices.contains(index), let page = pages[index] else { continue }
-                cacheMetadata(page)
+                cacheMetadata(page, context: metadataContext)
                 result.append(
                     NuvioCatalog(
                         id: spec.id,
@@ -635,6 +669,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
     }
 
     private func simklPlanToWatchCatalogs() async -> [NuvioCatalog] {
+        let metadataContext = Self.metadataCacheContext
         guard SimklSettingsStore.isPlanToWatchHomeCatalogsEnabled,
               SimklRuntimeSession.authenticatedState() != nil else {
             return []
@@ -661,7 +696,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 repository: self
             )
             if !movieItems.isEmpty {
-                cacheMetadata(movieItems)
+                cacheMetadata(movieItems, context: metadataContext)
                 let title = TVHomeCatalogOrder.catalogDisplayTitle(
                     "Plan to Watch",
                     contentType: "movie",
@@ -691,7 +726,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 repository: self
             )
             if !seriesItems.isEmpty {
-                cacheMetadata(seriesItems)
+                cacheMetadata(seriesItems, context: metadataContext)
                 let title = TVHomeCatalogOrder.catalogDisplayTitle(
                     "Plan to Watch",
                     contentType: "series",
@@ -805,6 +840,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             }
 
             func load(_ catalog: AddonManifestCatalog) async -> NuvioCatalog? {
+                let metadataContext = Self.metadataCacheContext
                 do {
                     let catalogGenre = catalog.requiresGenre ? catalog.firstGenreOption : nil
                     let url = try StremioCatalogURLBuilder.url(
@@ -818,7 +854,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     )
                     let items = response.metas.map { $0.toMeta(fallbackType: catalog.type) }
                     guard !items.isEmpty else { return nil }
-                    cacheMetadata(items)
+                    cacheMetadata(items, context: metadataContext)
                     let catalogKey = TVHomeCatalogOrder.catalogSettingsKey(
                         addonId: manifest.id,
                         contentType: catalog.type,
@@ -945,6 +981,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
     }
 
     private func loadMetadata(id: String, type: String, cachedIsSeriesHint: Bool? = nil) async throws -> NuvioMeta {
+        let metadataContext = Self.metadataCacheContext
         // Query the correct endpoint based on the caller-provided type. The
         // Details screen uses a fresh repository (empty cache) so this always
         // fetches the full /meta payload — real episodes and per-episode ratings.
@@ -1032,7 +1069,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 return nil
             }
             if let addonResult {
-                cacheMetadata(addonResult, requestedID: id)
+                cacheMetadata(addonResult, requestedID: id, context: metadataContext)
                 return addonResult
             }
         }
@@ -1068,13 +1105,13 @@ final class CinemetaCatalogRepository: CatalogRepository {
                             let seriesMeta = await TmdbDetailsService.localizedMetadata(
                                 for: seriesResponse.meta.toMeta(fallbackType: "series")
                             )
-                            cacheMetadata(seriesMeta, requestedID: id)
+                            cacheMetadata(seriesMeta, requestedID: id, context: metadataContext)
                             return seriesMeta
                         }
                     }
 
                     let meta = await TmdbDetailsService.localizedMetadata(for: rawMeta)
-                    cacheMetadata(meta, requestedID: id)
+                    cacheMetadata(meta, requestedID: id, context: metadataContext)
                     return meta
                 } catch {
                     lastError = error
@@ -1116,7 +1153,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 trailerYtIds: nil,
                 externalRatings: nil
             )
-            cacheMetadata(fallbackMeta, requestedID: id)
+            cacheMetadata(fallbackMeta, requestedID: id, context: metadataContext)
             return fallbackMeta
         }
 
@@ -1622,6 +1659,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
     }
 
     func search(query: String) async throws -> [NuvioMeta] {
+        let metadataContext = Self.metadataCacheContext
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
@@ -1748,7 +1786,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // Background enrichment (SearchResultEnrichment) handles artwork & TMDB localization
         // asynchronously for visible cards without blocking the search spinner.
         let deduplicated = Self.deduplicatedSearchResults(rawResults)
-        cacheMetadata(deduplicated)
+        cacheMetadata(deduplicated, context: metadataContext)
         return deduplicated
     }
 
@@ -1998,6 +2036,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         year: Int?,
         sort: String?
     ) async throws -> CatalogPage {
+        let metadataContext = Self.metadataCacheContext
         let resolvedCatalogId = sort ?? catalogId
         let skip = max(page - 1, 0) * 100
         let targetBaseURL = await baseURL(forAddonId: nil, contentType: contentType, catalogId: resolvedCatalogId) ?? baseURL
@@ -2009,7 +2048,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             search: nil,
             genre: genre
         ))
-        cacheMetadata(items)
+        cacheMetadata(items, context: metadataContext)
         return CatalogPage(
             items: items,
             hasMore: !items.isEmpty,
@@ -2025,13 +2064,14 @@ final class CinemetaCatalogRepository: CatalogRepository {
         skip: Int,
         genre: String?
     ) async throws -> CatalogPage {
+        let metadataContext = Self.metadataCacheContext
         if addonId == "simkl" || (addonId == nil && catalogId == "plantowatch") {
             let allItems = await SimklLibraryService.fetchPlanToWatchItems(
                 type: contentType,
                 repository: self
             )
             let pageItems = Array(allItems.dropFirst(skip).prefix(100))
-            cacheMetadata(pageItems)
+            cacheMetadata(pageItems, context: metadataContext)
             return CatalogPage(
                 items: pageItems,
                 hasMore: skip + pageItems.count < allItems.count,
@@ -2070,7 +2110,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             search: nil,
             genre: genre
         ))
-        cacheMetadata(items)
+        cacheMetadata(items, context: metadataContext)
         return CatalogPage(
             items: items,
             hasMore: !items.isEmpty,
@@ -2085,6 +2125,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         skip: Int,
         genre: String?
     ) async throws -> CatalogPage {
+        let metadataContext = Self.metadataCacheContext
         let targetBaseURL = await baseURL(forAddonId: nil, contentType: contentType, catalogId: catalogId) ?? baseURL
         let items = await TmdbDetailsService.localizedMetadata(for: try await fetchCatalog(
             sourceBaseURL: targetBaseURL,
@@ -2094,7 +2135,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             search: nil,
             genre: genre
         ))
-        cacheMetadata(items)
+        cacheMetadata(items, context: metadataContext)
         return CatalogPage(
             items: items,
             hasMore: !items.isEmpty,
@@ -2255,6 +2296,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         page: Int,
         genre: String?
     ) async throws -> CatalogPage {
+        let metadataContext = Self.metadataCacheContext
         let skip = max(page - 1, 0) * 100
         let sourceBaseURL = option.manifestURL.lastPathComponent.lowercased() == "manifest.json"
             ? option.manifestURL.deletingLastPathComponent()
@@ -2269,7 +2311,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             genre: resolvedGenre
         )
         let items = await TmdbDetailsService.localizedMetadata(for: rawItems)
-        cacheMetadata(items)
+        cacheMetadata(items, context: metadataContext)
         return CatalogPage(
             items: items,
             hasMore: option.supportsPagination && !items.isEmpty && items.count >= 10,

@@ -3697,6 +3697,7 @@ struct TVHomeView: View {
     @AppStorage(SettingsKey.continueWatchingLandscape) private var continueWatchingLandscape = false
     @AppStorage(SettingsKey.tmdbEnabled) private var tmdbEnabled = false
     @AppStorage(SettingsKey.tmdbLanguage) private var tmdbLanguage = "en"
+    @AppStorage(SettingsKey.tmdbFollowAppLanguage) private var tmdbFollowAppLanguage = true
     @AppStorage(SettingsKey.tmdbUseArtwork) private var tmdbUseArtwork = true
     @AppStorage(SettingsKey.tmdbUseBasicInfo) private var tmdbUseBasicInfo = true
     @AppStorage(SettingsKey.tmdbApplyToHome) private var tmdbApplyToHome = false
@@ -3790,7 +3791,7 @@ struct TVHomeView: View {
     }
 
     private var tmdbHomeSettingsKey: String {
-        "\(tmdbEnabled)|\(tmdbLanguage)|\(tmdbUseArtwork)|\(tmdbUseBasicInfo)|\(tmdbApplyToHome)"
+        "\(tmdbEnabled)|\(tmdbLanguage)|\(tmdbFollowAppLanguage)|\(TmdbDetailsService.preferredLanguage)|\(tmdbUseArtwork)|\(tmdbUseBasicInfo)|\(tmdbApplyToHome)"
     }
     @FocusState private var isLoadingFocusActive: Bool
     @FocusState private var focusedCardID: String?
@@ -4115,8 +4116,11 @@ struct TVHomeView: View {
             }
         }
         .task(id: "\(contentIdentity.profileId):\(contentIdentity.catalogRevision):\(tmdbHomeSettingsKey)") {
+            focusWork.heroEnrichmentTask?.cancel()
+            focusWork.enrichedHeroMetadata.removeAll()
             let isLoaded = store.isLoaded(for: contentIdentity)
-            await loadWithAutomaticRetry(for: contentIdentity, forceReload: !isLoaded)
+            let inputsChanged = repository.homeCatalogInputSignature != lastLoadedInputSignature
+            await loadWithAutomaticRetry(for: contentIdentity, forceReload: !isLoaded || inputsChanged)
             if !isLoaded {
                 // Add-on metadata providers are configured by the time Home has
                 // loaded, so this is the pass that recovers titles an earlier sync
@@ -7015,7 +7019,8 @@ struct TVHomeView: View {
     /// `focusedMeta` (hero) and the pending focus target without stalling `@MainActor`.
     @MainActor
     private func enrichSettledCatalogMeta(_ settledMeta: NuvioMeta, in sectionId: String) {
-        let enrichmentKey = "\(settledMeta.type.lowercased())\u{1f}\(settledMeta.id)"
+        let metadataContext = CinemetaCatalogRepository.metadataCacheContext
+        let enrichmentKey = "\(metadataContext)\u{1f}\(settledMeta.type.lowercased())\u{1f}\(settledMeta.id)"
         if let cached = focusWork.enrichedHeroMetadata[enrichmentKey] {
             let merged = settledMeta.fillingMissingHeroMetadata(from: cached)
             guard focusWork.pendingFocusedMeta?.id == settledMeta.id,
@@ -7044,7 +7049,8 @@ struct TVHomeView: View {
             }).value else {
                 return
             }
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  metadataContext == CinemetaCatalogRepository.metadataCacheContext else { return }
             focusWork.enrichedHeroMetadata[enrichmentKey] = fetched
             let merged = settledMeta.fillingMissingHeroMetadata(from: fetched)
             guard focusWork.pendingFocusedMeta?.id == settledMeta.id,
