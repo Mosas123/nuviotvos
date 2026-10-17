@@ -270,6 +270,7 @@ enum SettingsKey {
     static let smartStreamSelection = "nuvio.tv.settings.playback.smartStreamSelection"
     static let reuseLastLink = "nuvio.tv.settings.playback.reuseLastLink"
     static let reuseLastLinkCacheHours = "nuvio.tv.settings.playback.reuseLastLinkCacheHours"
+    static let rememberLastSourceFocus = "nuvio.tv.settings.playback.rememberLastSourceFocus"
     static let smartStreamUseTopResult = "nuvio.tv.settings.playback.smartStreamUseTopResult"
     static let smartStreamQuality = "nuvio.tv.settings.playback.smartStreamQuality"
     static let smartSubtitleMatching = "nuvio.tv.settings.playback.smartSubtitleMatching"
@@ -372,7 +373,7 @@ enum SettingsKey {
         cinemetaDisabled, deletedLocalAddons,
         smbServers, smbLibraryIndex, smbLocalRowEnabled,
         jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
-        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        playerEngine, trueHDSpatialAudio, trickplayServer, externalPlayer, smartStreamSelection, reuseLastLink, reuseLastLinkCacheHours, rememberLastSourceFocus, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         backgroundStreamPreFetch,
         cachedOnlyStreams, preferHardwareDecodedStreams, preserveAddonStreamOrder, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, backgroundTrailersEnabled, trailerPreviewSound, trailerDelay,
@@ -7609,6 +7610,7 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
     @AppStorage(SettingsKey.reuseLastLink) private var reuseLastLink = false
     @AppStorage(SettingsKey.reuseLastLinkCacheHours) private var reuseLastLinkCacheHours = 24
+    @AppStorage(SettingsKey.rememberLastSourceFocus) private var rememberLastSourceFocus = false
     @AppStorage(SettingsKey.smartStreamUseTopResult) private var smartStreamUseTopResult = false
     @AppStorage(SettingsKey.backgroundStreamPreFetch) private var backgroundStreamPreFetch = true
     @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
@@ -7952,6 +7954,16 @@ private struct PlaybackSettingsView: View {
                 )
                 .opacity(reuseLastLink ? 1 : 0.46)
                 .disabled(!reuseLastLink)
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_remember_last_source_focus", fallback: "Remember Last Source Focus"),
+                    subtitle: L10n.string(
+                        "tvos_settings_remember_last_source_focus_subtitle",
+                        fallback: "Focus the last-played source when picking manually for this movie or episode. Does not start playback. Off by default."
+                    ),
+                    isOn: $rememberLastSourceFocus,
+                    accentColor: accentColor
+                )
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_background_prefetch", fallback: "Background Pre-fetch"),
@@ -8926,6 +8938,8 @@ private struct LanguagePickerListRow: View {
 private struct AdvancedSettingsView: View {
     let accentColor: Color
 
+    @AppStorage(PlaybackTimelineRecorder.enabledKey) private var timelineEnabled = false
+    @State private var showingPlaybackHistory = false
     @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
     @AppStorage(SettingsKey.playbackDiagnostics) private var playbackDiagnostics = false
     @AppStorage(SettingsKey.playbackDebug) private var playbackDebug = false
@@ -8966,6 +8980,25 @@ private struct AdvancedSettingsView: View {
                     isOn: $playbackDiagnostics,
                     accentColor: accentColor
                 )
+
+                #if os(tvOS)
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_persistent_playback_history", fallback: "Persistent Playback History"),
+                    subtitle: L10n.string("tvos_settings_persistent_playback_history_detail", fallback: "Save recent playback actions on this Apple TV for troubleshooting. Off by default; no automatic upload."),
+                    isOn: Binding(get: { timelineEnabled }, set: { enabled in
+                        PlaybackTimelineRecorder.setEnabled(enabled)
+                        timelineEnabled = enabled
+                    }),
+                    accentColor: accentColor
+                )
+                SettingsActionRow(
+                    title: L10n.string("tvos_settings_view_playback_history", fallback: "View / Export Diagnostic History"),
+                    subtitle: L10n.string("tvos_settings_view_playback_history_detail", fallback: "Inspect, delete or download recent diagnostic history from this Apple TV"),
+                    value: L10n.string("action_open", fallback: "Open"),
+                    accentColor: accentColor,
+                    action: { showingPlaybackHistory = true }
+                )
+                #endif
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_playback_debug_overlay", fallback: "Playback Debug Overlay"),
@@ -9070,6 +9103,11 @@ private struct AdvancedSettingsView: View {
                 )
             }
         }
+        #if os(tvOS)
+        .fullScreenCover(isPresented: $showingPlaybackHistory) {
+            PlaybackDiagnosticHistoryView(accentColor: accentColor)
+        }
+        #endif
     }
 
     private var cacheActionValue: String {
@@ -9098,6 +9136,8 @@ private struct AdvancedSettingsView: View {
     private func resetSettings() {
         // Reset only the active profile's settings, not other profiles'.
         let defaults = ProfileSettings.current
+        PlaybackTimelineRecorder.setEnabled(false)
+        defaults.removeObject(forKey: PlaybackTimelineRecorder.enabledKey)
         SettingsKey.all.forEach { defaults.removeObject(forKey: $0) }
         defaults.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
         defaults.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonNames)

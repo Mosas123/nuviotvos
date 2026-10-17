@@ -90,6 +90,9 @@ final class PlaybackClock: ObservableObject {
 class PlayerViewModel: ObservableObject {
     @Published var status: PlayerStatus = .idle {
         didSet {
+            if case .error = status, oldValue != status {
+                PlaybackTimelineRecorder.record(.playbackError, engine: activeEngineKind)
+            }
             guard case .error(let message) = status,
                   ProfileSettings.current.bool(forKey: SettingsKey.playbackDiagnostics) else { return }
             // Polling can assign the same error repeatedly. Bound diagnostic work
@@ -118,7 +121,13 @@ class PlayerViewModel: ObservableObject {
     @Published var seekStepSeconds: Int = PlayerSeekSettings.current
     @Published var qualities: [QualityOption] = [.auto]
     @Published var currentQuality: QualityOption = .auto
-    @Published var showControls: Bool = false
+    @Published var showControls: Bool = false {
+        didSet {
+            if oldValue != showControls {
+                PlaybackTimelineRecorder.record(showControls ? .controlsShown : .controlsHidden, engine: activeEngineKind)
+            }
+        }
+    }
     /// True while the transport controls are up and the timeline scrubber holds
     /// focus. Lets the remote press-catcher drive continuous hold-to-seek even
     /// with the controls visible, matching the controls-hidden behaviour.
@@ -168,6 +177,9 @@ class PlayerViewModel: ObservableObject {
     /// Full-screen settings panel (subtitles / audio / speed) visibility.
     @Published var showSettingsPanel: Bool = false {
         didSet {
+            if oldValue != showSettingsPanel {
+                PlaybackTimelineRecorder.record(showSettingsPanel ? .settingsOpened : .settingsClosed, engine: activeEngineKind)
+            }
             if showSettingsPanel {
                 clearNextEpisodeCard()
             }
@@ -178,6 +190,9 @@ class PlayerViewModel: ObservableObject {
     /// In-player side sheet (episodes / sources).
     @Published var sidePanel: PlayerSidePanel? = nil {
         didSet {
+            if (oldValue == nil) != (sidePanel == nil) {
+                PlaybackTimelineRecorder.record(sidePanel == nil ? .sidePanelClosed : .sidePanelOpened, engine: activeEngineKind)
+            }
             if sidePanel != nil {
                 clearNextEpisodeCard()
             }
@@ -274,7 +289,13 @@ class PlayerViewModel: ObservableObject {
     /// Aether surface host.
     var aetherController: AetherPlaybackController? { sessionCoordinator.aetherController }
     /// Which backend is driving the current (or next) stream.
-    @Published private(set) var activeEngineKind: PlayerEngineKind = .aether
+    @Published private(set) var activeEngineKind: PlayerEngineKind = .aether {
+        didSet {
+            if oldValue != activeEngineKind {
+                PlaybackTimelineRecorder.record(.engineChanged, engine: activeEngineKind)
+            }
+        }
+    }
     /// Short on-screen note after engine selection (native DV vs HDR fallback).
     @Published private(set) var hdrModeToast: String?
     @Published private(set) var playbackDebugInfo: PlaybackDebugInfo?
@@ -283,7 +304,13 @@ class PlayerViewModel: ObservableObject {
     @Published private(set) var isPlaybackDebugEnabled = false
     @Published private(set) var trailerDiagnostics: String?
     @Published private(set) var trailerQualityLabel: String?
-    @Published private(set) var hasRenderedFirstFrame = false
+    @Published private(set) var hasRenderedFirstFrame = false {
+        didSet {
+            if hasRenderedFirstFrame && !oldValue {
+                PlaybackTimelineRecorder.record(.playbackStarted, engine: activeEngineKind)
+            }
+        }
+    }
     private var hasProducedMidFilePosition = false
     private var playbackDebugHUDBackend: PlayerEngineKind?
     private var didShowPlaybackDebugHUDForStream = false
@@ -304,6 +331,8 @@ class PlayerViewModel: ObservableObject {
     var activeMeta: NuvioMeta?
     private var activeStreamURL: String?
     private var activeSourceID: String?
+    private var manualSourceProfileID: String?
+    private var didRememberManualSource = false
     private var activeHTTPHeaders: [String: String] = [:]
     private var activePlaybackOrigin: PlaybackOrigin = .main
     private(set) var activeBingeGroup: String?
@@ -801,6 +830,7 @@ class PlayerViewModel: ObservableObject {
         sourceID: String? = nil,
         currentEpisode: NuvioVideo? = nil
     ) {
+        PlaybackTimelineRecorder.record(.playbackLoadRequested)
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
         // Keep this session-level flag authoritative for tracking decisions.
         // The trailer uses the movie's metadata so checking only the current
@@ -816,6 +846,8 @@ class PlayerViewModel: ObservableObject {
         activeCacheFileIdentity = cacheFileIdentity
         activeTrickplayURL = trickplayURL
         activeSourceID = sourceID
+        manualSourceProfileID = ProfileSettings.activeProfileID
+        didRememberManualSource = false
         if !hasLoaded { sessionTrackSelection = nil }
 
         // Adopt active Picture in Picture session if already playing this content
@@ -1963,6 +1995,7 @@ class PlayerViewModel: ObservableObject {
     /// link reload, which resumes from `resumeFrom`).
     private func replaceStream(prepared: PreparedNextStream, episode: NuvioVideo?, resumeFrom: Double?) {
         guard let meta = activeMeta else { return }
+        PlaybackTimelineRecorder.record(.playbackLoadRequested, engine: activeEngineKind)
         cancelSourcesFetch()
         if let episode, episode.id != currentEpisodeVideo?.id {
             availableSources = []
@@ -1988,6 +2021,7 @@ class PlayerViewModel: ObservableObject {
         self.activeCacheFileIdentity = prepared.cacheFileIdentity
         self.activeTrickplayURL = prepared.trickplayURL
         self.activeSourceID = prepared.sourceID
+        didRememberManualSource = false
         if let bg = prepared.bingeGroup, !bg.isEmpty {
             self.activeBingeGroup = bg
         }
@@ -3119,6 +3153,7 @@ class PlayerViewModel: ObservableObject {
         }
         cancelPendingAdvanceResolution()
         didShutdown = true
+        PlaybackTimelineRecorder.record(.playbackStopRequested, engine: activeEngineKind)
         pollTimer?.invalidate()
         pollTimer = nil
         controlsHideTimer?.invalidate()
@@ -3168,6 +3203,7 @@ class PlayerViewModel: ObservableObject {
         postPlayController.stop()
         sceneCoordinator.resetSession()
         status = .idle
+        PlaybackTimelineRecorder.record(.playbackStopped, engine: activeEngineKind)
     }
 
     // MARK: - Post-Play Recommendation Actions
@@ -4396,12 +4432,14 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Track selection
 
     func selectSubtitle(_ track: SubtitleTrack, persist: Bool = true) {
+        PlaybackTimelineRecorder.record(.subtitleSelectionRequested, engine: activeEngineKind)
         pendingSelectedExternalSubtitleURL = nil
         if track.id == "off" {
             engine.selectSubtitle(-1)
         } else if let id = Int(track.id) {
             engine.selectSubtitle(id)
         }
+        PlaybackTimelineRecorder.record(.subtitleSelectionReturned, engine: activeEngineKind)
         subtitles = subtitles.map { var t = $0; t.isSelected = (t.id == track.id); return t }
         if persist {
             saveSubtitleSelection(track)
@@ -4438,6 +4476,7 @@ class PlayerViewModel: ObservableObject {
     /// URL (eagerly or from an earlier pick) just switch to that track,
     /// otherwise `sub-add` it now and explicitly select that requested track.
     func selectExternalSubtitle(_ subtitle: NuvioSubtitle) {
+        PlaybackTimelineRecorder.record(.externalSubtitleRequested, engine: activeEngineKind)
         if let track = subtitles.first(where: { $0.externalFilename == subtitle.url }) {
             selectSubtitle(track)
         } else {
@@ -4651,9 +4690,11 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectAudio(_ track: AudioTrack, persist: Bool = true) {
+        PlaybackTimelineRecorder.record(.audioSelectionRequested, engine: activeEngineKind)
         if let id = Int(track.id) {
             engine.selectAudio(id)
         }
+        PlaybackTimelineRecorder.record(.audioSelectionReturned, engine: activeEngineKind)
         audioTracks = audioTracks.map { var t = $0; t.isSelected = (t.id == track.id); return t }
         if persist {
             saveAudioSelection(track)
@@ -5111,6 +5152,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectSource(_ stream: NuvioStream) {
+        PlaybackTimelineRecorder.record(.sourceSelectionRequested, engine: activeEngineKind)
         if let unavailableReason = stream.unavailabilityReason {
             showPlayerToast(unavailableReason)
             return
@@ -5768,9 +5810,32 @@ class PlayerViewModel: ObservableObject {
         seek(to: target)
     }
 
+    private func rememberManualSourceIfReady() {
+        guard ProfileSettings.current.bool(forKey: SettingsKey.rememberLastSourceFocus),
+              !didRememberManualSource, !isLiveStream, !isTrailerPlaybackSession,
+              hasRenderedFirstFrame, !isAwaitingStreamStart,
+              !isSwitchingSource, !isReloadingStream, !isFailingOver,
+              !sessionCoordinator.isProgressSaveSuspended,
+              !loadedStreamLooksLikeReplacement(), !didDetectReplacementStream,
+              time.current.isFinite, time.current > 0,
+              currentLoadPresentationIsConfirmed(
+                engineKind: activeEngineKind, generation: sessionCoordinator.loadGeneration
+              ),
+              let profileID = manualSourceProfileID,
+              Self.isCurrentPlaybackProfile(profileID),
+              let meta = activeMeta, let sourceID = activeSourceID else { return }
+        let numbers = resolvedEpisodeNumbers
+        LastManualSourceStore.remember(
+            sourceID: sourceID, profileID: profileID, metaID: meta.id, type: meta.type,
+            season: numbers?.season, episode: numbers?.episode
+        )
+        didRememberManualSource = true
+    }
+
     private func saveProgressIfNeeded() {
         guard isTrackablePlayback else { return }
         guard status == .playing else { return }
+        rememberManualSourceIfReady()
         // Start a Trakt scrobble promptly so its remote Continue Watching feed
         // has an entry before the user leaves the player. Subsequent saves keep
         // the normal cadence (and Trakt's separate 30-second report cadence).

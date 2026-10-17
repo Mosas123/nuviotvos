@@ -1048,6 +1048,7 @@ public class ProfileViewModel: ObservableObject {
         LibraryStore.eraseAllProfiles()
         WatchedStore.eraseAllProfiles()
         CollectionsStore.eraseAllProfiles()
+        LastManualSourceStore.eraseAll()
         // Cover the whole local id space (1-6 + guest), not just the current
         // list, so suites left behind by previously deleted profiles go too.
         ProfileSettings.eraseAll(profileIds: previousIds + (1...6).map(String.init) + [guest.id])
