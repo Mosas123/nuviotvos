@@ -3558,7 +3558,21 @@ private func layoutVisibleHomeCatalogRows() -> [TVHomeCatalogOrder.SnapshotRow] 
     let deletedKeys = TVHomeCatalogOrder.deletedCatalogKeys()
     let cinemetaPrefix = "\(CinemetaCatalogRepository.cinemetaAddonId)_"
     let isCinemetaActive = CinemetaCatalogRepository.isCinemetaEnabled
+    let installedManifestURLs = Set(
+        CinemetaCatalogRepository.configuredStreamAddonPreferences.compactMap {
+            CinemetaCatalogRepository.normalizedManifestURL(from: $0.url)
+        }
+    )
     let sourceRows = rows.filter { row in
+        // Snapshots intentionally retain rows across Home reloads. A removed
+        // add-on must not remain selectable just because its snapshot survives.
+        // Use installed preferences, not network results or enabled-only URLs.
+        if row.addonId != CinemetaCatalogRepository.cinemetaAddonId,
+           let rawURL = row.manifestURL,
+           let manifestURL = CinemetaCatalogRepository.normalizedManifestURL(from: rawURL),
+           !installedManifestURLs.contains(manifestURL) {
+            return false
+        }
         if deletedKeys.contains(row.id) { return false }
         if let sk = row.settingsKey, deletedKeys.contains(sk) { return false }
         if deletedKeys.contains(TVHomeCatalogOrder.sectionOrderKey(row.id)) { return false }
