@@ -453,6 +453,20 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var artworkLoadTask: Task<Void, Never>?
     #endif
     private var didConfigureMPVRemoteCommands = false
+    private let remoteCommandTargets = PlayerRemoteCommandTargets()
+    private var watchPartyRemoteIntent: (@MainActor (PlayerRemoteIntent) -> Bool)?
+
+    func setWatchPartyRemoteIntent(_ handler: (@MainActor (PlayerRemoteIntent) -> Bool)?) {
+        let rebind = didConfigureMPVRemoteCommands
+        if rebind { teardownMPVRemoteCommands() }
+        watchPartyRemoteIntent = handler
+        if rebind { setupMPVRemoteCommandsIfNeeded() }
+    }
+
+    func stopWatchPartyRemoteCommands() {
+        watchPartyRemoteIntent = { _ in false }
+        teardownMPVRemoteCommands()
+    }
     /// Physical Apple TV can blank HDMI while matching frame rate / dynamic
     /// range. Keep the file paused until that switch finishes so playback time
     /// cannot advance behind the black screen.
@@ -894,6 +908,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     // MARK: - Playback API
 
     func loadFile(_ urlString: String) {
+        if didConfigureMPVRemoteCommands { teardownMPVRemoteCommands(); setupMPVRemoteCommandsIfNeeded() }
         pendingLoadConfiguration = nil
         pendingHTTPHeaders = [:]
         pendingIsLiveStream = false
@@ -907,6 +922,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func load(_ request: PlaybackLoadRequest) {
+        teardownMPVRemoteCommands()
         pendingLoadConfiguration = MPVLoadConfiguration(request: request)
         pendingAudioURL = request.audioURL?.absoluteString
         pendingHTTPHeaders = request.httpHeaders
@@ -1141,64 +1157,43 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard !didConfigureMPVRemoteCommands else { return }
         didConfigureMPVRemoteCommands = true
         let center = MPRemoteCommandCenter.shared()
+        installRemoteCommands(center)
+    }
 
-        center.playCommand.isEnabled = true
-        center.playCommand.addTarget { [weak self] _ in
-            self?.playPlayback()
-            return .success
-        }
-
-        center.pauseCommand.isEnabled = true
-        center.pauseCommand.addTarget { [weak self] _ in
-            self?.pausePlayback()
-            return .success
-        }
-
-        center.togglePlayPauseCommand.isEnabled = true
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            if self.isPlayerPlaying {
-                self.pausePlayback()
-            } else {
-                self.playPlayback()
+    private func installRemoteCommands(_ center: MPRemoteCommandCenter) {
+        let action: @MainActor @Sendable (PlayerRemoteIntent) -> Void = { [weak self] intent in
+            guard let self else { return }
+            if let handler = self.watchPartyRemoteIntent { _ = handler(intent); return }
+            guard let intent = intent.localIntent(positionMs: self.positionMs, isPlaying: self.isTransportPlaying) else { return }
+            switch intent {
+            case .play: self.playPlayback()
+            case .pause: self.pausePlayback()
+            case .seek(let position): self.seekToMs(position)
+            default: break
             }
-            return .success
         }
-
+        center.playCommand.isEnabled = true
+        center.pauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.isEnabled = true
         center.changePlaybackPositionCommand.isEnabled = true
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            self?.seekToMs(Int64((event.positionTime * 1000).rounded()))
-            return .success
-        }
-
         center.skipForwardCommand.isEnabled = true
         center.skipForwardCommand.preferredIntervals = [10]
-        center.skipForwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(self.positionMs + 10_000)
-            return .success
-        }
-
         center.skipBackwardCommand.isEnabled = true
         center.skipBackwardCommand.preferredIntervals = [10]
-        center.skipBackwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(max(0, self.positionMs - 10_000))
-            return .success
-        }
+        remoteCommandTargets.add(center.playCommand, intent: .play, action: action)
+        remoteCommandTargets.add(center.pauseCommand, intent: .pause, action: action)
+        remoteCommandTargets.add(center.togglePlayPauseCommand, intent: .toggle, action: action)
+        remoteCommandTargets.add(center.changePlaybackPositionCommand, resolve: { event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent, event.positionTime.isFinite else { return nil }
+            return .position(event.positionTime)
+        }, action: action)
+        remoteCommandTargets.add(center.skipForwardCommand, intent: .skip(10), action: action)
+        remoteCommandTargets.add(center.skipBackwardCommand, intent: .skip(-10), action: action)
     }
 
     private func teardownMPVRemoteCommands() {
-        guard didConfigureMPVRemoteCommands else { return }
+        remoteCommandTargets.stop()
         didConfigureMPVRemoteCommands = false
-        let center = MPRemoteCommandCenter.shared()
-        center.playCommand.removeTarget(nil)
-        center.pauseCommand.removeTarget(nil)
-        center.togglePlayPauseCommand.removeTarget(nil)
-        center.changePlaybackPositionCommand.removeTarget(nil)
-        center.skipForwardCommand.removeTarget(nil)
-        center.skipBackwardCommand.removeTarget(nil)
     }
     #endif
 

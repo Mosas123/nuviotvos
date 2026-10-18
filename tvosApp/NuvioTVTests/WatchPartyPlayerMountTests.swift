@@ -93,6 +93,15 @@ final class WatchPartyPlayerMountTests: XCTestCase {
         XCTAssertNotNil(model.playerToast)
     }
 
+    func testPartyPiPEntryRemainsDisabledBeforeDelegateAdmissionExists() throws {
+        let model = model()
+        defer { model.shutdownForWatchParty() }
+        _ = try model.attachWatchPartyPlayerBridge(isCurrent: { true })
+        XCTAssertFalse(model.isPictureInPictureSupported)
+        model.startPictureInPicture()
+        XCTAssertNotNil(model.playerToast)
+    }
+
     func testContextLossMakesExistingMountInertAndTeardownStillWorks() throws {
         var current = true
         let runtime = WatchPartyPlayerRuntime.player(isCurrent: { _ in current })

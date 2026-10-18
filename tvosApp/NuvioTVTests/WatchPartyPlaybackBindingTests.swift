@@ -220,6 +220,25 @@ final class WatchPartyPlaybackBindingTests: XCTestCase {
         XCTAssertEqual(f.room.publications.count, 1)
     }
 
+    func testRemoteCommandIntentUsesSameAdmissionAndSinglePublication() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        let intent = try XCTUnwrap(PlayerRemoteIntent.play.localIntent(positionMs: f.position, isPlaying: !f.paused))
+        try await binding.perform(intent)
+        XCTAssertEqual(f.playCalls, 1)
+        XCTAssertEqual(f.room.publications.count, 1)
+    }
+
+    func testRemoteCommandCannotBypassLockedGuest() async throws {
+        let f = Fixture(room: Room(hostOnly: true)); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        let intent = try XCTUnwrap(PlayerRemoteIntent.skip(10).localIntent(positionMs: f.position, isPlaying: !f.paused))
+        do { try await binding.perform(intent); XCTFail("System command bypassed host-only") }
+        catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .forbidden) }
+        XCTAssertTrue(f.seekTargets.isEmpty)
+        XCTAssertTrue(f.room.publications.isEmpty)
+    }
+
     func testHostOnlyGuestCannotChangeRoomSpeedOrSeekAhead() async throws {
         let f = Fixture(room: Room(hostOnly: true)); let binding = try f.start(); defer { f.stop() }
         f.tick(); await settle(f)

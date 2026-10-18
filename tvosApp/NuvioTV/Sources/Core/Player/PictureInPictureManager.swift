@@ -153,6 +153,9 @@ final class PictureInPictureManager: NSObject, ObservableObject {
 
     /// Sets up or reconfigures the `AVPictureInPictureController` for the given Aether controller.
     func setupPipController(for aetherController: AetherPlaybackController) {
+        // Party PiP remains disabled until sample-buffer completion and native control admission
+        // are implemented. The VM toolbar guard alone cannot block an automatic/system entry.
+        guard !aetherController.isWatchPartyControlled else { clearController(); return }
         let controllerChanged = activeAetherController !== aetherController
         if controllerChanged { clearController() }
         self.activeAetherController = aetherController
@@ -184,6 +187,7 @@ final class PictureInPictureManager: NSObject, ObservableObject {
 
     private func rebuildPipControllerIfNeeded() {
         guard isPictureInPictureSupported, let controller = activeAetherController else { return }
+        guard !controller.isWatchPartyControlled else { clearController(); return }
         guard !isPictureInPictureActive else { return } // Don't disrupt active PiP window
 
         let engine = controller.engine

@@ -3780,6 +3780,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     // MARK: Load
 
     func load(_ request: PlaybackLoadRequest, generation: UInt64) {
+        teardownRemoteCommands()
+        remoteCommandsAllowed = true
         diagnosticPlayIntent = request.autoplay ? "play" : "pause"
         lastDiagnosticSnapshotUptime = 0
         let currentEngineGeneration = max(
@@ -4141,6 +4143,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func destroyPlayer() {
+        remoteCommandsAllowed = false
+        teardownRemoteCommands()
         if let key = contentCanonicalKey {
             let durationSec = Double(durationMs) / 1000.0
             Task.detached(priority: .utility) {
@@ -4291,62 +4295,75 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     #if os(tvOS) || os(iOS)
     private var didConfigureRemoteCommands = false
+    private var remoteCommandsAllowed = true
+    private var remoteCommandCenter: MPRemoteCommandCenter?
+    private let remoteCommandTargets = PlayerRemoteCommandTargets()
+    private var watchPartyRemoteIntent: (@MainActor (PlayerRemoteIntent) -> Bool)?
+    var isWatchPartyControlled: Bool { watchPartyRemoteIntent != nil }
+
+    func setWatchPartyRemoteIntent(_ handler: (@MainActor (PlayerRemoteIntent) -> Bool)?) {
+        let rebind = didConfigureRemoteCommands
+        if rebind { teardownRemoteCommands() }
+        watchPartyRemoteIntent = handler
+        if rebind { configureRemoteCommandsIfNeeded() }
+    }
+
+    func stopWatchPartyRemoteCommands() {
+        watchPartyRemoteIntent = { _ in false }
+        remoteCommandsAllowed = false
+        teardownRemoteCommands()
+    }
 
     private func configureRemoteCommandsIfNeeded() {
-        guard !didConfigureRemoteCommands,
-              let center = engine.videoNowPlayingSession?.remoteCommandCenter else { return }
+        guard remoteCommandsAllowed, let center = engine.videoNowPlayingSession?.remoteCommandCenter else { return }
+        if didConfigureRemoteCommands, remoteCommandCenter === center { return }
+        teardownRemoteCommands()
         didConfigureRemoteCommands = true
+        remoteCommandCenter = center
+        installRemoteCommands(center)
+    }
 
-        center.playCommand.isEnabled = true
-        center.playCommand.addTarget { [weak self] _ in
-            self?.playPlayback()
-            return .success
-        }
-
-        center.pauseCommand.isEnabled = true
-        center.pauseCommand.addTarget { [weak self] _ in
-            self?.pausePlayback()
-            return .success
-        }
-
-        center.togglePlayPauseCommand.isEnabled = true
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            switch self.engine.state {
-            case .loading, .playing, .paused, .seeking:
-                if self.isTransportPlaying {
-                    self.pausePlayback()
-                } else {
-                    self.playPlayback()
+    private func installRemoteCommands(_ center: MPRemoteCommandCenter) {
+        let action: @MainActor @Sendable (PlayerRemoteIntent) -> Void = { [weak self] intent in
+            guard let self else { return }
+            if let handler = self.watchPartyRemoteIntent { _ = handler(intent); return }
+            if case .toggle = intent {
+                switch self.engine.state {
+                case .loading, .playing, .paused, .seeking: break
+                case .idle, .ended, .error: return
                 }
-            case .idle, .ended, .error:
-                return .commandFailed
             }
-            return .success
+            guard let intent = intent.localIntent(positionMs: self.positionMs, isPlaying: self.isTransportPlaying) else { return }
+            switch intent {
+            case .play: self.playPlayback()
+            case .pause: self.pausePlayback()
+            case .seek(let position): self.seekToMs(position)
+            default: break
+            }
         }
-
+        center.playCommand.isEnabled = true
+        center.pauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.isEnabled = true
         center.changePlaybackPositionCommand.isEnabled = true
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            self?.seekToMs(Int64((event.positionTime * 1000).rounded()))
-            return .success
-        }
-
         center.skipForwardCommand.isEnabled = true
         center.skipForwardCommand.preferredIntervals = [10]
-        center.skipForwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(self.positionMs + 10_000)
-            return .success
-        }
-
         center.skipBackwardCommand.isEnabled = true
         center.skipBackwardCommand.preferredIntervals = [10]
-        center.skipBackwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(max(0, self.positionMs - 10_000))
-            return .success
-        }
+        remoteCommandTargets.add(center.playCommand, intent: .play, action: action)
+        remoteCommandTargets.add(center.pauseCommand, intent: .pause, action: action)
+        remoteCommandTargets.add(center.togglePlayPauseCommand, intent: .toggle, action: action)
+        remoteCommandTargets.add(center.changePlaybackPositionCommand, resolve: { event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent, event.positionTime.isFinite else { return nil }
+            return .position(event.positionTime)
+        }, action: action)
+        remoteCommandTargets.add(center.skipForwardCommand, intent: .skip(10), action: action)
+        remoteCommandTargets.add(center.skipBackwardCommand, intent: .skip(-10), action: action)
+    }
+
+    private func teardownRemoteCommands() {
+        remoteCommandTargets.stop()
+        remoteCommandCenter = nil
+        didConfigureRemoteCommands = false
     }
     #endif
 
