@@ -1679,7 +1679,9 @@ struct ContentView: View {
         }
 
         PictureInPictureManager.shared.onDidStopPiPWithoutRestoring = {
-            PlaybackWakeLock.release()
+            if let coordinator = PictureInPictureManager.shared.activeCoordinator {
+                PlaybackWakeLock.release(ownerID: coordinator.wakeLockOwnerID)
+            }
             let sourceURL = PictureInPictureManager.shared.activeCoordinator?.torrentStreamSourceURL
             Task {
                 guard let sourceURL else { return }

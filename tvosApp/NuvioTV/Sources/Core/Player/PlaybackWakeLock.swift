@@ -52,20 +52,21 @@ enum PlaybackIdlePolicy {
 
 /// Keeps Apple TV awake while playback is actually in progress.
 ///
-/// Acquire for the `PlayerView` lifetime (including Picture in Picture), then
+/// Acquire for the playback session (including Picture in Picture), then
 /// call `setPreventsIdle` as status changes so a paused session can sleep.
 /// Reassert periodically in case the system or another UI path clears the flag
 /// while video is still playing.
 @MainActor
 enum PlaybackWakeLock {
-    private static var holdCount = 0
+    private static var owners = Set<UUID>()
     private static var preventsIdle = true
     private static var reassertTimer: Timer?
 
-    /// Begin a player-session hold. Nested acquires are reference-counted.
-    static func acquire() {
-        holdCount += 1
-        if holdCount == 1 {
+    /// Reappearing views for the same session reuse its existing hold.
+    static func acquire(ownerID: UUID) {
+        let wasEmpty = owners.isEmpty
+        owners.insert(ownerID)
+        if wasEmpty {
             preventsIdle = true
         }
         apply()
@@ -74,9 +75,9 @@ enum PlaybackWakeLock {
     }
 
     /// End preventing sleep when the last holder releases.
-    static func release() {
-        holdCount = max(0, holdCount - 1)
-        if holdCount == 0 {
+    static func release(ownerID: UUID) {
+        owners.remove(ownerID)
+        if owners.isEmpty {
             reassertTimer?.invalidate()
             reassertTimer = nil
             preventsIdle = true
@@ -87,18 +88,18 @@ enum PlaybackWakeLock {
     /// Update whether the current hold should block screensaver / sleep.
     static func setPreventsIdle(_ value: Bool) {
         preventsIdle = value
-        guard holdCount > 0 else { return }
+        guard !owners.isEmpty else { return }
         apply()
     }
 
     /// Re-apply the current idle policy while a hold is active (safe to call often).
     static func reassert() {
-        guard holdCount > 0 else { return }
+        guard !owners.isEmpty else { return }
         apply()
     }
 
     private static func apply() {
-        let disabled = holdCount > 0 && preventsIdle
+        let disabled = !owners.isEmpty && preventsIdle
         if UIApplication.shared.isIdleTimerDisabled != disabled {
             UIApplication.shared.isIdleTimerDisabled = disabled
         }

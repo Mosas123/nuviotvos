@@ -22,10 +22,6 @@ extension PlayerView {
         animatedLayers
             .onAppear {
                 TVHomeDebugTrace.log("player.appear meta=\(meta.id)")
-                // Hold for the player session, then sync so pause/end can sleep
-                // without dropping the lock during buffering or source switches.
-                PlaybackWakeLock.acquire()
-                syncPlaybackWakeLock()
                 focusRemoteInput()
                 viewModel.adoptStartupBenchmarkToken(initialStartupBenchmarkToken)
                 let cachedBinge = BingeGroupStore.load(seriesId: meta.id)
@@ -51,6 +47,10 @@ extension PlayerView {
                     sourceID: sourceID,
                     currentEpisode: currentEpisode
                 )
+                // load() may adopt the retained PiP coordinator. Acquire for
+                // that session so restoring fullscreen cannot add another hold.
+                PlaybackWakeLock.acquire(ownerID: viewModel.sessionCoordinator.wakeLockOwnerID)
+                syncPlaybackWakeLock()
                 if subtitle != PlaybackMarkers.trailerSubtitle {
                     viewModel.fetchExternalSubtitles(
                         contentId: subtitleContentId,
@@ -81,7 +81,7 @@ extension PlayerView {
                     }
                 }
                 if !PictureInPictureManager.shared.isPictureInPictureActive {
-                    PlaybackWakeLock.release()
+                    PlaybackWakeLock.release(ownerID: viewModel.sessionCoordinator.wakeLockOwnerID)
                     viewModel.shutdown()
                     Task {
                         guard let sourceURL else { return }
