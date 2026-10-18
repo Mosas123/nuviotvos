@@ -10685,8 +10685,8 @@ private struct AddonsSettingsSection: View {
     /// the account instead of returning on the next pull.
     private func removeAddon(at index: Int) {
         guard syncedAddons.indices.contains(index) else { return }
-        syncedAddons.remove(at: index)
-        persistSyncedAddons()
+        let removed = syncedAddons.remove(at: index)
+        persistSyncedAddons(removedAddon: removed)
     }
 
     /// Finalizing the URL field is an add operation, not just a local settings
@@ -10721,12 +10721,16 @@ private struct AddonsSettingsSection: View {
         )
     }
 
-    private func persistSyncedAddons() {
+    private func persistSyncedAddons(removedAddon: SyncedAddon? = nil) {
         let editedProfileId = ProfileSettings.activeProfileID ?? ""
         let preferences = syncedAddons.map {
             StreamAddonPreference(url: $0.url.absoluteString, enabled: $0.isEnabled)
         }
-        CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences)
+        var identities: [String: String] = [:]
+        for addon in syncedAddons + [removedAddon].compactMap({ $0 }) {
+            if let id = addon.manifestID { identities[addon.url.absoluteString] = id }
+        }
+        CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, knownManifestIDs: identities)
         TVHomeCatalogOrder.setDisabledAddonSources(
             ids: Set(syncedAddons.filter { !$0.isEnabled }.compactMap(\.manifestID)),
             names: Set(
@@ -10938,6 +10942,7 @@ private struct AddonsSettingsSection: View {
             preferences.removeAll(where: { $0.url.caseInsensitiveCompare(cinemetaURL) == .orderedSame })
             CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences)
             CinemetaCatalogRepository.setCinemetaDisabled(true)
+            AddonCatalogRemovalStore.removeBuiltInCinemeta(in: ProfileSettings.current)
             streamAddonManifestStates = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestStates) ?? ""
             NotificationCenter.default.post(
                 name: NuvioSyncManager.addonOrderChangedNotification,
