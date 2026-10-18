@@ -11262,6 +11262,11 @@ private struct AddonReorderButton: View {
 
 // MARK: - Home catalog reordering
 
+private enum HomeCatalogOrderFocus: Hashable {
+    case refresh
+    case row(String)
+}
+
 /// Settings → Layout → Home Catalogs: reorder the rows Home shows. The list
 /// comes from the snapshot Home writes on every load; moves persist to the
 /// active profile's settings and re-apply to a mounted Home immediately.
@@ -11271,6 +11276,14 @@ private struct HomeCatalogOrderSection: View {
     @AppStorage(SettingsKey.catalogAutoRefreshInterval) private var catalogAutoRefreshInterval = "30 Minutes"
     private let catalogAutoRefreshOptions = ["Disabled", "15 Minutes", "30 Minutes", "1 Hour", "Always"]
     @State private var rows: [TVHomeCatalogOrder.SnapshotRow] = []
+    @FocusState private var focusedControl: HomeCatalogOrderFocus?
+    @State private var deletionFocusRequest: DeletionFocusRequest?
+
+    private struct DeletionFocusRequest: Equatable {
+        let target: HomeCatalogOrderFocus
+        let profileID: String?
+    }
+
     /// Enabled state per row, read once on appear and updated by the taps here.
     /// Kept beside `rows` rather than re-read per redraw: each read decodes two
     /// JSON blobs out of the profile's settings.
@@ -11286,6 +11299,7 @@ private struct HomeCatalogOrderSection: View {
             ) {
                 NotificationCenter.default.post(name: TVHomeCatalogOrder.forceRefreshNotification, object: nil)
             }
+            .focused($focusedControl, equals: .refresh)
 
             SettingsOptionRow(
                 title: L10n.string("settings_catalog_auto_refresh", fallback: "Auto-Refresh Catalogs"),
@@ -11300,6 +11314,8 @@ private struct HomeCatalogOrderSection: View {
             } else {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                     HomeCatalogOrderRow(
+                        rowID: row.id,
+                        focus: $focusedControl,
                         title: row.title,
                         addonName: row.addonName,
                         isEnabled: enabledByRowId[row.id] ?? true,
@@ -11316,6 +11332,25 @@ private struct HomeCatalogOrderSection: View {
             }
         }
         .onAppear(perform: reload)
+        .onDisappear { deletionFocusRequest = nil }
+        .task(id: deletionFocusRequest) {
+            guard let request = deletionFocusRequest else { return }
+            // Let SwiftUI remove the deleted button and bind the surviving row
+            // before handing focus back to the list.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            guard ProfileSettings.activeProfileID == request.profileID else {
+                deletionFocusRequest = nil
+                return
+            }
+            if case .row(let id) = request.target,
+               !rows.contains(where: { $0.id == id && $0.settingsKey != nil }) {
+                focusedControl = .refresh
+            } else {
+                focusedControl = request.target
+            }
+            deletionFocusRequest = nil
+        }
         .onReceive(NotificationCenter.default.publisher(for: NuvioSyncManager.addonOrderChangedNotification).receive(on: RunLoop.main)) { _ in
             reload()
         }
@@ -11348,11 +11383,19 @@ private struct HomeCatalogOrderSection: View {
     }
 
     private func deleteRow(_ row: TVHomeCatalogOrder.SnapshotRow) {
-        guard row.settingsKey != nil else { return }
+        guard row.settingsKey != nil,
+              let index = rows.firstIndex(where: { $0.id == row.id }) else { return }
+        let neighbor = rows.dropFirst(index + 1).first(where: { $0.settingsKey != nil })
+            ?? rows.prefix(index).last(where: { $0.settingsKey != nil })
+        let request = DeletionFocusRequest(
+            target: neighbor.map { .row($0.id) } ?? .refresh,
+            profileID: ProfileSettings.activeProfileID
+        )
         rows.removeAll { $0.id == row.id }
         enabledByRowId.removeValue(forKey: row.id)
         TVHomeCatalogOrder.deleteRow(row)
         NuvioSyncManager.current?.noteHomeCatalogSettingsChangedLocally()
+        deletionFocusRequest = request
     }
 
     private func move(_ index: Int, up: Bool) {
@@ -11366,6 +11409,8 @@ private struct HomeCatalogOrderSection: View {
 }
 
 private struct HomeCatalogOrderRow: View {
+    let rowID: String
+    let focus: FocusState<HomeCatalogOrderFocus?>.Binding
     let title: String
     let addonName: String?
     let isEnabled: Bool
@@ -11380,7 +11425,7 @@ private struct HomeCatalogOrderRow: View {
     var onDelete: (() -> Void)? = nil
     let onMove: (Bool) -> Void
 
-    @FocusState private var isFocused: Bool
+    private var isFocused: Bool { focus.wrappedValue == .row(rowID) }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -11409,7 +11454,7 @@ private struct HomeCatalogOrderRow: View {
             }
             .buttonStyle(PosterCardButtonStyle())
             .disabled(!canToggle)
-            .focused($isFocused)
+            .focused(focus, equals: .row(rowID))
             .focusEffectDisabledIfAvailable()
             .entryLockable()
 
