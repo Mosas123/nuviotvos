@@ -2464,9 +2464,18 @@ final class CatalogWatchedMetadataCache {
     private var metadataByKey: [String: NuvioMeta] = [:]
     private var inFlightByKey: [String: Task<NuvioMeta?, Never>] = [:]
     private var decisionsByKey: [String: Int] = [:]
+    private var generation: UInt64 = 0
+    private let notificationCenter: NotificationCenter
+    private var observers: [NSObjectProtocol] = []
+    private let metadataFetcher: (@MainActor (String, String) async -> NuvioMeta?)?
 
-    init() {
-        NotificationCenter.default.addObserver(
+    init(
+        notificationCenter: NotificationCenter = .default,
+        metadataFetcher: (@MainActor (String, String) async -> NuvioMeta?)? = nil
+    ) {
+        self.notificationCenter = notificationCenter
+        self.metadataFetcher = metadataFetcher
+        observers.append(notificationCenter.addObserver(
             forName: WatchedStore.changedNotification,
             object: nil,
             queue: .main
@@ -2474,7 +2483,36 @@ final class CatalogWatchedMetadataCache {
             MainActor.assumeIsolated {
                 self?.decisionsByKey.removeAll()
             }
+        })
+        var purgeNotifications = [AppCacheManager.didClearCacheNotification]
+        #if canImport(UIKit)
+        purgeNotifications.append(UIApplication.didReceiveMemoryWarningNotification)
+        #endif
+        for name in purgeNotifications {
+            observers.append(notificationCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.purgeTransientValues()
+                }
+            })
         }
+    }
+
+    deinit {
+        for observer in observers { notificationCenter.removeObserver(observer) }
+    }
+
+    /// Drop reconstructible badge data without changing watched history or
+    /// cancelling a metadata request that a user action may still need.
+    func purgeTransientValues() {
+        generation &+= 1
+        metadataByKey.removeAll()
+        decisionsByKey.removeAll()
+        inFlightByKey.removeAll()
+        Self.tracker.set(count: 0)
     }
 
     func cachedDecision(for key: String) -> Int? {
@@ -2486,12 +2524,16 @@ final class CatalogWatchedMetadataCache {
     }
 
     func fullMetadata(metaId: String, type: String, preview: NuvioMeta?) async -> NuvioMeta? {
+        let requestGeneration = generation
         let profile = WatchedStore.activeProfileId ?? "default"
         let key = "\(profile)\u{1f}\(type.lowercased())\u{1f}\(metaId.lowercased())"
         if let cached = metadataByKey[key] { return cached }
         if let inFlight = inFlightByKey[key] { return await inFlight.value }
 
         let task: Task<NuvioMeta?, Never> = Task(priority: .utility) {
+            if let metadataFetcher {
+                return await metadataFetcher(metaId, type) ?? preview
+            }
             // Reuses memory/disk cached metadata instead of forcing full network downloads
             if let cached = try? await repository.getMetadata(id: metaId, type: type) {
                 return cached
@@ -2501,6 +2543,9 @@ final class CatalogWatchedMetadataCache {
         }
         inFlightByKey[key] = task
         let resolved = await task.value
+        // An older completion must not repopulate a purged cache or remove
+        // the replacement request registered under the same key.
+        guard generation == requestGeneration else { return resolved }
         inFlightByKey[key] = nil
         if let resolved {
             metadataByKey[key] = resolved
