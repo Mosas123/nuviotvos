@@ -1241,6 +1241,9 @@ class PlayerViewModel: ObservableObject {
             }
             self.currentEpisodeVideo = currentEpisode
         }
+        if TorrentEngineManager.shared.activeStreamURL == url {
+            sessionCoordinator.torrentStreamSourceURL = url
+        }
         self.activeStreamURL = url.absoluteString
         self.activeHTTPHeaders = httpHeaders
         if !isTrailerPlayback {

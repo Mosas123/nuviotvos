@@ -88,7 +88,7 @@ extension WatchPartyPlayback {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let rate = try c.decodeIfPresent(Float.self, forKey: .rate) ?? 1
         guard rate.isFinite, rate > 0 else {
-            throw DecodingError.dataCorruptedError(in: c, forKey: .rate, debugDescription: "Invalid playback rate")
+            throw DecodingError.dataCorruptedError(forKey: .rate, in: c, debugDescription: "Invalid playback rate")
         }
         self.init(
             seq: try c.decode(Int64.self, forKey: .seq),

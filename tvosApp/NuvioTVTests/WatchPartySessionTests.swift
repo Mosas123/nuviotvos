@@ -153,6 +153,41 @@ final class WatchPartySessionTests: XCTestCase {
         XCTAssertEqual(remote.calls, ["heartbeat"])
     }
 
+    func testOwnRemovalPublishesOneTerminalReasonAndClosesChannel() async throws {
+        let remote = Remote(snapshot()), channel = Channel()
+        let session = session(remote, channels: [channel])
+        defer { session.onChange = nil; session.stop() }
+        try await session.start(snapshot: snapshot())
+        var exits: [WatchPartyMembershipExit?] = []
+        session.onChange = { if session.connection == .stopped { exits.append(session.membershipExit) } }
+        channel.receive?(.message(name: "member_left", payload: Data(#"{"member_id":"me","reason":"removed"}"#.utf8)))
+        XCTAssertEqual(exits, [.removed])
+        XCTAssertEqual(session.membershipExit, .removed)
+        XCTAssertFalse(channel.isConnected)
+        XCTAssertEqual(remote.calls, ["heartbeat", "clock"])
+    }
+
+    func testNotMemberDoesNotAssumeExpirationOrAutomaticallyRejoin() async {
+        let remote = Remote(WatchPartySnapshot(error: "not_member")), channel = Channel()
+        let session = session(remote, channels: [channel])
+        do { try await session.start(snapshot: snapshot()); XCTFail("Expected lost membership") }
+        catch { XCTAssertEqual(session.membershipExit, .membershipLost) }
+        XCTAssertNil(session.party)
+        XCTAssertFalse(channel.isConnected)
+        XCTAssertEqual(remote.calls, ["heartbeat"])
+    }
+
+    func testBackendDisabledEventClosesWithUnavailableReason() async throws {
+        let remote = Remote(snapshot()), channel = Channel()
+        let session = session(remote, channels: [channel])
+        defer { session.stop() }
+        try await session.start(snapshot: snapshot())
+        channel.receive?(.message(name: "ended", payload: Data(#"{"reason":"disabled"}"#.utf8)))
+        XCTAssertEqual(session.membershipExit, .unavailable)
+        XCTAssertEqual(session.failure, .unavailable)
+        XCTAssertFalse(channel.isConnected)
+    }
+
     func testOldSendFailureCannotCloseAReplacementConnection() async throws {
         let remote = Remote(snapshot())
         let old = Channel(), fresh = Channel()

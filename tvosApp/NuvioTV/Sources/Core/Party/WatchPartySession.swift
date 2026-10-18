@@ -15,8 +15,9 @@ extension WatchPartyAPI: WatchPartySessionRemote {}
 
 enum WatchPartyConnectionState: Equatable { case stopped, connecting, reconciling, ready, recovering }
 enum WatchPartySessionError: Error, Equatable { case invalidSnapshot, notReady, forbidden, sequenceExhausted }
+enum WatchPartyMembershipExit: Equatable { case membershipLost, removed, ended, notFound, unavailable }
 
-/// Owns one accepted create/join result. The future app service replaces it on context changes.
+/// Owns one accepted create/join result. WatchPartyService replaces it on context changes.
 /// No player, view, global Auth, or automatic create/join retries are owned here.
 @MainActor
 final class WatchPartySession {
@@ -30,6 +31,7 @@ final class WatchPartySession {
     private(set) var playback: WatchPartyPlayback?
     private(set) var presence: [String: WatchPartyPresence] = [:]
     private(set) var failure: WatchPartyFailure?
+    private(set) var membershipExit: WatchPartyMembershipExit?
     var onChange: (@MainActor () -> Void)?
     /// Stream sharing remains opt-in in the future binding; never automatically resolve a URL here.
     var onStream: (@MainActor (Data) -> Void)?
@@ -40,6 +42,7 @@ final class WatchPartySession {
     private let deviceID: String
     private let makeChannel: ChannelFactory
     private let sleep: Sleep
+    private let connectionTasksEnabled: Bool
     private var clock: WatchPartyClock
     private var generation = UUID()
     private var connectionID = UUID()
@@ -47,6 +50,9 @@ final class WatchPartySession {
     private var channel: (any WatchPartyChannel)?
     private var recoveryTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var coordinatorTask: Task<Void, Never>?
+    private var clockTask: Task<Void, Never>?
+    private var waitingCoordinator = WatchPartyWaitingCoordinator()
     private var persistTask: Task<Void, Never>?
     private var persistenceID = UUID()
     private var pendingPersistence: WatchPartyPlayback?
@@ -56,6 +62,7 @@ final class WatchPartySession {
     init(remote: any WatchPartySessionRemote, context: WatchPartyRequestContext, deviceID: String,
          isCurrent: @escaping WatchPartyAPI.ContextValidator, makeChannel: @escaping ChannelFactory,
          clock: WatchPartyClock = WatchPartyClock(),
+         connectionTasksEnabled: Bool = true,
          sleep: @escaping Sleep = { try await Task.sleep(nanoseconds: $0) }) {
         self.remote = remote
         self.context = context
@@ -64,6 +71,7 @@ final class WatchPartySession {
         self.makeChannel = makeChannel
         self.clock = clock
         self.sleep = sleep
+        self.connectionTasksEnabled = connectionTasksEnabled
     }
 
     var canControl: Bool {
@@ -103,9 +111,15 @@ final class WatchPartySession {
 
     /// Called explicitly on account/backend/profile loss or true membership teardown.
     func stop() {
+        clearState()
+        onChange?()
+    }
+
+    private func clearState() {
         generation = UUID()
         recoveryTask?.cancel(); recoveryTask = nil
         heartbeatTask?.cancel(); heartbeatTask = nil
+        cancelConnectionTasks()
         cancelPersistence()
         channel?.close(); channel = nil
         connection = .stopped
@@ -113,8 +127,9 @@ final class WatchPartySession {
         localPresence = nil
         outboundSequence = 0
         failure = nil
+        membershipExit = nil
+        waitingCoordinator.reset()
         clock.reset()
-        onChange?()
     }
 
     /// Call from the future service's foreground/auth-refresh transition, preserving PiP ownership.
@@ -144,6 +159,7 @@ final class WatchPartySession {
         // Presence is current local state, not an offline gesture queue.
         localPresence = value
         presence[memberID] = value
+        if status == .ready { waitingCoordinator.memberReady(memberID) }
         onChange?()
         guard connection == .ready, let channel else { return }
         let epoch = generation
@@ -234,6 +250,7 @@ final class WatchPartySession {
         connection = .ready; failure = nil; onChange?()
         try await send("status", own, epoch: epoch)
         try await send("state_request", MemberPayload(memberID: memberID), epoch: epoch)
+        startConnectionTasks(epoch: epoch, attempt: attempt)
     }
 
     private func checkContext() throws {
@@ -264,11 +281,64 @@ final class WatchPartySession {
 
     private func invalidateConnection() {
         connectionID = UUID()
+        cancelConnectionTasks()
+        waitingCoordinator.disconnected()
         cancelPersistence()
         channel?.close(); channel = nil
         connection = .recovering
         presence = presence.filter { $0.key == memberID }
         onChange?()
+    }
+
+    private func cancelConnectionTasks() {
+        coordinatorTask?.cancel(); coordinatorTask = nil
+        clockTask?.cancel(); clockTask = nil
+    }
+
+    private func startConnectionTasks(epoch: UUID, attempt: UUID) {
+        cancelConnectionTasks()
+        guard connectionTasksEnabled else { return }
+        let sleep = self.sleep
+        coordinatorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await sleep(WatchPartyWaitingCoordinator.tickNanoseconds) } catch { return }
+                guard let self, self.active(epoch), self.connectionID == attempt, !Task.isCancelled else { return }
+                guard self.connection == .ready, let party = self.party,
+                      let memberID = self.memberID, let playback = self.playback else { continue }
+                let decision = self.waitingCoordinator.decision(party: party, memberID: memberID,
+                                                              members: self.members, presence: self.presence,
+                                                              playback: playback, connected: self.channel?.isConnected == true,
+                                                              uptime: self.clock.mark(), serverNowMs: self.clock.nowMs())
+                guard let decision else { continue }
+                do {
+                    switch decision {
+                    case .pause(let position):
+                        try await self.publish(paused: true, positionMs: position, rate: playback.rate, waiting: true)
+                    case .resume(let position):
+                        try await self.publish(paused: false, positionMs: position, rate: playback.rate)
+                    }
+                } catch {
+                    guard self.active(epoch), self.connectionID == attempt, !Task.isCancelled else { return }
+                    // Never queue or replay a coordinator decision after a failed admission/send.
+                }
+            }
+        }
+        // One initial sample was taken before admission. Three more complete four RPC samples.
+        clockTask = Task { [weak self] in
+            for _ in 0..<3 {
+                do { try await sleep(400_000_000) } catch { return }
+                guard let self, self.active(epoch), self.connectionID == attempt, !Task.isCancelled else { return }
+                let sent = self.clock.mark()
+                do {
+                    let server = try await self.remote.clock()
+                    guard self.active(epoch), self.connectionID == attempt, !Task.isCancelled else { return }
+                    self.clock.addSample(serverMs: server, sentAt: sent)
+                } catch {
+                    guard self.active(epoch), self.connectionID == attempt, !Task.isCancelled else { return }
+                    // Keep the existing anchor when a refinement sample fails.
+                }
+            }
+        }
     }
 
     private func cancelPersistence() {
@@ -385,15 +455,23 @@ final class WatchPartySession {
     private func accept(_ value: WatchPartyPlayback) {
         guard let party, validPlayback(value, for: party) != nil,
               WatchPartyPolicy.isNewer(value, than: playback) else { return }
+        waitingCoordinator.accepted(previous: playback, next: value, mediaKey: party.media.key,
+                                    presence: presence, uptime: clock.mark())
         playback = value
         onChange?()
     }
 
     private func apply(_ snapshot: WatchPartySnapshot) throws {
+        if snapshot.error == "not_member" {
+            finishMembership(.membershipLost, failure: .removed)
+            throw WatchPartySessionError.invalidSnapshot
+        }
         if let error = WatchPartyFailure(serverCode: snapshot.error) {
             switch error {
-            case .removed, .ended, .notFound, .unavailable:
-                stop(); failure = error; onChange?()
+            case .removed: finishMembership(.removed, failure: error)
+            case .ended: finishMembership(.ended, failure: error)
+            case .notFound: finishMembership(.notFound, failure: error)
+            case .unavailable: finishMembership(.unavailable, failure: error)
             default: failure = error; onChange?()
             }
             throw WatchPartySessionError.invalidSnapshot
@@ -404,9 +482,18 @@ final class WatchPartySession {
         let mediaChanged = info.media.key != party?.media.key
         party = info; members = snapshot.members
         presence = presence.filter { key, _ in members.contains { $0.id == key } }
+        waitingCoordinator.retainMembers(Set(members.map(\.id)))
         if mediaChanged || validPlayback(playback, for: info) == nil {
+            if mediaChanged { waitingCoordinator.reset() }
             playback = validPlayback(info.playback, for: info)
         } else if let value = info.playback { accept(value) }
+        onChange?()
+    }
+
+    private func finishMembership(_ reason: WatchPartyMembershipExit, failure: WatchPartyFailure) {
+        clearState()
+        membershipExit = reason
+        self.failure = failure
         onChange?()
     }
 
@@ -422,7 +509,10 @@ final class WatchPartySession {
             for (key, var value) in joins where key != memberID && members.contains(where: { $0.id == key }) {
                 value.memberID = key
                 // Preserve more recent status broadcasts, as Android does.
-                if presence[key] == nil { presence[key] = value }
+                if presence[key] == nil {
+                    if value.status == .ready { waitingCoordinator.memberReady(key) }
+                    presence[key] = value
+                }
             }
             onChange?()
         case let .message(name, data):
@@ -433,6 +523,7 @@ final class WatchPartySession {
             case "status":
                 if let value = try? JSONDecoder().decode(WatchPartyPresence.self, from: data),
                    value.memberID != memberID, members.contains(where: { $0.id == value.memberID }) {
+                    if value.status == .ready { waitingCoordinator.memberReady(value.memberID) }
                     presence[value.memberID] = value; onChange?()
                 }
             case "state_request":
@@ -444,8 +535,17 @@ final class WatchPartySession {
                         if let playback = self.playback { try await self.send("state", playback, epoch: epoch) }
                     } catch { self.lost(epoch: epoch, attempt: attempt) }
                 }
-            case "ended": stop(); failure = .ended; onChange?()
-            case "control", "member_joined", "member_left", "media":
+            case "ended":
+                let reason = try? JSONDecoder().decode(DeparturePayload.self, from: data)
+                if reason?.reason == "disabled" { finishMembership(.unavailable, failure: .unavailable) }
+                else { finishMembership(.ended, failure: .ended) }
+            case "member_left":
+                guard let departure = try? JSONDecoder().decode(DeparturePayload.self, from: data),
+                      let departed = departure.memberID else { return }
+                if departed == memberID {
+                    finishMembership(departure.reason == "removed" ? .removed : .membershipLost, failure: .removed)
+                } else { lost(epoch: epoch, attempt: attempt) }
+            case "control", "member_joined", "media":
                 // Treat server notifications as invalidations, not authoritative permission/media payloads.
                 // Reconcile once through RPC before reopening the send gate.
                 lost(epoch: epoch, attempt: attempt)
@@ -460,5 +560,11 @@ final class WatchPartySession {
     private struct MemberPayload: Codable {
         let memberID: String
         enum CodingKeys: String, CodingKey { case memberID = "member_id" }
+    }
+
+    private struct DeparturePayload: Decodable {
+        let memberID: String?
+        let reason: String?
+        enum CodingKeys: String, CodingKey { case memberID = "member_id", reason }
     }
 }

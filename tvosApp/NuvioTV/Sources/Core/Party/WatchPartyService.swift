@@ -20,7 +20,7 @@ struct WatchPartyEnvironment: Equatable {
 }
 
 enum WatchPartyServiceError: Error, Equatable {
-    case busy, alreadyInRoom, unavailable, membershipOutcomeUncertain, requestFailed
+    case busy, alreadyInRoom, unavailable, membershipOutcomeUncertain, newJoinRequired, requestFailed
     case rejected(WatchPartyFailure)
 }
 
@@ -128,7 +128,9 @@ final class WatchPartyService: ObservableObject {
     func resume() async throws {
         let setup = try begin()
         defer { finish(setup.operation) }
-        guard let session, session.party != nil else { return }
+        guard let session else { return }
+        guard session.membershipExit == nil else { throw WatchPartyServiceError.newJoinRequired }
+        guard session.party != nil else { return }
         do {
             let task = Task { try await session.reconnect() }
             connectionTask = task

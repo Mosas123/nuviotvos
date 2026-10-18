@@ -72,6 +72,7 @@ extension PlayerView {
             }
             .onDisappear {
                 TVHomeDebugTrace.log("player.disappear meta=\(meta.id)")
+                let sourceURL = viewModel.sessionCoordinator.torrentStreamSourceURL
                 viewModel.cancelStartupBenchmark()
                 if subtitle == PlaybackMarkers.trailerSubtitle {
                     let pos = viewModel.clock.position
@@ -83,7 +84,8 @@ extension PlayerView {
                     PlaybackWakeLock.release(ownerID: viewModel.sessionCoordinator.wakeLockOwnerID)
                     viewModel.shutdown()
                     Task {
-                        await TorrentEngineManager.shared.stopActiveStream()
+                        guard let sourceURL else { return }
+                        await TorrentEngineManager.shared.stopActiveStream(for: sourceURL)
                     }
                 }
             }

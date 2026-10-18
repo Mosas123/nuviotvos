@@ -11,6 +11,7 @@ final class TorrentEngineManager: ObservableObject {
     @Published private(set) var currentInfoHash: String?
 
     private var activeSession: TorrentSession?
+    private(set) var activeStreamURL: URL?
     private var statsTimer: AnyCancellable?
     private var startGeneration = 0
 
@@ -51,6 +52,7 @@ final class TorrentEngineManager: ObservableObject {
                 throw CancellationError()
             }
             self.activeSession = session
+            self.activeStreamURL = streamURL
 
             // Start polling stats
             startStatsPolling(for: session)
@@ -64,8 +66,10 @@ final class TorrentEngineManager: ObservableObject {
         }
     }
 
-    /// Stops the currently active torrent stream and tears down its engine.
-    func stopActiveStream() async {
+    /// A delayed player exit may only stop its own server, never a newer one.
+    /// Each TorrentStreamServer URL contains its unique session token.
+    func stopActiveStream(for sourceURL: URL) async {
+        guard activeStreamURL == sourceURL else { return }
         startGeneration &+= 1
         await stopCurrentSession()
     }
@@ -76,6 +80,7 @@ final class TorrentEngineManager: ObservableObject {
 
         let session = activeSession
         activeSession = nil
+        activeStreamURL = nil
         isStreaming = false
         currentInfoHash = nil
         activeStats = SwarmStats()

@@ -85,6 +85,7 @@ final class WatchPartyPersistenceTests: XCTestCase {
         let context = WatchPartyRequestContext(backendIdentity: "https://party.example.test", userID: "user", profileID: "profile", epoch: UUID())
         return WatchPartySession(remote: remote, context: context, deviceID: "device", isCurrent: { _ in true },
                                  makeChannel: { Channel() }, clock: WatchPartyClock(uptime: uptime, wallTimeMs: { 20_000 }),
+                                 connectionTasksEnabled: false,
                                  sleep: { nanos in
             if nanos == 0 { return }
             if nanos < 120_000_000_000 { try await delay.wait(nanos) }

@@ -1682,8 +1682,10 @@ struct ContentView: View {
             if let coordinator = PictureInPictureManager.shared.activeCoordinator {
                 PlaybackWakeLock.release(ownerID: coordinator.wakeLockOwnerID)
             }
+            let sourceURL = PictureInPictureManager.shared.activeCoordinator?.torrentStreamSourceURL
             Task {
-                await TorrentEngineManager.shared.stopActiveStream()
+                guard let sourceURL else { return }
+                await TorrentEngineManager.shared.stopActiveStream(for: sourceURL)
             }
         }
     }
@@ -2696,9 +2698,6 @@ struct ContentView: View {
                 )
             },
             onRequestSources: isTrailer ? nil : {
-                Task {
-                    await TorrentEngineManager.shared.stopActiveStream()
-                }
                 withAnimation(.easeInOut(duration: 0.28)) {
                     reopenStreamPickerOnDetails = true
                     reopenStreamPickerEpisode = playbackCurrentEpisode
@@ -2774,9 +2773,6 @@ struct ContentView: View {
     }
 
     private func dismissPlayer(meta: NuvioMeta, subtitle: String) {
-        Task {
-            await TorrentEngineManager.shared.stopActiveStream()
-        }
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         withAnimation(.easeInOut(duration: 0.24)) {
             switch playbackOrigin {

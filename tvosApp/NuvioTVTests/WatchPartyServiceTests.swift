@@ -154,6 +154,19 @@ final class WatchPartyServiceTests: XCTestCase {
         operation = nil
     }
 
+    func testResumeAfterRemovalRequiresExplicitNewJoin() async throws {
+        let env = environment(), remote = Remote(), channel = Channel()
+        let service = service(remote, channel: channel, environment: { env })
+        defer { service.invalidateContext() }
+        try await service.create(media: remote.media)
+        channel.receive?(.message(name: "member_left", payload: Data(#"{"member_id":"me","reason":"removed"}"#.utf8)))
+        do { try await service.resume(); XCTFail("Expected explicit new-join requirement") }
+        catch { XCTAssertEqual(error as? WatchPartyServiceError, .newJoinRequired) }
+        XCTAssertEqual(service.session?.membershipExit, .removed)
+        XCTAssertFalse(remote.calls.contains("join"))
+        XCTAssertEqual(remote.calls.filter { $0 == "create" }.count, 1)
+    }
+
     @MainActor
     private final class Remote: WatchPartyServiceRemote {
         let media = WatchPartyMedia(type: "movie", metaID: "tt1", metaType: "movie")
@@ -190,9 +203,11 @@ final class WatchPartyServiceTests: XCTestCase {
         var isConnected = false
         var openFails = false
         var onOpen: (() -> Void)?
+        var receive: (@MainActor (WatchPartyChannelEvent) -> Void)?
         func open(partyID: String, memberID: String, receive: @escaping @MainActor (WatchPartyChannelEvent) -> Void) async throws {
             if openFails { throw WatchPartyChannelError.disconnected }
             isConnected = true
+            self.receive = receive
             onOpen?()
         }
         func send(event: String, payload: Data) async throws {}
