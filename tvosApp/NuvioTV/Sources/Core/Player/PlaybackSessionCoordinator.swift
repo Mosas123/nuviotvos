@@ -131,6 +131,8 @@ final class PlaybackSessionCoordinator: ObservableObject {
     var prepareForHandoff: ((inout PlaybackLoadRequest) -> Void)?
     var onBackendHandoff: ((PlaybackLoadRequest) -> Void)?
     private(set) var currentCacheSessionToken: String?
+    /// Retain ownership across PiP and later switches to a non-torrent source.
+    var torrentStreamSourceURL: URL?
     private(set) var playbackCompletionTracker: PlaybackCompletionTracker?
 
     func beginNewPlaybackCompletionSession(
