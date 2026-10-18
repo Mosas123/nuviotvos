@@ -85,35 +85,68 @@ struct CloudLibraryService {
     }
 
     func loadItems(providerId: String? = nil) async throws -> [CloudItem] {
+        try Task.checkCancellation()
         let providers = connectedProviders
         guard !providers.isEmpty else { throw CloudLibraryError.request }
 
         if let providerId, let specific = providers.first(where: { $0.id == providerId }) {
             guard let prov = providerInstance(for: specific.id) else { return [] }
-            return try await prov.listItems(apiKey: specific.apiKey)
+            let items = try await prov.listItems(apiKey: specific.apiKey)
+            try Task.checkCancellation()
+            return items
         }
 
         if providers.count == 1, let single = providers.first {
             guard let prov = providerInstance(for: single.id) else { return [] }
-            return try await prov.listItems(apiKey: single.apiKey)
+            let items = try await prov.listItems(apiKey: single.apiKey)
+            try Task.checkCancellation()
+            return items
         }
 
-        return try await withThrowingTaskGroup(of: [CloudItem].self) { group in
-            for p in providers {
-                guard let prov = providerInstance(for: p.id) else { continue }
-                let key = p.apiKey
+        let requests: [(provider: CloudLibraryProvider, apiKey: String)] = providers.compactMap { p in
+            guard let provider = providerInstance(for: p.id) else { return nil }
+            return (provider, p.apiKey)
+        }
+        return try await Self.loadProviderItems(requests)
+    }
+
+    /// A successful empty response is different from an unavailable provider.
+    /// Keep partial results, but never report total failure as an empty library.
+    static func loadProviderItems(
+        _ requests: [(provider: CloudLibraryProvider, apiKey: String)]
+    ) async throws -> [CloudItem] {
+        try Task.checkCancellation()
+        return try await withThrowingTaskGroup(of: Result<[CloudItem], Error>.self) { group in
+            for request in requests {
                 group.addTask {
                     do {
-                        return try await prov.listItems(apiKey: key)
+                        try Task.checkCancellation()
+                        let items = try await request.provider.listItems(apiKey: request.apiKey)
+                        try Task.checkCancellation()
+                        return .success(items)
                     } catch {
-                        return []
+                        if Task.isCancelled || error is CancellationError {
+                            throw CancellationError()
+                        }
+                        return .failure(error)
                     }
                 }
             }
             var all: [CloudItem] = []
-            for try await items in group {
-                all.append(contentsOf: items)
+            var successes = 0
+            var failure: Error?
+            for try await result in group {
+                try Task.checkCancellation()
+                switch result {
+                case let .success(items):
+                    successes += 1
+                    all.append(contentsOf: items)
+                case let .failure(error):
+                    failure = error
+                }
             }
+            try Task.checkCancellation()
+            guard successes > 0 else { throw failure ?? CloudLibraryError.request }
             return all
         }
     }
