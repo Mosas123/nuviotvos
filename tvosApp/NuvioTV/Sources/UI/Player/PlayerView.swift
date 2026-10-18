@@ -65,10 +65,11 @@ struct PlayerView: View {
     var onPlayRecommendation: ((_ meta: NuvioMeta, _ playManually: Bool) -> Void)? = nil
     var onOpenRecommendationDetails: ((_ meta: NuvioMeta) -> Void)? = nil
     var onBack: () -> Void
+    let partyPlayback: WatchPartyPlayerMount?
 
     /// An explicit runtime can retain the same model across fullscreen / PiP surfaces.
-    /// Existing callers keep lazy StateObject creation. Supplying a model alone does not
-    /// bypass load() onAppear: the runtime-aware lifecycle is a separate integration step.
+    /// Existing callers keep lazy StateObject creation. A checked Party mount supplies its
+    /// own model and lifecycle; a standalone viewModel argument supplies only the model.
     @MainActor
     init(
         url: URL,
@@ -102,9 +103,11 @@ struct PlayerView: View {
         onPlayRecommendation: ((NuvioMeta, Bool) -> Void)? = nil,
         onOpenRecommendationDetails: ((NuvioMeta) -> Void)? = nil,
         viewModel: PlayerViewModel? = nil,
+        partyPlayback: WatchPartyPlayerMount? = nil,
         onBack: @escaping () -> Void
     ) {
-        _viewModel = StateObject(wrappedValue: viewModel ?? PlayerViewModel())
+        _viewModel = StateObject(wrappedValue: partyPlayback?.viewModel ?? viewModel ?? PlayerViewModel())
+        self.partyPlayback = partyPlayback
         self.url = url
         self.meta = meta
         self.subtitle = subtitle
@@ -139,6 +142,7 @@ struct PlayerView: View {
     }
 
     @State var didHandleFinished = false
+    @State var partySurface: WatchPartyPlayerRuntime.Surface?
     @State var didReportPlaybackStarted = false
     @State var lastBecameActiveAt: Date = Date()
     @State var requestedControlFocus: PlayerControlFocus? = nil

@@ -172,5 +172,5 @@ final class WatchPartyPlaybackRuntime<Resource: AnyObject> {
 
 /// Create the model with an explicitly supplied PlaybackSessionCoordinator so an unrelated
 /// PictureInPictureManager.activeCoordinator cannot be adopted at a fresh Party launch.
-/// Still inert: app root / PlayerView lifecycle / party binding are connected in later blocks.
+/// The opt-in PlayerView mount can consume this owner; app root and party binding are still pending.
 typealias WatchPartyPlayerRuntime = WatchPartyPlaybackRuntime<PlayerViewModel>

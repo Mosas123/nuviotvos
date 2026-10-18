@@ -326,6 +326,7 @@ class PlayerViewModel: ObservableObject {
     private var controlsHideTimer: Timer?
     private var hasLoaded = false
     private var didShutdown = false
+    private let adoptsPictureInPictureSession: Bool
     private var isTrailerPlaybackSession = false
     private var trailerEndConfirmation = TrailerEndConfirmation()
     private var hasClearedDismissalsForCurrentPlaybackSession = false
@@ -531,16 +532,18 @@ class PlayerViewModel: ObservableObject {
 
     init(
         sessionCoordinator suppliedCoordinator: PlaybackSessionCoordinator? = nil,
+        adoptsPictureInPictureSession: Bool = true,
         scrubThumbnailProvider: (any ScrubThumbnailProviding)? = nil,
         pauseOverlayDelaySeconds: TimeInterval = 15
     ) {
+        self.adoptsPictureInPictureSession = adoptsPictureInPictureSession
         suppliedScrubThumbnailProvider = scrubThumbnailProvider
         self.pauseOverlayDelaySeconds = max(0, pauseOverlayDelaySeconds)
         // A PiP restore creates this view model after the app has already
         // dismissed the original PlayerView. Adopt the retained coordinator
         // before SwiftUI mounts a surface so it never binds a fresh, empty
         // Aether controller for the first render pass.
-        sessionCoordinator = suppliedCoordinator ?? PictureInPictureManager.shared.activeCoordinator
+        sessionCoordinator = suppliedCoordinator ?? (adoptsPictureInPictureSession ? PictureInPictureManager.shared.activeCoordinator : nil)
             ?? PlaybackSessionCoordinator()
         activeEngineKind = sessionCoordinator.activeBackend
         sessionCoordinator.prepareControllers()
@@ -853,7 +856,8 @@ class PlayerViewModel: ObservableObject {
 
         // Adopt active Picture in Picture session if already playing this content
         let pipManager = PictureInPictureManager.shared
-        if let activeCoord = pipManager.activeCoordinator,
+        if adoptsPictureInPictureSession,
+           let activeCoord = pipManager.activeCoordinator,
            pipManager.activeContext?.url == url,
            pipManager.isPictureInPictureActive
             || pipManager.isRestoringUIInProgress
@@ -3166,9 +3170,36 @@ class PlayerViewModel: ObservableObject {
         pauseOverlayTask = nil
     }
 
-    func shutdown() {
+    /// Reattach the same Party model without applying stale launch metadata or restarting load work.
+    /// AetherPlayerSurface still owns the PiP manager's fullscreenSurfaceDidRebind handshake.
+    @discardableResult
+    func rebindWatchPartyFullscreen() -> Bool {
+        guard hasLoaded, !didShutdown else { return false }
+        sessionCoordinator.prepareControllers()
+        aetherController?.rebindSurface()
+        if pollTimer == nil { startPolling() }
+        return true
+    }
+
+    /// Only the checked Party runtime's resource cleanup calls this entry point.
+    func shutdownForWatchParty() {
         guard !didShutdown else { return }
-        if PictureInPictureManager.shared.isPictureInPictureActive {
+        let sourceURL = sessionCoordinator.torrentStreamSourceURL
+        cancelStartupBenchmark()
+        shutdown(preservingPictureInPicture: false)
+        if let sourceURL {
+            // Server URLs carry unique session tokens; a delayed exit cannot stop a successor.
+            Task { await TorrentEngineManager.shared.stopActiveStream(for: sourceURL) }
+        }
+    }
+
+    func shutdown() {
+        shutdown(preservingPictureInPicture: true)
+    }
+
+    private func shutdown(preservingPictureInPicture: Bool) {
+        guard !didShutdown else { return }
+        if preservingPictureInPicture && PictureInPictureManager.shared.isPictureInPictureActive {
             // Keep playback and session alive for PiP
             pollTimer?.invalidate()
             pollTimer = nil
@@ -3222,10 +3253,18 @@ class PlayerViewModel: ObservableObject {
         skipIntervalLoadTask = nil
         playerController.pausePlayback()
         saveProgress(force: true, eventAction: .pause)
-        // Leave the fallback host destroyed so re-entry cannot resume a ghost pipeline.
-        playerController.destroyPlayer()
-        aetherController?.destroyPlayer()
-        PictureInPictureManager.shared.invalidateSession()
+        if preservingPictureInPicture {
+            // Preserve the existing non-Party teardown path.
+            playerController.destroyPlayer()
+            aetherController?.destroyPlayer()
+            PictureInPictureManager.shared.invalidateSession()
+        } else if PictureInPictureManager.shared.activeCoordinator === sessionCoordinator {
+            // Progress was saved above, before invalidation stops the owned coordinator.
+            PictureInPictureManager.shared.invalidateSession()
+        } else {
+            // Never invalidate another playback's PiP. Also releases this coordinator's cache/wake lock.
+            sessionCoordinator.stopAll()
+        }
         postPlayController.stop()
         sceneCoordinator.resetSession()
         status = .idle
