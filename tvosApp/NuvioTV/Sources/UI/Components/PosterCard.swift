@@ -1952,6 +1952,7 @@ struct CachedPosterArtwork<Placeholder: View>: View {
 
     @MainActor
     private func load() async {
+        guard !Task.isCancelled else { return }
         guard urlString != nil || fallbackURLString != nil else {
             state.image = nil
             state.loadedKey = nil
@@ -2027,6 +2028,7 @@ struct CachedPosterArtwork<Placeholder: View>: View {
             state.loadedSourceURL = loaded.urlString
             onArtworkLoaded(loaded.urlString)
         } else {
+            guard !Task.isCancelled, key == cacheKey else { return }
             onArtworkLoaded(nil)
         }
         if traceLoad {
@@ -2092,11 +2094,15 @@ struct CachedPosterArtwork<Placeholder: View>: View {
     ) async -> (image: UIImage, urlString: String)? {
         var attempted: Set<String> = []
         for rawURL in [primaryURLString, fallbackURLString].compactMap({ $0 }) {
+            // A vanished card must not start another fallback download. Keep
+            // any existing shared request available to its other consumers.
+            guard !Task.isCancelled else { return nil }
             guard attempted.insert(rawURL).inserted,
                   let url = URL(string: rawURL),
                   let image = await PosterArtworkCache.shared.image(for: url, maxPixelSize: maxPixelSize) else {
                 continue
             }
+            guard !Task.isCancelled else { return nil }
             return (image, rawURL)
         }
         return nil
