@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Foundation
 import AetherLibavcodec
 import AetherLibavutil
@@ -41,6 +43,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// HLS `CODECS` value for the track.
     let hlsCodecs: String
     var servedChannelCount: Int? { layout.channelCount }
+    let peakOutputBitRate: Int64
 
     private let srcTimeBase: AVRational
     private let decoder: ObjectAudioDecoding
@@ -96,15 +99,16 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     private static let avNoPTS: Int64 = -0x7FFFFFFFFFFFFFFF - 1
 
     /// Packets the object decoder may take without a block before it counts as producing nothing.
-    /// Not the channel bridge's 64: a TrueHD packet is one 40-frame access unit, and after a start or
-    /// resume mid-stream the decoder waits for the next major sync before its first block. Measured
+    /// Not the channel bridge's default 64 (it takes this bound for TrueHD too, AE#786): a TrueHD
+    /// packet is one 40-frame access unit, and after a start or resume mid-stream the decoder waits
+    /// for the next major sync before its first block. Measured
     /// on Dolby's Unfold demo, that wait was up to 102 access units; at 64 every resume past the
     /// opening seconds was reported as a dead decoder and the session went to `.error` while it
     /// played, ignoring every seek after it. 1200 is a second of TrueHD, still a fraction of a second
     /// of the producer's time. A DTS-HD packet is a 512-frame frame, so for DTS:X it is 12.8 s; the
     /// track was confirmed as DTS:X before the bridge was built, and its decoder outputs from the
     /// third packet after every reset.
-    static let silentFeedPacketThreshold = 1200
+    static let silentFeedPacketThreshold = AudioBridge.trueHDSilentFeedPacketThreshold
     /// Three 2048-frame chunks are about 128 ms: enough to tolerate an isolated converter error,
     /// while reporting a persistent silent APAC output quickly.
     static let silentEncodeChunkThreshold = 3
@@ -122,6 +126,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         levelMeter = BedLevelMeter(layout: layout, sampleRate: Self.sampleRate)
         limiter = PeakLimiter(sampleRate: Self.sampleRate)
         let rate = bitRate ?? layout.channelCount * Self.bitRatePerChannel
+        peakOutputBitRate = Int64(rate)
         let encoder: APACEncoding
         if let encoderFactory {
             encoder = try encoderFactory(layout, Double(Self.sampleRate), rate)
@@ -540,3 +545,4 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         }
     }
 }
+#endif

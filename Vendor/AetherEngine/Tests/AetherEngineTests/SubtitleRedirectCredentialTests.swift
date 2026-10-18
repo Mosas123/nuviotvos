@@ -39,9 +39,10 @@ struct SubtitleRedirectCredentialTests {
 
     @Test("The decoder's actual download retains arbitrary secrets on a same-origin hop")
     func sameOriginDownload() async throws {
-        let origin = try #require(ThrottledOriginServer(totalSize: 16, respond: { _, _, path in
+        let originServer = ThrottledOriginServer(totalSize: 16, respond: { _, _, path in
             path == "/start.srt" ? .redirect(to: "/final.srt") : .serve200
-        }))
+        })
+        let origin = try #require(originServer)
         defer { origin.stop() }
         let url = try #require(URL(string: "http://127.0.0.1:\(origin.port)/start.srt"))
         let (data, response) = try await SubtitleDecoder.downloadHTTPData(for: request(url), suppliedHeaders: headers)
@@ -54,11 +55,13 @@ struct SubtitleRedirectCredentialTests {
 
     @Test("The decoder stops before sending secrets to another port or host", arguments: ["127.0.0.1", "localhost"])
     func crossOriginDownload(targetHost: String) async throws {
-        let target = try #require(ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in .serve200 }))
+        let targetServer = ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in .serve200 })
+        let target = try #require(targetServer)
         let targetPort = target.port
-        let source = try #require(ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in
+        let sourceServer = ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in
             .redirect(to: "http://\(targetHost):\(targetPort)/final.srt")
-        }))
+        })
+        let source = try #require(sourceServer)
         defer { source.stop(); target.stop() }
         let url = try #require(URL(string: "http://127.0.0.1:\(source.port)/start.srt"))
         let (_, response) = try await SubtitleDecoder.downloadHTTPData(for: request(url), suppliedHeaders: headers)
@@ -70,11 +73,13 @@ struct SubtitleRedirectCredentialTests {
 
     @Test("Header-free subtitles retain cross-origin CDN redirects")
     func unprotectedDownloadStillRedirects() async throws {
-        let target = try #require(ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in .serve200 }))
+        let targetServer = ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in .serve200 })
+        let target = try #require(targetServer)
         let targetPort = target.port
-        let source = try #require(ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in
+        let sourceServer = ThrottledOriginServer(totalSize: 16, respond: { _, _, _ in
             .redirect(to: "http://127.0.0.1:\(targetPort)/final.srt")
-        }))
+        })
+        let source = try #require(sourceServer)
         defer { source.stop(); target.stop() }
         let url = try #require(URL(string: "http://127.0.0.1:\(source.port)/start.srt"))
         let (_, response) = try await SubtitleDecoder.downloadHTTPData(for: URLRequest(url: url), suppliedHeaders: [:])

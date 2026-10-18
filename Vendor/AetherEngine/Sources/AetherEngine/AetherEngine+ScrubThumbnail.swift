@@ -26,6 +26,7 @@ extension AetherEngine {
                                                      maxWidth: maxWidth, isCancelled: isCancelled)
             return gen == loadGeneration && !Task.isCancelled && !isCancelled() ? result : nil
         }
+        guard session.yieldsStills else { return nil }
         // Freeze both axes. VOD segment indices use the plan's keyframe origin;
         // the segment's bytes retain their own epoch normalization after restart.
         let origin = sourcePresentationOrigin
@@ -116,6 +117,7 @@ extension AetherEngine {
             let image = await host.vodScrubStill(atSessionSeconds: seconds, maxWidth: maxWidth)
             return loadGeneration == gen ? image : nil
         }
+        guard session.yieldsStills else { return nil }
         let gen = loadGeneration
         let source = await BlockingWork.detached(priority: .userInitiated) { [session] in
             session.scrubThumbnailSource(atSeconds: seconds)
@@ -159,7 +161,21 @@ extension AetherEngine {
         }
     }
 
-    /// True while a native or software session exists to serve scrub thumbnails.
-    public var supportsCacheBackedStills: Bool { nativeVideoSession != nil || softwareHost != nil }
+    /// True when the active session can serve cache-backed stills from `scrubThumbnail` with no
+    /// second connection: any native session (live or VOD, SegmentCache), a software live session
+    /// (DVR packet ring, #544) and a software VOD session reading a remote source (packet cache,
+    /// AE#605). False before load and on a software session that plays a local file, which keeps no
+    /// cache because re-reading the file is free; `makeFrameExtractor()` serves that case. Hosts on a single-connection source should gate the
+    /// scrub-preview affordance on this: true means use `scrubThumbnail`; false means hide
+    /// the preview rather than show blank frames from a refused second-connection
+    /// FrameExtractor (#106). It reports capability, not per-frame availability: transient
+    /// nils from `scrubThumbnail` while a segment is still being produced are expected. False as well
+    /// on a Dolby Vision Profile 5 / 10.0 session in a build without the `DolbyVisionStillReshaping`
+    /// trait, where no frame can become a correct still.
+    public var supportsCacheBackedStills: Bool {
+        if let session = nativeVideoSession { return session.yieldsStills }
+        guard let softwareHost else { return false }
+        return isLive || softwareHost.servesPacketCacheStills
+    }
 }
 

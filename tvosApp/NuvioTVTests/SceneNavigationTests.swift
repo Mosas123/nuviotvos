@@ -105,7 +105,7 @@ final class SceneNavigationTests: XCTestCase {
         let playbackInfo = viewModel.sceneViewModel.playbackInfo
         XCTAssertNotNil(playbackInfo, "Playback info must be populated when opening Scene")
         XCTAssertEqual(playbackInfo?.engine, "AetherEngine")
-        XCTAssertEqual(playbackInfo?.version, "7.36.0")
+        XCTAssertEqual(playbackInfo?.version, AetherEngine.version)
         XCTAssertEqual(playbackInfo?.videoCodec, "—")
         XCTAssertEqual(playbackInfo?.resolution, "—")
         XCTAssertEqual(playbackInfo?.frameRate, "—")

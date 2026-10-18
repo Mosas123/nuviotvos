@@ -5578,17 +5578,17 @@ final class ContinueWatchingDismissStoreTests: XCTestCase {
 
         // Loading within TTL (1 hour later) returns the stream
         let freshDate = savedDate.addingTimeInterval(3600)
-        let freshLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate)
+        let freshLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate, customTTL: LastPlaybackStreamStore.remoteStreamTTL)
         XCTAssertNotNil(freshLoad)
         XCTAssertEqual(freshLoad?.url, "https://debrid.example.com/stream.mkv")
 
         // Loading past TTL (3 hours later) returns nil and evicts the entry
         let expiredDate = savedDate.addingTimeInterval(10800)
-        let expiredLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: expiredDate)
+        let expiredLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: expiredDate, customTTL: LastPlaybackStreamStore.remoteStreamTTL)
         XCTAssertNil(expiredLoad)
 
         // Subsequent lookup even at fresh time is now nil because it was evicted
-        XCTAssertNil(LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate))
+        XCTAssertNil(LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate, customTTL: LastPlaybackStreamStore.remoteStreamTTL))
     }
 
     func testLastPlaybackStreamStoreLocalStreamsDoNotExpire() {
