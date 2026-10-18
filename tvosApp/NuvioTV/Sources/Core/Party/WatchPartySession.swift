@@ -214,9 +214,13 @@ final class WatchPartySession {
         let server = try await remote.clock()
         try checkAttempt(epoch, channel: created)
         clock.addSample(serverMs: server, sentAt: clockSent)
-        let own = localPresence ?? WatchPartyPresence(memberID: memberID)
-        try await created.track(own)
-        try checkAttempt(epoch, channel: created)
+        var own: WatchPartyPresence
+        repeat {
+            own = localPresence ?? WatchPartyPresence(memberID: memberID)
+            try await created.track(own)
+            try checkAttempt(epoch, channel: created)
+            // A loading/ready transition during the await supersedes the initial presence.
+        } while localPresence != nil && localPresence != own
         presence[memberID] = own
         connection = .ready; failure = nil; onChange?()
         try await send("status", own, epoch: epoch)

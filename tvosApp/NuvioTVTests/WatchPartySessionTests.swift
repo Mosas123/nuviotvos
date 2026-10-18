@@ -226,6 +226,25 @@ final class WatchPartySessionTests: XCTestCase {
         XCTAssertThrowsError(try WatchPartyChannelContract.realtimeURL(configuration: unsafe))
     }
 
+    func testPresenceChangedDuringInitialTrackUsesLatestState() async throws {
+        let remote = Remote(snapshot())
+        let channel = Channel()
+        let session = session(remote, channels: [channel])
+        defer { session.stop(); channel.onTrack = nil }
+        var transitioned = false
+        channel.onTrack = {
+            if !transitioned {
+                transitioned = true
+                try await session.setPresence(status: .ready, mediaKey: "movie|tt1||")
+            }
+        }
+        try await session.start(snapshot: snapshot())
+        XCTAssertEqual(channel.tracked.map(\.status), [.browsing, .ready])
+        XCTAssertEqual(session.presence["me"]?.status, .ready)
+        let status = try XCTUnwrap(channel.sent.first { $0.0 == "status" })
+        XCTAssertEqual(try JSONDecoder().decode(WatchPartyPresence.self, from: status.1).status, .ready)
+    }
+
     @MainActor
     private final class Remote: WatchPartySessionRemote {
         var snapshot: WatchPartySnapshot
