@@ -2415,6 +2415,13 @@ enum PosterArtworkCachePolicy {
 }
 
 private func downloadPosterData(url: URL, revalidate: Bool = false) async -> Data? {
+    let task = await PosterDataRequests.shared.request(url: url, revalidate: revalidate) {
+        await fetchPosterData(url: url, revalidate: revalidate)
+    }
+    return await task.value
+}
+
+private func fetchPosterData(url: URL, revalidate: Bool) async -> Data? {
     var request = URLRequest(url: url)
     request.timeoutInterval = 10
     if revalidate { request.cachePolicy = .reloadIgnoringLocalCacheData }
