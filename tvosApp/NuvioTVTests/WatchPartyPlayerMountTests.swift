@@ -77,6 +77,22 @@ final class WatchPartyPlayerMountTests: XCTestCase {
         XCTAssertEqual(model.sessionCoordinator.loadGeneration, before)
     }
 
+    func testBridgeWithoutControlBindingFailsClosedForNormalTransport() throws {
+        let model = model()
+        defer { model.shutdownForWatchParty() }
+        let initialStatus = model.status
+        let initialSpeed = model.playbackSpeed
+        _ = try model.attachWatchPartyPlayerBridge(isCurrent: { true })
+        model.play()
+        model.pause()
+        model.togglePlayPause()
+        model.seek(to: 30)
+        model.setSpeed(.normal)
+        XCTAssertEqual(model.status, initialStatus)
+        XCTAssertEqual(model.playbackSpeed, initialSpeed)
+        XCTAssertNotNil(model.playerToast)
+    }
+
     func testContextLossMakesExistingMountInertAndTeardownStillWorks() throws {
         var current = true
         let runtime = WatchPartyPlayerRuntime.player(isCurrent: { _ in current })

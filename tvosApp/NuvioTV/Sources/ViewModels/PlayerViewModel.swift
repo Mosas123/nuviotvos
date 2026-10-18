@@ -327,6 +327,7 @@ class PlayerViewModel: ObservableObject {
     private var hasLoaded = false
     private var didShutdown = false
     private(set) var watchPartyPlayerBridge: WatchPartyPlayerBridge?
+    private var watchPartyControls: WatchPartyControlRouter?
     private let adoptsPictureInPictureSession: Bool
     private var isTrailerPlaybackSession = false
     private var trailerEndConfirmation = TrailerEndConfirmation()
@@ -3058,7 +3059,8 @@ class PlayerViewModel: ObservableObject {
             failedStreamURLs.removeAll()
         }
 
-        if watchPartyPlayerBridge == nil, let latestSpeed = PlaybackSpeed(rawValue: c.currentSpeed),
+        let displayedRate = watchPartyPlayerBridge == nil ? c.currentSpeed : watchPartyControls?.canonicalRate
+        if let displayedRate, let latestSpeed = PlaybackSpeed(rawValue: displayedRate),
            latestSpeed.rawValue != playbackSpeed.rawValue {
             playbackSpeed = latestSpeed
         }
@@ -3102,6 +3104,7 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Transport
 
     func play() {
+        if routeWatchPartyControl(status == .ended ? .seekAndPlay(0) : .play) { return }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] play() called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         if status == .ended {
             if let activeMeta {
@@ -3149,6 +3152,10 @@ class PlayerViewModel: ObservableObject {
     }
 
     func pause(forBackground: Bool = false) {
+        if forBackground {
+            // Revoke room effects first; lifecycle parking must not broadcast a user's pause.
+            watchPartyControls?.setSuspended(true)
+        } else if routeWatchPartyControl(.pause) { return }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] pause(forBackground=\(forBackground)) called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         cancelControlsHideTimer()
         engine.pausePlayback()
@@ -3253,8 +3260,65 @@ class PlayerViewModel: ObservableObject {
     }
 
     func detachWatchPartyPlayerBridge() {
+        if watchPartyPlayerBridge != nil {
+            // Discard previews before removing admission, including runtime cleanup before shutdown.
+            seekDebounceTask?.cancel()
+            seekDebounceTask = nil
+            stopRepeatingNudge(commit: false)
+            pendingSeekDelta = 0
+            resetScrubSession()
+        }
+        watchPartyControls?.stop()
+        watchPartyControls = nil
         watchPartyPlayerBridge?.stop()
         watchPartyPlayerBridge = nil
+    }
+
+    func attachWatchPartyControls(binding: WatchPartyPlaybackBinding,
+                                  isCurrent: @escaping @MainActor () -> Bool) throws {
+        guard watchPartyPlayerBridge != nil, watchPartyControls == nil else {
+            throw WatchPartyPlaybackBindingError.alreadyBound
+        }
+        watchPartyControls = WatchPartyControlRouter(isCurrent: isCurrent,
+            currentStamp: { [weak self] in self?.watchPartyPlayerStamp() },
+            canonicalRate: { [weak binding] in binding?.canonicalRate }, perform: { [weak binding] intent in
+            guard let binding else { throw WatchPartyPlaybackBindingError.notReady }
+            try await binding.perform(intent)
+        }, suspend: { [weak binding] in binding?.setSuspended($0) }, onError: { [weak self] error in
+            self?.showPlayerToast((error as? WatchPartyPlaybackBindingError) == .busy
+                ? "Watch Party is synchronizing" : "Watch Party control unavailable")
+        }, onCompleted: { [weak self] intent in self?.completedWatchPartyControl(intent) })
+    }
+
+    /// Explicit root foreground hook; never called merely because a user presses Play.
+    func resumeWatchPartyAfterForeground() { watchPartyControls?.setSuspended(false) }
+
+    /// A mounted bridge without controls must fail closed rather than bypass room permissions.
+    private func routeWatchPartyControl(_ intent: WatchPartyLocalIntent) -> Bool {
+        guard watchPartyPlayerBridge != nil else { return false }
+        guard let watchPartyControls else {
+            showPlayerToast("Watch Party control unavailable")
+            return true
+        }
+        watchPartyControls.submit(intent)
+        return true
+    }
+
+    private func completedWatchPartyControl(_ intent: WatchPartyLocalIntent) {
+        guard let sample = watchPartyPlayerBridge?.sample else { return }
+        switch intent {
+        case .seek, .seekAndPlay:
+            recordCommittedSeek(to: Double(sample.positionMs) / 1000, previous: time.current,
+                                duration: Double(sample.durationMs) / 1000)
+        default: break
+        }
+        // UI effects happen after admission/completion, never through play()/pause() again.
+        if status == .paused {
+            cancelControlsHideTimer()
+            showControls = true
+            isTimelineFocused = true
+            schedulePauseOverlay()
+        } else if showControls { scheduleControlsHide() }
     }
 
     /// Reattach the same Party model without applying stale launch metadata or restarting load work.
@@ -3386,6 +3450,11 @@ class PlayerViewModel: ObservableObject {
             commitScrub(andPlay: true)
             return
         }
+        if watchPartyPlayerBridge != nil {
+            // The transport may have changed since the last 250 ms sample (rapid remote taps).
+            _ = routeWatchPartyControl(engine.isTransportPlaying ? .pause : .play)
+            return
+        }
         let dir = PlaybackToggleDirection(isTransportPlaying: engine.isTransportPlaying)
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] togglePlayPause() called: isTransportPlaying=\(engine.isTransportPlaying), direction=\(dir), status=\(status), time=\(time.current)")
         switch dir {
@@ -3395,7 +3464,12 @@ class PlayerViewModel: ObservableObject {
     }
 
     func seek(to seconds: Double) {
-        guard !isLiveStream else { return }
+        guard !isLiveStream, seconds.isFinite else { return }
+        if watchPartyPlayerBridge != nil {
+            guard let target = Self.watchPartySeekMilliseconds(seconds) else { return }
+            _ = routeWatchPartyControl(.seek(target))
+            return
+        }
         let duration = time.duration > 0 ? time.duration : clock.duration
         let target = duration > 0
             ? min(max(seconds, 0), max(duration - 0.25, 0))
@@ -3403,10 +3477,18 @@ class PlayerViewModel: ObservableObject {
         let prevCurrent = time.current
         print("[SeekWatchdog][PlayerVM] 👆 User seek to \(String(format: "%.3f", seconds))s (target: \(String(format: "%.3f", target))s, current: \(String(format: "%.3f", time.current))s, duration: \(String(format: "%.3f", duration))s)")
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] seek(to: \(seconds)) called: target=\(target), prevCurrent=\(time.current), duration=\(duration)")
-        if target < prevCurrent - 0.5 {
-            handleRewind(from: prevCurrent, to: target)
-        }
         engine.seekToMs(Int64(target * 1000))
+        recordCommittedSeek(to: target, previous: prevCurrent, duration: duration)
+    }
+
+    static func watchPartySeekMilliseconds(_ seconds: Double) -> Int64? {
+        let milliseconds = max(0, seconds) * 1000
+        guard seconds.isFinite, milliseconds.isFinite, milliseconds < Double(Int64.max) else { return nil }
+        return Int64(milliseconds.rounded(.towardZero))
+    }
+
+    private func recordCommittedSeek(to target: Double, previous: Double, duration: Double) {
+        if target < previous - 0.5 { handleRewind(from: previous, to: target) }
         if let source = activeStreamURL.flatMap(URL.init(string:)) {
             let generation = sessionCoordinator.loadGeneration
             Task { @MainActor [weak self] in
@@ -3995,6 +4077,12 @@ class PlayerViewModel: ObservableObject {
             resetScrubSession()
             return
         }
+        if watchPartyPlayerBridge != nil {
+            resetScrubSession()
+            guard let milliseconds = Self.watchPartySeekMilliseconds(target) else { return }
+            _ = routeWatchPartyControl(andPlay ? .seekAndPlay(milliseconds) : .seek(milliseconds))
+            return
+        }
         seek(to: target)
         resetScrubSession()
         if andPlay || status == .playing {
@@ -4484,6 +4572,7 @@ class PlayerViewModel: ObservableObject {
     func cancelMoveSeekTracking() {}
 
     func setSpeed(_ speed: PlaybackSpeed) {
+        if routeWatchPartyControl(.speed(speed.rawValue)) { return }
         playbackSpeed = speed
         sessionCoordinator.updatePlaybackRate(speed.rawValue)
         engine.setSpeed(speed.rawValue)
@@ -5947,6 +6036,8 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func applyPendingResumeIfNeeded() {
+        // The accepted room timeline owns Party startup; local history is not a user seek.
+        guard watchPartyPlayerBridge == nil else { return }
         let minResumeThreshold = isTrailerPlaybackSession ? 0.5 : 5.0
         guard !didApplyResume,
               let pendingResumeSeconds,

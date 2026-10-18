@@ -31,7 +31,7 @@ extension WatchPartySession: WatchPartyPlaybackRoom {
     }
 }
 
-enum WatchPartyLocalIntent { case play, pause, toggle, seek(Int64), speed(Float), catchUp }
+enum WatchPartyLocalIntent { case play, pause, toggle, seek(Int64), seekAndPlay(Int64), speed(Float), catchUp }
 enum WatchPartyPlaybackBindingError: Error, Equatable {
     case notReady, forbidden, busy, staleOperation, mediaChanged, seekTooSlow, alreadyBound
 }
@@ -56,6 +56,7 @@ final class WatchPartyPlaybackBinding {
     private var state: WatchPartyBindingRoomState
     private var observerID: UUID?
     private var stopped = false
+    private var suspended = false
     private var revision = UUID()
     private var sample: WatchPartyPlayerSample?
     private var localBusy = false
@@ -73,6 +74,20 @@ final class WatchPartyPlaybackBinding {
     private var presenceWorker: Task<Void, Never>?
 
     var isSynchronizing: Bool { worker != nil || localBusy }
+    var canonicalRate: Float? { state.playback?.rate }
+
+    /// Lifecycle is not a local-user gesture. Invalidate pending continuations before raw pause.
+    func setSuspended(_ value: Bool) {
+        guard !stopped, suspended != value else { return }
+        suspended = value
+        revision = UUID()
+        worker?.cancel()
+        blocked = nil
+        lastApplied = nil
+        bridge.clearTemporaryRate()
+        if let sample { updatePresence(sample) }
+        if !value { reconcile() }
+    }
 
     init(room: any WatchPartyPlaybackRoom, bridge: WatchPartyPlayerBridge,
          isCurrent: @escaping @MainActor () -> Bool,
@@ -119,7 +134,7 @@ final class WatchPartyPlaybackBinding {
     }
 
     private func admitted(_ mark: UUID, stamp: WatchPartyPlayerStamp) -> Bool {
-        active && revision == mark && room.bindingState == state && state.connected
+        active && !suspended && revision == mark && room.bindingState == state && state.connected
             && bridge.sample?.stamp == stamp && stamp.mediaKey == mediaKey
     }
 
@@ -173,7 +188,7 @@ final class WatchPartyPlaybackBinding {
     }
 
     private func usableSample() -> WatchPartyPlayerSample? {
-        guard active, state.connected, let sample, sample.coherent, !sample.loading,
+        guard active, !suspended, state.connected, let sample, sample.coherent, !sample.loading,
               sample.rendered, !sample.failed, !sample.seeking, sample.durationMs > 0,
               sample.stamp.mediaKey == mediaKey else { return nil }
         return sample
@@ -321,7 +336,7 @@ final class WatchPartyPlaybackBinding {
         case .speed(let value):
             guard controlsRoom else { throw WatchPartyPlaybackBindingError.forbidden }
             rate = value
-        case .seek(let value):
+        case .seek(let value), .seekAndPlay(let value):
             let bounded = min(max(0, value), max(0, sample.durationMs - 1))
             if !controlsRoom {
                 guard let playback = state.playback else { throw WatchPartyPlaybackBindingError.notReady }
@@ -331,6 +346,7 @@ final class WatchPartyPlaybackBinding {
                 case .blocked: throw WatchPartyPlaybackBindingError.forbidden
                 }
             } else { target = bounded }
+            if case .seekAndPlay = intent { paused = false }
         case .catchUp: break
         }
         localBusy = true
@@ -359,7 +375,7 @@ final class WatchPartyPlaybackBinding {
         let now = uptime()
         guard now.isFinite else { return }
         let status: WatchPartyMemberStatus
-        if sample.failed { status = .browsing; bufferingSince = nil }
+        if suspended || sample.failed { status = .browsing; bufferingSince = nil }
         else if isBehind { status = .behind; bufferingSince = nil }
         else if !sample.rendered { status = .loading; bufferingSince = nil }
         else if sample.loading || !sample.coherent || sample.seeking || bridge.isSeeking {

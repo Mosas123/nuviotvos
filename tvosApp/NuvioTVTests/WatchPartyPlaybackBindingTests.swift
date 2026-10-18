@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class WatchPartyPlaybackBindingTests: XCTestCase {
     private final class Engine {}
-    private enum Failure: Error { case network, engine }
+    private enum Failure: Error, Equatable { case network, engine }
 
     @MainActor
     private final class Room: WatchPartyPlaybackRoom {
@@ -120,6 +120,59 @@ final class WatchPartyPlaybackBindingTests: XCTestCase {
             if f.binding?.isSynchronizing == false { return }
         }
         XCTFail("Binding did not settle", file: file, line: line)
+    }
+
+    func testCompoundScrubDoesNotPlayOrPublishBeforeSeekConfirmation() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        let operation = Task { try await binding.perform(.seekAndPlay(30_000)) }
+        await until { f.bridge.awaitsSeekSample }
+        XCTAssertEqual(f.playCalls, 0)
+        XCTAssertTrue(f.room.publications.isEmpty)
+        f.position = 30_000; f.tick()
+        try await operation.value
+        XCTAssertEqual(f.playCalls, 1)
+        XCTAssertEqual(f.room.publications.count, 1)
+        XCTAssertFalse(f.room.publications[0].0)
+        XCTAssertEqual(f.room.publications[0].1, 30_000)
+    }
+
+    func testFailedCompoundScrubNeverPlaysOrPublishes() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f); f.failSeek = true
+        do { try await binding.perform(.seekAndPlay(30_000)); XCTFail("Failed seek accepted") }
+        catch { XCTAssertEqual(error as? Failure, .engine) }
+        XCTAssertEqual(f.playCalls, 0)
+        XCTAssertTrue(f.room.publications.isEmpty)
+        XCTAssertTrue(f.paused)
+    }
+
+    func testLockedGuestCannotUseCompoundScrubToBypassForwardRestriction() async throws {
+        let f = Fixture(room: Room(hostOnly: true)); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        do { try await binding.perform(.seekAndPlay(30_000)); XCTFail("Locked seek accepted") }
+        catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .forbidden) }
+        XCTAssertTrue(f.seekTargets.isEmpty)
+        XCTAssertEqual(f.playCalls, 0)
+        XCTAssertTrue(f.room.publications.isEmpty)
+    }
+
+    func testLifecycleSuspensionRevokesRemoteSeekWithoutPublishingPause() async throws {
+        let f = Fixture(room: Room(paused: false, position: 30_000)); let binding = try f.start(); defer { f.stop() }
+        f.tick()
+        await until { f.bridge.awaitsSeekSample }
+        binding.setSuspended(true)
+        await settle(f)
+        for _ in 0..<10 { f.tick(); await Task.yield() }
+        XCTAssertEqual(f.playCalls, 0)
+        XCTAssertTrue(f.room.publications.isEmpty)
+        XCTAssertEqual(f.room.statuses.last?.status, .browsing)
+        do { try await binding.perform(.play); XCTFail("Suspended control accepted") }
+        catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady) }
+        binding.setSuspended(false)
+        await settle(f)
+        XCTAssertGreaterThan(f.playCalls, 0)
+        XCTAssertTrue(f.room.publications.isEmpty)
     }
 
     func testRemotePauseAndSamplesNeverPublishAnEcho() async throws {
