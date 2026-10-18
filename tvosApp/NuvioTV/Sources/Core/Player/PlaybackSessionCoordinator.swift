@@ -97,6 +97,8 @@ struct PlaybackCompletionTracker {
 /// Owns backend selection, generation-safe loads, and one-way Aether → MPV handoff.
 @MainActor
 final class PlaybackSessionCoordinator: ObservableObject {
+    /// Stable across fullscreen view recreation and PiP adoption.
+    let wakeLockOwnerID = UUID()
     @Published private(set) var activeBackend: PlayerBackendKind = .aether
     @Published private(set) var statusToast: String?
     @Published private(set) var lastPolicyReason: String = ""
@@ -472,6 +474,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
     }
 
     func stopAll() {
+        PlaybackWakeLock.release(ownerID: wakeLockOwnerID)
         userStopped = true
         loadGeneration += 1
         dispatchedLoadGeneration = nil

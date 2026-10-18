@@ -1629,7 +1629,9 @@ struct ContentView: View {
         }
 
         PictureInPictureManager.shared.onDidStopPiPWithoutRestoring = {
-            PlaybackWakeLock.release()
+            if let coordinator = PictureInPictureManager.shared.activeCoordinator {
+                PlaybackWakeLock.release(ownerID: coordinator.wakeLockOwnerID)
+            }
             Task {
                 await TorrentEngineManager.shared.stopActiveStream()
             }
