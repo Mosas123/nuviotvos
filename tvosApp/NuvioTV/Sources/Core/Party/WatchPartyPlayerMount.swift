@@ -44,4 +44,31 @@ extension WatchPartyPlaybackRuntime where Resource == PlayerViewModel {
             PlayerViewModel(sessionCoordinator: PlaybackSessionCoordinator(), adoptsPictureInPictureSession: false)
         }
     }
+
+    /// Compose the accepted room with the same runtime/model. The runtime retains binding cleanup.
+    /// Root still must install UI/control interceptors and an onNeedsMedia handler before activation.
+    func bindPlayback(_ lease: Lease, room: WatchPartySession) throws -> WatchPartyPlaybackBinding {
+        let ownerIsCurrent = try makeValidator(for: lease)
+        let context = lease.context
+        guard room.playbackContext == context else {
+            throw WatchPartyPlaybackBindingError.staleOperation
+        }
+        let valid: @MainActor () -> Bool = { [weak room] in
+            guard ownerIsCurrent(), let current = room?.playbackContext else { return false }
+            return current.request == context.request && current.membershipID == context.membershipID
+                && current.roomID == context.roomID && current.memberID == context.memberID
+        }
+        let model = lease.resource
+        let bridge = try model.attachWatchPartyPlayerBridge(isCurrent: valid)
+        do {
+            let binding = try WatchPartyPlaybackBinding(room: room, bridge: bridge, isCurrent: valid)
+            do {
+                try ownBinding(lease) { [weak model] in
+                    binding.stop()
+                    model?.detachWatchPartyPlayerBridge()
+                }
+            } catch { binding.stop(); throw error }
+            return binding
+        } catch { model.detachWatchPartyPlayerBridge(); throw error }
+    }
 }

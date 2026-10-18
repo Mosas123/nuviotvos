@@ -2582,7 +2582,9 @@ class PlayerViewModel: ObservableObject {
                     || isScrubbing || isHoldingSeek || pendingSeekDelta != 0,
                 coherent: c.hasCoherentTimeSample && c.currentErrorMessage.isEmpty
                     && !c.isPlayerEnded && !isLiveStream,
-                seeking: sampledEngineKind == .mpv && playerController.isSeekingForWatchParty
+                seeking: sampledEngineKind == .mpv && playerController.isSeekingForWatchParty,
+                rendered: hasPresentedCurrentLoad && hasRenderedFirstFrame,
+                failed: !c.currentErrorMessage.isEmpty || sessionCoordinator.lastLoadError != nil
             ))
             // A binding's synchronous callback can invalidate or replace the source.
             guard activeEngineKind == sampledEngineKind,
@@ -3117,6 +3119,18 @@ class PlayerViewModel: ObservableObject {
         }
         engine.playPlayback()
         status = .playing
+        recordPlaybackResumeIfEligible()
+        cancelPauseOverlaySchedule()
+        showPauseOverlay = false
+        if showControls {
+            scheduleControlsHide()
+        }
+        if showScenePanel {
+            sceneCoordinator.handlePlaybackResumed()
+        }
+    }
+
+    private func recordPlaybackResumeIfEligible() {
         // MDBList has an explicit start transition for resuming a paused
         // session. The normal progress save path will still handle a fresh
         // playback whose timeline is not ready yet.
@@ -3131,14 +3145,6 @@ class PlayerViewModel: ObservableObject {
                 action: .start,
                 force: true
             )
-        }
-        cancelPauseOverlaySchedule()
-        showPauseOverlay = false
-        if showControls {
-            scheduleControlsHide()
-        }
-        if showScenePanel {
-            sceneCoordinator.handlePlaybackResumed()
         }
     }
 
@@ -3221,9 +3227,26 @@ class PlayerViewModel: ObservableObject {
             let engine = self.engine
             if let rate { engine.setSpeed(rate) }
             if let paused {
-                if paused { engine.pausePlayback() } else { engine.playPlayback() }
+                let wasPlaying = engine.isTransportPlaying
+                if paused {
+                    engine.pausePlayback()
+                    self.status = .paused
+                    if wasPlaying { self.saveProgress(force: true, eventAction: .pause) }
+                    self.cancelPauseOverlaySchedule()
+                    if self.showScenePanel { self.sceneCoordinator.handlePlaybackPaused() }
+                } else {
+                    engine.playPlayback()
+                    self.status = .playing
+                    if !wasPlaying { self.recordPlaybackResumeIfEligible() }
+                    self.cancelPauseOverlaySchedule()
+                    self.showPauseOverlay = false
+                    if self.showScenePanel { self.sceneCoordinator.handlePlaybackResumed() }
+                }
             }
             return engine.currentSpeed
+        }, maximumRate: { [weak self] in
+            guard let self else { return 0 }
+            return self.activeEngineKind == .aether ? (self.aetherController?.engine.maxSupportedRate ?? 0) : 4
         })
         watchPartyPlayerBridge = bridge
         return bridge

@@ -15,11 +15,13 @@ struct WatchPartyPlayerSample: Equatable {
     let loading: Bool
     let coherent: Bool
     let seeking: Bool
+    var rendered: Bool = true
+    var failed: Bool = false
 }
 
 enum WatchPartyEffectOrigin: Equatable { case localUser, remoteRoom, drift, waiting, lifecycle }
 enum WatchPartyPlayerBridgeError: Error, Equatable {
-    case notReady, busy, staleOperation, timedOut, invalidRate, alreadyAttached
+    case notReady, busy, staleOperation, timedOut, invalidRate, unsupportedRate, alreadyAttached
 }
 
 struct WatchPartyPlayerEffect {
@@ -68,6 +70,7 @@ final class WatchPartyPlayerBridge {
     private let issueSeek: @MainActor (Int64, WatchPartyPlayerStamp) async throws -> Void
     private let transport: Transport
     private let sleep: Sleep
+    private let rateLimit: @MainActor () -> Float
 
     var isSeeking: Bool { pending != nil }
     var awaitsSeekSample: Bool { pending?.engineReturned == true }
@@ -76,11 +79,13 @@ final class WatchPartyPlayerBridge {
          currentStamp: @escaping @MainActor () -> WatchPartyPlayerStamp?,
          issueSeek: @escaping @MainActor (Int64, WatchPartyPlayerStamp) async throws -> Void,
          transport: @escaping Transport,
+         maximumRate: @escaping @MainActor () -> Float = { 4 },
          sleep: @escaping Sleep = { try await Task.sleep(nanoseconds: $0) }) {
         self.contextIsCurrent = isCurrent
         self.currentStamp = currentStamp
         self.issueSeek = issueSeek
         self.transport = transport
+        self.rateLimit = maximumRate
         self.sleep = sleep
     }
 
@@ -115,6 +120,8 @@ final class WatchPartyPlayerBridge {
         guard effectID == nil else { throw WatchPartyPlayerBridgeError.busy }
         guard let initial = sample, initial.coherent, !initial.loading else { throw WatchPartyPlayerBridgeError.notReady }
         try validate(initial.stamp)
+        let maximum = rateLimit()
+        guard maximum.isFinite, effect.rate <= maximum + 0.001 else { throw WatchPartyPlayerBridgeError.unsupportedRate }
         guard isAdmitted() else { throw WatchPartyPlayerBridgeError.staleOperation }
         let id = UUID()
         effectID = id
@@ -147,7 +154,11 @@ final class WatchPartyPlayerBridge {
               sample.rate.isFinite, sample.rate > 0 else { throw WatchPartyPlayerBridgeError.notReady }
         try validate(sample.stamp)
         if baseRate?.stamp != sample.stamp { baseRate = (sample.stamp, sample.rate) }
-        let applied = try transport(nil, rate, sample.stamp)
+        let maximum = rateLimit()
+        guard maximum.isFinite, maximum >= 0.25 else { throw WatchPartyPlayerBridgeError.unsupportedRate }
+        let bounded = min(rate, maximum)
+        if abs(sample.rate - bounded) <= 0.001 { return sample.rate }
+        let applied = try transport(nil, bounded, sample.stamp)
         isApplyingTemporaryRate = true
         return applied
     }

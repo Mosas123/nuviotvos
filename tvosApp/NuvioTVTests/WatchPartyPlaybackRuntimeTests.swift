@@ -197,4 +197,19 @@ final class WatchPartyPlaybackRuntimeTests: XCTestCase {
         XCTAssertEqual(stops, 1)
         XCTAssertEqual(runtime.phase, .idle)
     }
+
+    func testValidatorDoesNotRetainResourceAndCannotReviveAcrossReplacement() throws {
+        let runtime = Runtime(isCurrent: { _ in true }, stopResource: { _ in })
+        var lease: Runtime.Lease? = try runtime.begin(context: context()) { Resource() }
+        weak var resource = lease?.resource
+        let valid = try runtime.makeValidator(for: XCTUnwrap(lease))
+        XCTAssertTrue(valid())
+        runtime.invalidate()
+        lease = nil
+        XCTAssertNil(resource)
+        XCTAssertFalse(valid())
+        _ = try runtime.begin(context: context()) { Resource() }
+        XCTAssertFalse(valid())
+        runtime.invalidate()
+    }
 }

@@ -89,6 +89,16 @@ final class WatchPartyPlaybackRuntime<Resource: AnyObject> {
             && contextIsCurrent(lease.context)
     }
 
+    /// Capture identity without retaining lease.resource inside a callback owned by that resource.
+    func makeValidator(for lease: Lease) throws -> (@MainActor () -> Bool) {
+        try validate(lease)
+        let id = lease.id, owner = lease.ownerID, context = lease.context
+        return { [weak self] in
+            guard let self else { return false }
+            return self.ownerID == owner && self.active?.id == id && self.contextIsCurrent(context)
+        }
+    }
+
     /// A new surface supersedes the old surface token. Its late onDisappear becomes inert.
     /// This does not perform the PiP manager's actual surface-rebind handshake.
     func attachFullscreen(_ lease: Lease) throws -> Surface {

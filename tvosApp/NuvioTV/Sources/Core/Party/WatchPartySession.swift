@@ -76,8 +76,17 @@ final class WatchPartySession {
     private var pendingPersistence: WatchPartyPlayback?
     private var persistenceDeadline: TimeInterval?
     private var localPresence: WatchPartyPresence?
+    private var changeObservers: [UUID: @MainActor () -> Void] = [:]
     private var streamConsentNonce: UUID?
     private var sharedStreamRevision = UUID()
+    private var playbackMembershipID = UUID()
+
+    /// Stable during reconnects, replaced on a true membership reset; contains no access token.
+    var playbackContext: WatchPartyPlaybackContext? {
+        guard let party, let memberID else { return nil }
+        return WatchPartyPlaybackContext(request: context, membershipID: playbackMembershipID,
+                                         roomID: party.id, memberID: memberID, mediaKey: party.media.key)
+    }
 
     init(remote: any WatchPartySessionRemote, context: WatchPartyRequestContext, deviceID: String,
          isCurrent: @escaping WatchPartyAPI.ContextValidator, makeChannel: @escaping ChannelFactory,
@@ -92,6 +101,22 @@ final class WatchPartySession {
         self.clock = clock
         self.sleep = sleep
         self.connectionTasksEnabled = connectionTasksEnabled
+    }
+
+    /// Independent subscriptions leave WatchPartyService's legacy onChange callback intact.
+    @discardableResult
+    func observeChanges(_ callback: @escaping @MainActor () -> Void) -> UUID {
+        let id = UUID()
+        changeObservers[id] = callback
+        return id
+    }
+
+    func removeChangeObserver(_ id: UUID) { changeObservers.removeValue(forKey: id) }
+
+    private func notifyChange() {
+        let callbacks = changeObservers
+        onChange?()
+        for (id, callback) in callbacks where changeObservers[id] != nil { callback() }
     }
 
     var canControl: Bool {
@@ -132,10 +157,11 @@ final class WatchPartySession {
     /// Called explicitly on account/backend/profile loss or true membership teardown.
     func stop() {
         clearState()
-        onChange?()
+        notifyChange()
     }
 
     private func clearState() {
+        playbackMembershipID = UUID()
         generation = UUID()
         recoveryTask?.cancel(); recoveryTask = nil
         heartbeatTask?.cancel(); heartbeatTask = nil
@@ -181,7 +207,7 @@ final class WatchPartySession {
         localPresence = value
         presence[memberID] = value
         if status == .ready { waitingCoordinator.memberReady(memberID) }
-        onChange?()
+        notifyChange()
         guard connection == .ready, let channel else { return }
         let epoch = generation
         let attempt = connectionID
@@ -301,13 +327,13 @@ final class WatchPartySession {
             : remote.leave(partyID: party.id, deviceID: deviceID))
         try checkContext()
         guard generation == stoppedEpoch else { throw WatchPartyAPIError.staleContext }
-        if let error = WatchPartyFailure(serverCode: result.error) { failure = error; onChange?() }
+        if let error = WatchPartyFailure(serverCode: result.error) { failure = error; notifyChange() }
     }
 
     private func connect(epoch: UUID) async throws {
         try checkContext()
         guard active(epoch), let party, let memberID else { throw WatchPartySessionError.notReady }
-        connection = .connecting; onChange?()
+        connection = .connecting; notifyChange()
         let created = makeChannel()
         let attempt = connectionID
         channel = created
@@ -316,7 +342,7 @@ final class WatchPartySession {
             self.receive(event, epoch: epoch, attempt: attempt)
         }
         try checkAttempt(epoch, channel: created)
-        connection = .reconciling; onChange?()
+        connection = .reconciling; notifyChange()
         let sent = clock.mark()
         let snapshot = try await remote.heartbeat(partyID: party.id, deviceID: deviceID)
         try checkAttempt(epoch, channel: created)
@@ -335,7 +361,7 @@ final class WatchPartySession {
             // A loading/ready transition during the await supersedes the initial presence.
         } while localPresence != nil && localPresence != own
         presence[memberID] = own
-        connection = .ready; failure = nil; onChange?()
+        connection = .ready; failure = nil; notifyChange()
         try await send("status", own, epoch: epoch)
         try await send("state_request", MemberPayload(memberID: memberID), epoch: epoch)
         startConnectionTasks(epoch: epoch, attempt: attempt)
@@ -376,7 +402,7 @@ final class WatchPartySession {
         connection = .recovering
         clearSharedStream()
         presence = presence.filter { $0.key == memberID }
-        onChange?()
+        notifyChange()
     }
 
     private func cancelConnectionTasks() {
@@ -476,7 +502,7 @@ final class WatchPartySession {
                           self.persistenceID == worker, !Task.isCancelled else { return }
                     // The request may already have reached the server. Never retry it automatically.
                     self.failure = .network
-                    self.onChange?()
+                    self.notifyChange()
                 }
                 guard self.persistenceID == worker else { return }
                 if self.pendingPersistence == nil { self.persistTask = nil; return }
@@ -547,7 +573,7 @@ final class WatchPartySession {
         waitingCoordinator.accepted(previous: playback, next: value, mediaKey: party.media.key,
                                     presence: presence, uptime: clock.mark())
         playback = value
-        onChange?()
+        notifyChange()
     }
 
     private func apply(_ snapshot: WatchPartySnapshot) throws {
@@ -561,7 +587,7 @@ final class WatchPartySession {
             case .ended: finishMembership(.ended, failure: error)
             case .notFound: finishMembership(.notFound, failure: error)
             case .unavailable: finishMembership(.unavailable, failure: error)
-            default: failure = error; onChange?()
+            default: failure = error; notifyChange()
             }
             throw WatchPartySessionError.invalidSnapshot
         }
@@ -577,14 +603,14 @@ final class WatchPartySession {
             if mediaChanged { waitingCoordinator.reset() }
             playback = validPlayback(info.playback, for: info)
         } else if let value = info.playback { accept(value) }
-        onChange?()
+        notifyChange()
     }
 
     private func finishMembership(_ reason: WatchPartyMembershipExit, failure: WatchPartyFailure) {
         clearState()
         membershipExit = reason
         self.failure = failure
-        onChange?()
+        notifyChange()
     }
 
     private func receive(_ event: WatchPartyChannelEvent, epoch: UUID, attempt: UUID) {
@@ -604,7 +630,7 @@ final class WatchPartySession {
                     presence[key] = value
                 }
             }
-            onChange?()
+            notifyChange()
         case let .message(name, data):
             switch name {
             case "state":
@@ -614,7 +640,7 @@ final class WatchPartySession {
                 if let value = try? JSONDecoder().decode(WatchPartyPresence.self, from: data),
                    value.memberID != memberID, members.contains(where: { $0.id == value.memberID }) {
                     if value.status == .ready { waitingCoordinator.memberReady(value.memberID) }
-                    presence[value.memberID] = value; onChange?()
+                    presence[value.memberID] = value; notifyChange()
                 }
             case "state_request":
                 guard let request = try? JSONDecoder().decode(MemberPayload.self, from: data), request.memberID != memberID else { return }
@@ -650,7 +676,7 @@ final class WatchPartySession {
                 if sharedStream != message.stream {
                     sharedStream = message.stream
                     sharedStreamRevision = UUID()
-                    onStream?(sharedStream); onChange?()
+                    onStream?(sharedStream); notifyChange()
                 }
             default: break
             }

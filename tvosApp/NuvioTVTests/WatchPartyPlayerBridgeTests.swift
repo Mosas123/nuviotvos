@@ -22,6 +22,7 @@ final class WatchPartyPlayerBridgeTests: XCTestCase {
         var current = true
         var rate: Float = 1
         var maximumRate: Float = 4
+        var supportedRate: Float = 4
         var calls: [String] = []
         var targets: [Int64] = []
         let nativeGate: Gate?
@@ -36,7 +37,7 @@ final class WatchPartyPlayerBridgeTests: XCTestCase {
                 if let rate { self.rate = min(rate, self.maximumRate); self.calls.append("rate") }
                 if let paused { self.calls.append(paused ? "pause" : "play") }
                 return self.rate
-            }, sleep: { [weak self] _ in
+            }, maximumRate: { [weak self] in self?.supportedRate ?? 0 }, sleep: { [weak self] _ in
                 if let gate = self?.timeoutGate { await gate.wait() }
                 else { try await Task.sleep(nanoseconds: 3_600_000_000_000) }
             })
@@ -288,6 +289,19 @@ final class WatchPartyPlayerBridgeTests: XCTestCase {
             XCTFail("Loading engine accepted")
         } catch { XCTAssertEqual(error as? WatchPartyPlayerBridgeError, .notReady) }
         XCTAssertTrue(f.calls.isEmpty)
+        f.bridge.stop()
+    }
+
+    func testKnownUnsupportedCanonicalRateIsRejectedBeforeTransport() async throws {
+        let f = Fixture()
+        f.supportedRate = 1.5
+        f.sample()
+        do {
+            _ = try await f.bridge.apply(WatchPartyPlayerEffect(paused: false, rate: 2), origin: .remoteRoom)
+            XCTFail("Unsupported rate accepted")
+        } catch { XCTAssertEqual(error as? WatchPartyPlayerBridgeError, .unsupportedRate) }
+        XCTAssertTrue(f.calls.isEmpty)
+        XCTAssertEqual(try f.bridge.setTemporaryRate(2), 1.5)
         f.bridge.stop()
     }
 }

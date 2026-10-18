@@ -44,6 +44,66 @@ final class WatchPartySessionTests: XCTestCase {
         XCTAssertEqual(channel.tracked.first?.memberID, "me")
     }
 
+    func testIndependentObserversPreserveServiceCallbackAndCanRemoveThemselves() async throws {
+        let current = session(Remote(snapshot()), channels: [Channel()])
+        defer { current.stop() }
+        var legacy = 0, independent = 0, oneShot = 0
+        current.onChange = { legacy += 1 }
+        let id = current.observeChanges { independent += 1 }
+        var once: UUID?
+        once = current.observeChanges {
+            oneShot += 1
+            if let once { current.removeChangeObserver(once) }
+        }
+        try await current.start(snapshot: snapshot())
+        XCTAssertGreaterThan(legacy, 1)
+        XCTAssertEqual(independent, legacy)
+        XCTAssertEqual(oneShot, 1)
+        current.removeChangeObserver(id)
+        let before = independent
+        current.stop()
+        XCTAssertEqual(independent, before)
+        XCTAssertGreaterThan(legacy, before)
+    }
+
+    func testRuntimeCompositionOwnsBindingWithoutReplacingServiceCallback() async throws {
+        let current = session(Remote(snapshot()), channels: [Channel()])
+        defer { current.stop() }
+        try await current.start(snapshot: snapshot())
+        let context = try XCTUnwrap(current.playbackContext)
+        var notifications = 0
+        current.onChange = { notifications += 1 }
+        let runtime = WatchPartyPlayerRuntime.player(isCurrent: { _ in true })
+        let model = PlayerViewModel(sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+                                    adoptsPictureInPictureSession: false)
+        let lease = try runtime.begin(context: context) { model }
+        _ = try runtime.bindPlayback(lease, room: current)
+        XCTAssertNotNil(model.watchPartyPlayerBridge)
+        XCTAssertThrowsError(try runtime.bindPlayback(lease, room: current))
+        try await current.setPresence(status: .ready, mediaKey: context.mediaKey)
+        XCTAssertGreaterThan(notifications, 0)
+        runtime.invalidate()
+        XCTAssertNil(model.watchPartyPlayerBridge)
+        let before = notifications
+        try await current.setPresence(status: .browsing, mediaKey: nil)
+        XCTAssertGreaterThan(notifications, before)
+    }
+
+    func testPlaybackMembershipIdentitySurvivesReconnectButNotANewJoin() async throws {
+        let current = session(Remote(snapshot()), channels: [Channel(), Channel()])
+        defer { current.stop() }
+        try await current.start(snapshot: snapshot())
+        let original = try XCTUnwrap(current.playbackContext)
+        try await current.reconnect()
+        XCTAssertEqual(current.playbackContext, original)
+        current.stop()
+        XCTAssertNil(current.playbackContext)
+        try await current.start(snapshot: snapshot())
+        let rejoined = try XCTUnwrap(current.playbackContext)
+        XCTAssertNotEqual(original.membershipID, rejoined.membershipID)
+        XCTAssertEqual(original.request, rejoined.request)
+    }
+
     func testOfflineGestureIsRejectedAndNotReplayedOnFreshChannel() async throws {
         let remote = Remote(snapshot())
         let old = Channel(), fresh = Channel()
