@@ -326,6 +326,7 @@ class PlayerViewModel: ObservableObject {
     private var controlsHideTimer: Timer?
     private var hasLoaded = false
     private var didShutdown = false
+    private(set) var watchPartyPlayerBridge: WatchPartyPlayerBridge?
     private let adoptsPictureInPictureSession: Bool
     private var isTrailerPlaybackSession = false
     private var trailerEndConfirmation = TrailerEndConfirmation()
@@ -2571,6 +2572,24 @@ class PlayerViewModel: ObservableObject {
             generation: sampledLoadGeneration
         )
 
+        // Reuse this refresh; Party never starts its own engine polling loop.
+        if let bridge = watchPartyPlayerBridge, let stamp = watchPartyPlayerStamp() {
+            bridge.observe(WatchPartyPlayerSample(
+                stamp: stamp, positionMs: c.positionMs, durationMs: c.durationMs,
+                rate: c.currentSpeed, paused: !c.isTransportPlaying,
+                loading: !hasPresentedCurrentLoad || c.isPlayerLoading || isSwitchingSource
+                    || isReloadingStream || isFailingOver || isAwaitingStreamStart
+                    || isScrubbing || isHoldingSeek || pendingSeekDelta != 0,
+                coherent: c.hasCoherentTimeSample && c.currentErrorMessage.isEmpty
+                    && !c.isPlayerEnded && !isLiveStream,
+                seeking: sampledEngineKind == .mpv && playerController.isSeekingForWatchParty
+            ))
+            // A binding's synchronous callback can invalidate or replace the source.
+            guard activeEngineKind == sampledEngineKind,
+                  sessionCoordinator.loadGeneration == sampledLoadGeneration,
+                  c === engine, !didShutdown else { return }
+        }
+
         let confirmedTrailerEnd = trailerEndConfirmation.observe(
             isTrailer: isTrailerPlaybackSession,
             usesMPV: sampledEngineKind == .mpv,
@@ -3037,7 +3056,7 @@ class PlayerViewModel: ObservableObject {
             failedStreamURLs.removeAll()
         }
 
-        if let latestSpeed = PlaybackSpeed(rawValue: c.currentSpeed),
+        if watchPartyPlayerBridge == nil, let latestSpeed = PlaybackSpeed(rawValue: c.currentSpeed),
            latestSpeed.rawValue != playbackSpeed.rawValue {
             playbackSpeed = latestSpeed
         }
@@ -3170,6 +3189,51 @@ class PlayerViewModel: ObservableObject {
         pauseOverlayTask = nil
     }
 
+    private func watchPartyPlayerStamp() -> WatchPartyPlayerStamp? {
+        guard !didShutdown, hasLoaded, let meta = activeMeta else { return nil }
+        let numbers = meta.isSeries ? resolvedEpisodeNumbers : nil
+        let media = WatchPartyMedia(type: meta.isSeries ? "episode" : "movie", metaID: meta.id,
+                                   metaType: meta.isSeries ? "series" : meta.type,
+                                   season: numbers?.season, episode: numbers?.episode)
+        return WatchPartyPlayerStamp(generation: sessionCoordinator.loadGeneration,
+                                     engineID: ObjectIdentifier(engine), mediaKey: media.key)
+    }
+
+    /// Explicit opt-in for the future runtime binding. UI/room admission must precede apply().
+    @discardableResult
+    func attachWatchPartyPlayerBridge(isCurrent: @escaping @MainActor () -> Bool) throws -> WatchPartyPlayerBridge {
+        guard watchPartyPlayerBridge == nil else { throw WatchPartyPlayerBridgeError.alreadyAttached }
+        let bridge = WatchPartyPlayerBridge(isCurrent: isCurrent, currentStamp: { [weak self] in
+            self?.watchPartyPlayerStamp()
+        }, issueSeek: { [weak self] target, stamp in
+            guard let self, self.watchPartyPlayerStamp() == stamp else { throw WatchPartyPlayerBridgeError.staleOperation }
+            switch self.activeEngineKind {
+            case .aether:
+                guard let controller = self.aetherController else { throw WatchPartyPlayerBridgeError.notReady }
+                await controller.engine.seek(to: Double(target) / 1000)
+            case .mpv:
+                try self.playerController.beginWatchPartySeek(target)
+            }
+            try Task.checkCancellation()
+            guard self.watchPartyPlayerStamp() == stamp else { throw WatchPartyPlayerBridgeError.staleOperation }
+        }, transport: { [weak self] paused, rate, stamp in
+            guard let self, self.watchPartyPlayerStamp() == stamp else { throw WatchPartyPlayerBridgeError.staleOperation }
+            let engine = self.engine
+            if let rate { engine.setSpeed(rate) }
+            if let paused {
+                if paused { engine.pausePlayback() } else { engine.playPlayback() }
+            }
+            return engine.currentSpeed
+        })
+        watchPartyPlayerBridge = bridge
+        return bridge
+    }
+
+    func detachWatchPartyPlayerBridge() {
+        watchPartyPlayerBridge?.stop()
+        watchPartyPlayerBridge = nil
+    }
+
     /// Reattach the same Party model without applying stale launch metadata or restarting load work.
     /// AetherPlayerSurface still owns the PiP manager's fullscreenSurfaceDidRebind handshake.
     @discardableResult
@@ -3208,6 +3272,7 @@ class PlayerViewModel: ObservableObject {
             cancelPauseOverlaySchedule()
             return
         }
+        detachWatchPartyPlayerBridge()
         cancelPendingAdvanceResolution()
         didShutdown = true
         PlaybackTimelineRecorder.record(.playbackStopRequested, engine: activeEngineKind)

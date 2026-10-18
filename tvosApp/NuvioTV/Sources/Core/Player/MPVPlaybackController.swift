@@ -1068,6 +1068,18 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func seekToMs(_ ms: Int64) {
+        seekToMs(ms, exact: false)
+    }
+
+    /// Party completion is confirmed by a later coherent VM sample, not this command's return.
+    func beginWatchPartySeek(_ ms: Int64) throws {
+        guard mpv != nil else { throw WatchPartyPlayerBridgeError.notReady }
+        seekToMs(ms, exact: true)
+    }
+
+    private(set) var isSeekingForWatchParty = false
+
+    private func seekToMs(_ ms: Int64, exact: Bool) {
         guard mpv != nil else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryWatchdog.record(event: "seek")
@@ -1085,7 +1097,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         print("[SeekWatchdog][#\(seekId)] ⏩ Seek started -> target: \(ms)ms (current: \(positionMs)ms, duration: \(durationMs)ms, isLocalCache: \(isLocalOrDiskCacheStream))")
         subtitleTranslationState.cancelPendingTranslations()
         rememberExplicitSeek(to: ms)
-        command("seek", args: [String(format: "%.3f", Double(ms) / 1000.0), "absolute+keyframes"])
+        command("seek", args: [String(format: "%.3f", Double(ms) / 1000.0), exact ? "absolute+exact" : "absolute+keyframes"])
     }
 
     func seekByMs(_ ms: Int64) {
@@ -1640,6 +1652,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let eofReached = getFlag("eof-reached")
         let idle = getFlag("core-idle")
         let seeking = getFlag("seeking")
+        isSeekingForWatchParty = seeking
         let bufferingCache = getFlag("paused-for-cache")
 
         isAtEndOfFile = eofReached
