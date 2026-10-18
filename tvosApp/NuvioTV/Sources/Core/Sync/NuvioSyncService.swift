@@ -316,6 +316,7 @@ final class NuvioSyncManager: ObservableObject {
                       ProfileSettings.activeProfileID == profileId else { return }
                 self.homeCatalogRevision &+= 1
                 self.pushAddonPreferences(preferences, originatingProfileId: profileId)
+                self.scheduleHomeCatalogPush()
             }
         })
         observers.append(center.addObserver(
@@ -1450,6 +1451,10 @@ final class NuvioSyncManager: ObservableObject {
                 if didChange {
                     homeCatalogRevision &+= 1
                 }
+                if AddonCatalogRemovalStore.hasPendingRemoval(in: ProfileSettings.store(for: activeProfile.id)) {
+                    pushAddonPreferences(CinemetaCatalogRepository.configuredStreamAddonPreferences,
+                                         originatingProfileId: activeProfile.id)
+                }
                 Self.addonSyncDiagnostic = "remote \(remoteAddons.count), enabled \(appliedCount)"
                 print("Nuvio sync pulled \(appliedCount) enabled add-on(s).")
             } catch is CancellationError {
@@ -1676,6 +1681,12 @@ final class NuvioSyncManager: ObservableObject {
                 lastCompletedPullAt[key] = Date()
             }
             pendingPushScopes.formUnion(.all)
+            // Collection visibility can be edited while isApplyingRemote blocks
+            // scheduling, or before the first Home snapshot/initial pull exists.
+            let configuredCollectionIds = Set(CollectionsStore.collections().map(\.id))
+            if TVHomeCatalogOrder.pendingCollectionVisibility().keys.contains(where: { configuredCollectionIds.contains($0) }) {
+                scheduleHomeCatalogPush()
+            }
             await flushPendingPushesNow()
         } catch is CancellationError {
             guard generation == pullGeneration else { return }
@@ -3059,7 +3070,7 @@ final class NuvioAPIClient {
     }
 
     fileprivate func applyAddons(_ addons: [RemoteAddon], localProfileId: String) -> (appliedCount: Int, didChange: Bool) {
-        let preferences = addons
+        let receivedPreferences = addons
             .sorted { $0.sortOrder < $1.sortOrder }
             .compactMap { addon -> StreamAddonPreference? in
                 guard let url = CinemetaCatalogRepository.normalizedManifestURL(from: addon.url) else { return nil }
@@ -3067,10 +3078,12 @@ final class NuvioAPIClient {
             }
 
         let defaults = ProfileSettings.store(for: localProfileId)
+        let preferences = AddonCatalogRemovalStore.filterRemote(receivedPreferences, in: defaults)
         let currentPreferences = CinemetaCatalogRepository.configuredStreamAddonPreferences(in: defaults)
         let didChange = currentPreferences != preferences
         if didChange {
-            CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, in: defaults)
+            CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, in: defaults,
+                profileID: localProfileId, isLocalEdit: false)
             Task {
                 await StremioManifestDataCache.shared.clear()
             }
@@ -3208,12 +3221,14 @@ final class NuvioAPIClient {
     /// `collection_<collectionId>` so rows can be ordered alongside catalogs.
     @discardableResult
     func applyHomeCatalogSettings(_ payload: HomeCatalogSyncPayload, localProfileId: String) -> Bool {
-        let catalogItems = payload.items.filter { !$0.isCollection }
-        let collectionItems = payload.items.filter(\.isCollection)
+        let removedIDs = AddonCatalogRemovalStore.context(in: ProfileSettings.store(for: localProfileId)).addonIDs
+        let items = payload.items.filter { $0.isCollection || !removedIDs.contains($0.addonId) }
+        let catalogItems = items.filter { !$0.isCollection }
+        let collectionItems = items.filter(\.isCollection)
 
         // Interleave catalogs and collections in the account's saved order so
         // Home can place collection rows among addon catalogs.
-        let orderKeys = payload.items
+        let orderKeys = items
             .sorted { $0.order < $1.order }
             .map { item -> String in
                 if item.isCollection {
@@ -3224,10 +3239,10 @@ final class NuvioAPIClient {
         let disabledKeys = catalogItems
             .filter { !$0.enabled }
             .map { "\($0.addonId)_\($0.type)_\($0.catalogId)" }
-        let disabledCollectionIds = collectionItems
+        var disabledCollectionIds = Set(collectionItems
             .filter { !$0.enabled }
             .map(\.collectionId)
-            .filter { !$0.isEmpty }
+            .filter { !$0.isEmpty })
 
         var customTitles: [String: String] = [:]
         for item in catalogItems where !item.customTitle.isEmpty {
@@ -3240,6 +3255,11 @@ final class NuvioAPIClient {
         }
 
         let defaults = ProfileSettings.store(for: localProfileId)
+        // Do not let a missing/stale remote item undo a user's local choice.
+        // Keep it pending until a later pull explicitly confirms that value.
+        for (id, enabled) in TVHomeCatalogOrder.pendingCollectionVisibility(in: defaults) {
+            if enabled { disabledCollectionIds.remove(id) } else { disabledCollectionIds.insert(id) }
+        }
         let currentOrderData = HomeCatalogPayloadStore.data(
             forKey: SettingsKey.homeCatalogSyncedOrder,
             in: defaults,
@@ -3266,7 +3286,7 @@ final class NuvioAPIClient {
         encoder.outputFormatting = [.sortedKeys]
         let newOrderData = try? encoder.encode(orderKeys)
         let newDisabledData = try? encoder.encode(disabledKeys)
-        let newDisabledColData = try? encoder.encode(disabledCollectionIds)
+        let newDisabledColData = try? encoder.encode(disabledCollectionIds.sorted())
         let newCustomTitlesData = try? encoder.encode(customTitles)
         let newShowType = payload.showCatalogType
         guard let newOrderData, let newDisabledData, let newDisabledColData, let newCustomTitlesData else {
@@ -3279,22 +3299,25 @@ final class NuvioAPIClient {
             || (currentCustomTitlesData != newCustomTitlesData)
             || (currentShowType ?? true) != newShowType
 
-        guard didChange else { return false }
-
-        let didPersist = HomeCatalogPayloadStore.writeBatch(
-            [
-                SettingsKey.homeCatalogSyncedOrder: newOrderData,
-                SettingsKey.homeCatalogDisabled: newDisabledData,
-                SettingsKey.homeCollectionDisabled: newDisabledColData,
-                SettingsKey.homeCatalogCustomTitles: newCustomTitlesData
-            ],
-            in: defaults,
-            profileID: localProfileId
+        if didChange {
+            let didPersist = HomeCatalogPayloadStore.writeBatch(
+                [
+                    SettingsKey.homeCatalogSyncedOrder: newOrderData,
+                    SettingsKey.homeCatalogDisabled: newDisabledData,
+                    SettingsKey.homeCollectionDisabled: newDisabledColData,
+                    SettingsKey.homeCatalogCustomTitles: newCustomTitlesData
+                ],
+                in: defaults,
+                profileID: localProfileId
+            )
+            guard didPersist else { return false }
+            defaults.set(newShowType, forKey: SettingsKey.homeCatalogShowType)
+        }
+        TVHomeCatalogOrder.acknowledgeCollectionVisibility(
+            collectionItems.map { (id: $0.collectionId, enabled: $0.enabled) },
+            in: defaults
         )
-        guard didPersist else { return false }
-
-        defaults.set(newShowType, forKey: SettingsKey.homeCatalogShowType)
-        return true
+        return didChange
     }
 
     /// Replaces the profile's collections blob (`sync_push_collections`).
@@ -3422,6 +3445,7 @@ final class NuvioAPIClient {
         )
         importMdbListSettings(mdbListFeature, localProfileId: localProfileId)
         ThemeSettingsSyncMapper.importPayload(themeFeature, localProfileId: localProfileId)
+        AddonCatalogRemovalStore.reconcile(in: ProfileSettings.store(for: localProfileId), profileID: localProfileId)
         return true
     }
 

@@ -356,6 +356,8 @@ struct ContentView: View {
     @State private var playbackStartupBenchmarkToken: UUID?
     @State private var continueWatchingStartupBenchmarkToken: UUID?
     @State private var playbackDidStart = false
+    @State private var playbackCollectionContext: CollectionPlaybackContext?
+    @State private var detailsCollectionContext: CollectionPlaybackContext?
     @State private var reopenStreamPickerOnDetails = false
     @State private var reopenStreamPickerEpisode: NuvioVideo?
     /// Title whose liquid-glass quick-actions menu is showing (long-press on a
@@ -835,12 +837,14 @@ struct ContentView: View {
         id: String,
         type: String,
         returnDestination: DetailsReturnDestination = .main,
-        startPlayback: Bool = false
+        startPlayback: Bool = false,
+        collectionContext: CollectionPlaybackContext? = nil
     ) {
         TVHomeDebugTrace.log(
             "details.open.root id=\(id) type=\(type) returnDest=\(returnDestination)"
         )
         detailsBackStack.removeAll()
+        detailsCollectionContext = collectionContext
         detailsReturnDestination = returnDestination
         if startPlayback {
             nextDetailsPlaybackRequestID &+= 1
@@ -851,6 +855,25 @@ struct ContentView: View {
             pendingDetailsPlaybackRequestID = nil
         }
         activeScreen = .details(id: id, type: type)
+    }
+
+    private func collectionContext(
+        id: String, type: String, folder: TVCollectionFolderItem? = nil,
+        resuming: Bool = false
+    ) -> CollectionPlaybackContext {
+        CollectionPlaybackContext(
+            profileID: profileViewModel.activeProfile?.id ?? "none",
+            contentID: id, type: type,
+            origin: folder.flatMap { CollectionOriginPresentation.service(folder: $0)?.reference },
+            preservesStoredOrigin: resuming
+        )
+    }
+
+    private var selectedCollectionFolder: TVCollectionFolderItem? {
+        guard case .collection(let id) = selectedTab,
+              id.profileID == profileViewModel.activeProfile?.id else { return nil }
+        return CollectionHomeDestination.configured(profileID: id.profileID)
+            .first { $0.id == id }?.folder
     }
 
     /// Handles Top Shelf, `nuvio://` / `nuvio-tv://` title open, and
@@ -943,6 +966,13 @@ struct ContentView: View {
 
         let isEpisode = session.meta.isSeries && session.season != nil && session.episode != nil
         guard !session.meta.isSeries || isEpisode else { return }
+
+        if progress > 0, let context = session.collectionContext {
+            CollectionPlaybackOriginStore.recordStarted(
+                meta: session.meta, context: context,
+                activeProfileID: profileID
+            )
+        }
 
         if RemoteTrackingState.isProgressSourceAuthenticated {
             // Keep the provider-backed path aligned with built-in playback:
@@ -1267,6 +1297,7 @@ struct ContentView: View {
         }
 
         let context = Self.episodeContext(for: item)
+        let provenance = collectionContext(id: item.meta.id, type: item.meta.type, resuming: true)
         playbackEpisodes = context.episodes
         playbackCurrentEpisode = context.current
 
@@ -1287,7 +1318,8 @@ struct ContentView: View {
                 subtitle: item.episodeSubtitle ?? "",
                 externalSubtitles: [],
                 resumeFrom: startFromBeginning ? nil : Self.resumePosition(for: item),
-                httpHeaders: httpHeaders
+                httpHeaders: httpHeaders,
+                collectionContext: provenance
             )
             return
         }
@@ -1352,7 +1384,8 @@ struct ContentView: View {
                     videoSize: prepared.videoSize,
                     videoHash: prepared.videoHash,
                     startupBenchmarkToken: startupToken,
-                    sourceID: prepared.sourceID
+                    sourceID: prepared.sourceID,
+                    collectionContext: provenance
                 )
                 if continueWatchingStartupBenchmarkToken == startupToken {
                     continueWatchingStartupBenchmarkToken = nil
@@ -1370,7 +1403,7 @@ struct ContentView: View {
                 withAnimation(.easeInOut(duration: 0.28)) {
                     isResolvingContinueWatchingStream = false
                     resolvingContinueWatchingItem = nil
-                    openDetailsRoot(id: item.meta.id, type: item.meta.type)
+                    openDetailsRoot(id: item.meta.id, type: item.meta.type, collectionContext: provenance)
                 }
             }
         }
@@ -1386,7 +1419,10 @@ struct ContentView: View {
             continueWatchingMenuItem = nil
             reopenStreamPickerOnDetails = true
             reopenStreamPickerEpisode = episode
-            openDetailsRoot(id: item.meta.id, type: item.meta.type)
+            openDetailsRoot(
+                id: item.meta.id, type: item.meta.type,
+                collectionContext: collectionContext(id: item.meta.id, type: item.meta.type, resuming: true)
+            )
         }
     }
 
@@ -1466,9 +1502,11 @@ struct ContentView: View {
         videoSize: Int64? = nil,
         videoHash: String? = nil,
         startupBenchmarkToken: UUID? = nil,
-        sourceID: String? = nil
+        sourceID: String? = nil,
+        collectionContext: CollectionPlaybackContext? = nil
     ) {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
+        let provenance = collectionContext ?? self.collectionContext(id: meta.id, type: meta.type)
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
         let defaultPlayer = ExternalPlayer.from(store.string(forKey: SettingsKey.externalPlayer))
         let player = customPlayer ?? defaultPlayer
@@ -1509,7 +1547,8 @@ struct ContentView: View {
                 season: meta.isSeries ? numbers?.season : nil,
                 episode: meta.isSeries ? numbers?.episode : nil,
                 duration: Self.runtimeSeconds(meta.runtime),
-                profileID: profileID
+                profileID: profileID,
+                collectionContext: provenance
             )
             successCallback = URL(string: "nuvio-tv://external-playback/\(id)")
             errorCallback = URL(string: "nuvio-tv://external-playback/error/\(id)")
@@ -1562,7 +1601,8 @@ struct ContentView: View {
             videoSize: videoSize,
             videoHash: videoHash,
             startupBenchmarkToken: startupBenchmarkToken,
-            sourceID: sourceID
+            sourceID: sourceID,
+            collectionContext: provenance
         )
     }
 
@@ -1579,13 +1619,20 @@ struct ContentView: View {
         videoSize: Int64? = nil,
         videoHash: String? = nil,
         startupBenchmarkToken: UUID? = nil,
-        sourceID: String? = nil
+        sourceID: String? = nil,
+        collectionContext: CollectionPlaybackContext? = nil
     ) {
         if PictureInPictureManager.shared.isPictureInPictureActive,
            PictureInPictureManager.shared.activeContext?.url != url {
             PictureInPictureManager.shared.invalidateSession()
         }
         playbackOrigin = origin
+        playbackCollectionContext = collectionContext
+        if origin == .main {
+            // Direct Continue Watching playback can return to Details for a
+            // series, without calling openDetailsRoot first.
+            detailsCollectionContext = collectionContext
+        }
         playbackFilename = filename
         playbackSourceID = sourceID
         playbackVideoSize = videoSize
@@ -1609,6 +1656,9 @@ struct ContentView: View {
         PictureInPictureManager.shared.onRestoreUI = { [self] context, completion in
             withAnimation(.easeInOut(duration: 0.24)) {
                 self.playbackOrigin = context.playbackOrigin
+                self.playbackCollectionContext = self.collectionContext(
+                    id: context.meta.id, type: context.meta.type, resuming: true
+                )
                 self.playbackFilename = context.filename
                 self.playbackSourceID = context.sourceID
                 self.playbackVideoSize = context.videoSize
@@ -1722,7 +1772,8 @@ struct ContentView: View {
                                 returnDestination: .collectionFolder(
                                     folder,
                                     collectionTitle: collectionTitle
-                                )
+                                ),
+                                collectionContext: self.collectionContext(id: meta.id, type: meta.type, folder: folder)
                             )
                         }
                     },
@@ -1931,12 +1982,18 @@ struct ContentView: View {
                 // Home defers its focus-restoration render until Details closes,
                 // so every tab can now use the same presentation transaction.
                 withAnimation(.easeInOut(duration: 0.28)) {
-                    openDetailsRoot(id: contentId, type: contentType)
+                    openDetailsRoot(
+                        id: contentId, type: contentType,
+                        collectionContext: collectionContext(id: contentId, type: contentType, folder: selectedCollectionFolder)
+                    )
                 }
             },
             onPlayTitle: { contentId, contentType in
                 withAnimation(.easeInOut(duration: 0.28)) {
-                    openDetailsRoot(id: contentId, type: contentType, startPlayback: true)
+                    openDetailsRoot(
+                        id: contentId, type: contentType, startPlayback: true,
+                        collectionContext: collectionContext(id: contentId, type: contentType, folder: selectedCollectionFolder)
+                    )
                 }
             },
             onRequestAccountRefresh: { force in
@@ -1966,6 +2023,14 @@ struct ContentView: View {
             },
             onResumePlayback: { item in
                 resumePlayback(item)
+            },
+            onNavigateToContinueWatchingDetails: { id, type in
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    openDetailsRoot(
+                        id: id, type: type,
+                        collectionContext: collectionContext(id: id, type: type, resuming: true)
+                    )
+                }
             },
             onPlayContinueWatchingManually: { item in
                 playContinueWatchingManually(item)
@@ -2008,7 +2073,8 @@ struct ContentView: View {
     }
 
     private func detailsScreen(contentId: String, contentType: String) -> some View {
-        DetailsScreen(
+        let provenance = detailsCollectionContext
+        return DetailsScreen(
             id: contentId,
             type: contentType,
             repository: CinemetaCatalogRepository(),
@@ -2044,7 +2110,8 @@ struct ContentView: View {
                         videoSize: videoSize,
                         videoHash: videoHash,
                         startupBenchmarkToken: startupToken,
-                        sourceID: sourceID
+                        sourceID: sourceID,
+                        collectionContext: provenance
                     )
                 } else {
                     PlaybackStartupTiming.cancel(token: startupToken)
@@ -2557,6 +2624,7 @@ struct ContentView: View {
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
         let autoPlayNext = store.object(forKey: SettingsKey.autoPlayNext) as? Bool ?? true
         let autoPlayNextCountdown = store.object(forKey: SettingsKey.autoPlayNextCountdown) as? Int ?? 10
+        let provenance = playbackCollectionContext
         PlayerView(
             url: url,
             meta: meta,
@@ -2634,7 +2702,7 @@ struct ContentView: View {
                 withAnimation(.easeInOut(duration: 0.28)) {
                     reopenStreamPickerOnDetails = true
                     reopenStreamPickerEpisode = playbackCurrentEpisode
-                    openDetailsRoot(id: meta.id, type: meta.type)
+                    openDetailsRoot(id: meta.id, type: meta.type, collectionContext: provenance)
                 }
             },
             onFinished: isTrailer ? {
@@ -2644,6 +2712,13 @@ struct ContentView: View {
             } : nil,
             onPlaybackStarted: {
                 playbackDidStart = true
+                if !isTrailer, let provenance,
+                   ProfileSettings.activeProfileID == provenance.profileID {
+                    CollectionPlaybackOriginStore.recordStarted(
+                        meta: meta, context: provenance,
+                        activeProfileID: profileViewModel.activeProfile?.id
+                    )
+                }
             },
             onPlayRecommendation: { recMeta, playManually in
                 dismissPlayer(meta: meta, subtitle: subtitle)
@@ -3099,6 +3174,7 @@ private struct TVMainTabView: View {
     let onRequestAccountRefresh: (Bool) -> Void
     let onOpenCollectionFolder: (TVCollectionFolderItem, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
+    var onNavigateToContinueWatchingDetails: ((String, String) -> Void)? = nil
     var onPlayContinueWatchingManually: ((ContinueWatchingItem) -> Void)? = nil
     var onStartContinueWatchingFromBeginning: ((ContinueWatchingItem) -> Void)? = nil
     var onRemoveFromContinueWatching: ((ContinueWatchingItem) -> Void)? = nil
@@ -3115,6 +3191,8 @@ private struct TVMainTabView: View {
     @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
     @State private var collectionDestinations: [CollectionHomeDestination] = []
+    @State private var directCollectionDestinations: [CollectionHomeDestination] = []
+    @State private var genreCollectionDestinations: [CollectionHomeDestination] = []
     @StateObject private var collectionSidebarArtwork = CollectionSidebarArtwork()
     @StateObject private var profileTabAvatar = ProfileTabAvatarRenderer()
     @State private var showingReauthSheet = false
@@ -3195,6 +3273,8 @@ private struct TVMainTabView: View {
         collectionDestinations = CollectionHomeDestination.configured(
             profileID: activeProfile?.id ?? "none"
         )
+        directCollectionDestinations = collectionDestinations.filter { !$0.isGenreDestination }
+        genreCollectionDestinations = collectionDestinations.filter(\.isGenreDestination)
         if case .collection(let id) = selectedTab,
            !collectionDestinations.contains(where: { $0.id == id }) {
             selectedTab = .home
@@ -3235,6 +3315,7 @@ private struct TVMainTabView: View {
             onPlayTitle: onPlayTitle,
             onOpenCollectionFolder: onOpenCollectionFolder,
             onResumePlayback: onResumePlayback,
+            onNavigateToContinueWatchingDetails: onNavigateToContinueWatchingDetails,
             onPlayContinueWatchingManually: onPlayContinueWatchingManually,
             onStartContinueWatchingFromBeginning: onStartContinueWatchingFromBeginning,
             onRemoveFromContinueWatching: onRemoveFromContinueWatching,
@@ -3286,6 +3367,7 @@ private struct TVMainTabView: View {
             isActive: selectedTab == .collection(destination.id),
             isFullScreenOverlayPresented: isFullScreenOverlayPresented,
             detailsDidDisappearGeneration: detailsDidDisappearGeneration,
+            collectionArtwork: collectionSidebarArtwork.images[destination.id],
             onNavigateToDetails: onNavigateToDetails,
             onPlayTitle: onPlayTitle,
             onLongPressCard: onLongPressCard
@@ -3332,7 +3414,9 @@ private struct TVMainTabView: View {
     @available(tvOS 18.0, *)
     private var groupedCollectionTabs: some View {
         TabView(selection: $selectedTab) {
-            Tab(value: TVTab.profile) { Color.clear } label: { profileTabLabel }
+            if #unavailable(tvOS 27.0) {
+                Tab(value: TVTab.profile) { Color.clear } label: { profileTabLabel }
+            }
             Tab(TVTab.home.title, systemImage: TVTab.home.symbol, value: TVTab.home) {
                 homeTabContent
             }
@@ -3343,9 +3427,9 @@ private struct TVMainTabView: View {
                 libraryTabContent
             }
             Tab(value: TVTab.settings) { settingsTabContent } label: { settingsTabLabel }
-            if !collectionDestinations.isEmpty {
+            if !directCollectionDestinations.isEmpty {
                 TabSection {
-                    ForEach(collectionDestinations) { destination in
+                    ForEach(directCollectionDestinations) { destination in
                         Tab(value: TVTab.collection(destination.id)) {
                             collectionTabContent(destination)
                         } label: {
@@ -3356,12 +3440,48 @@ private struct TVMainTabView: View {
                     Text(L10n.string("tmdb_collections_title", fallback: "Collections"))
                 }
             }
+            if !genreCollectionDestinations.isEmpty {
+                if #available(tvOS 27.0, *) {
+                    // tvOS supports the automatic policy, but not an explicit
+                    // collapsed default. Keep the system's native behavior;
+                    // header interaction still needs verification on Apple TV.
+                    genreTabSection.defaultSectionExpansion(.automatic)
+                } else {
+                    // Earlier systems retain a usable, expanded native section.
+                    genreTabSection
+                }
+            }
+        }
+    }
+
+    @available(tvOS 18.0, *)
+    private var genreTabSection: some TabContent<TVTab> {
+        TabSection {
+            ForEach(genreCollectionDestinations) { destination in
+                Tab(value: TVTab.collection(destination.id)) {
+                    collectionTabContent(destination)
+                } label: {
+                    collectionTabLabel(destination)
+                }
+            }
+        } header: {
+            Label(L10n.string("sidebar_genres_title", fallback: "Genres"), systemImage: "square.grid.2x2.fill")
         }
     }
 
     @ViewBuilder
     private var tabShell: some View {
-        if #available(tvOS 18.0, *) {
+        if #available(tvOS 27.0, *) {
+            groupedCollectionTabs
+                .tabViewSidebarHeader {
+                    TVSidebarProfileHeader(profile: displayedProfile) {
+                        guard !isProfileFocusPending else { return }
+                        if selectedTab == .settings { syncManager.flushPendingPushes() }
+                        onSwitchProfile()
+                    }
+                    .disabled(isProfileFocusPending)
+                }
+        } else if #available(tvOS 18.0, *) {
             groupedCollectionTabs
         } else {
             standardTabs
@@ -3435,6 +3555,16 @@ private struct TVSidebarProfileHeader: View {
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
 
     var body: some View {
+        Button(action: action) {
+            headerContent
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabled()
+        .animation(.easeInOut(duration: 0.2), value: isFocused)
+    }
+
+    private var headerContent: some View {
         HStack(spacing: 12) {
             TVSidebarAvatar(profile: profile, isFocused: isFocused)
 
@@ -3457,24 +3587,14 @@ private struct TVSidebarProfileHeader: View {
 
             Spacer(minLength: 8)
 
-            if !isFocused {
-                TimelineView(.periodic(from: Date(), by: 30)) { context in
-                    Text(context.date, format: .dateTime.hour().minute())
-                        .font(.system(size: 23, weight: .medium))
-                        .foregroundColor(.white.opacity(0.68))
-                        .lineLimit(1)
-                }
-                .transition(.opacity)
-            }
+            TVSidebarClock()
+                .font(.system(size: 23, weight: .medium))
+                .foregroundColor(.white.opacity(0.68))
+                .frame(width: 140, alignment: .trailing)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 14)
         .contentShape(Rectangle())
-        .focusable(true)
-        .focused($isFocused)
-        .focusEffectDisabled()
-        .onTapGesture(perform: action)
-        .animation(.easeInOut(duration: 0.2), value: isFocused)
     }
 
     private var displayName: String {
@@ -3765,6 +3885,7 @@ struct TVHomeView: View {
     let onOpenCollectionFolder: (TVCollectionFolderItem, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
     var collectionHome: CollectionHomeModel? = nil
+    var onNavigateToContinueWatchingDetails: ((String, String) -> Void)? = nil
     var onPlayContinueWatchingManually: ((ContinueWatchingItem) -> Void)? = nil
     var onStartContinueWatchingFromBeginning: ((ContinueWatchingItem) -> Void)? = nil
     var onRemoveFromContinueWatching: ((ContinueWatchingItem) -> Void)? = nil
@@ -3838,6 +3959,7 @@ struct TVHomeView: View {
     @State private var continueWatchingMetas: [NuvioMeta] = []
     @State private var upcomingMetas: [NuvioMeta] = []
     @State private var continueWatchingByMetaId: [String: ContinueWatchingItem] = [:]
+    @State private var continueWatchingOrigins: [String: CollectionOriginPresentation] = [:]
     @State private var continueWatchingIndexByMetaId: [String: Int] = [:]
     @State private var continueWatchingIDs: [String] = []
     @State private var displayedProgressSource: TraktWatchProgressSource?
@@ -4300,6 +4422,12 @@ struct TVHomeView: View {
             if remaining.count != all.count {
                 setContinueWatching(remaining)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CollectionPlaybackOriginStore.changedNotification)
+            .merge(with: NotificationCenter.default.publisher(for: CollectionsStore.changedNotification))
+            .receive(on: RunLoop.main)) { _ in
+            guard collectionHome == nil else { return }
+            refreshContinueWatchingOrigins(rawContinueWatchingItems)
         }
         .onReceive(NotificationCenter.default.publisher(for: TraktAuthStore.changedNotification).receive(on: RunLoop.main)) { _ in
             guard isActive && !isFullScreenOverlayPresented else { return }
@@ -4848,6 +4976,8 @@ struct TVHomeView: View {
                                 horizontalEdgeInset: heroBleed,
                                 items: section.items,
                                 progressByItemId: continueWatchingByMetaId,
+                                collectionOriginsByItemId: collectionHome == nil && section.id == TVHomeSection.continueWatchingId
+                                    ? continueWatchingOrigins : [:],
                                 watchedTitleKeys: watchedTitleKeys,
                                 initialScrollIndex: rowScrollStore.index(for: section.id),
                                 onScrollIndexChange: { rowScrollStore.setIndex($0, for: section.id) },
@@ -4900,7 +5030,8 @@ struct TVHomeView: View {
                                     navigateToDetailsFromHome(
                                         id: meta.id,
                                         type: meta.type,
-                                        restoreCardID: cardKey
+                                        restoreCardID: cardKey,
+                                        preserveCollectionOrigin: section.id == TVHomeSection.continueWatchingId
                                     )
                                 },
                                 onPlayContinueWatchingManually: { item in
@@ -5895,6 +6026,8 @@ struct TVHomeView: View {
                 items: section.items,
                 progressByItemId: (section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId)
                     ? continueWatchingByMetaId : [:],
+                collectionOriginsByItemId: collectionHome == nil && section.id == TVHomeSection.continueWatchingId
+                    ? continueWatchingOrigins : [:],
                 watchedTitleKeys: watchedTitleKeys,
                 initialScrollIndex: rowScrollStore.index(for: section.id),
                 onScrollIndexChange: { newIndex in
@@ -6003,7 +6136,8 @@ struct TVHomeView: View {
                     navigateToDetailsFromHome(
                         id: meta.id,
                         type: meta.type,
-                        restoreCardID: cardKey
+                        restoreCardID: cardKey,
+                        preserveCollectionOrigin: section.id == TVHomeSection.continueWatchingId
                     )
                 },
                 onPlayContinueWatchingManually: { item in
@@ -6234,10 +6368,15 @@ struct TVHomeView: View {
     private func navigateToDetailsFromHome(
         id: String,
         type: String,
-        restoreCardID: String? = nil
+        restoreCardID: String? = nil,
+        preserveCollectionOrigin: Bool = false
     ) {
         prepareForOverlayPresentation(restoreCardID: restoreCardID)
-        onNavigateToDetails(id, type)
+        if preserveCollectionOrigin, let onNavigateToContinueWatchingDetails {
+            onNavigateToContinueWatchingDetails(id, type)
+        } else {
+            onNavigateToDetails(id, type)
+        }
     }
 
     private func playTitleFromHome(id: String, type: String) {
@@ -7074,7 +7213,10 @@ struct TVHomeView: View {
     /// Catalog title focus: card strip + row offset are immediate; hero/backdrop
     /// publish only after the settle delay (and cancel if focus moves again).
     private func settleCatalogFocus(on meta: NuvioMeta, in sectionId: String) {
-        focusWork.pendingFocusedMeta = meta
+        if isActive && !isFullScreenOverlayPresented {
+            collectionHome?.prefetchHeroLogos(rowID: sectionId, near: meta)
+        }
+        focusWork.pendingFocusedMeta = collectionHome?.preparedHero(for: meta) ?? meta
         focusWork.pendingFocusedFolder = nil
         focusWork.pendingSectionId = sectionId
         scheduleHeroSettle()
@@ -7131,10 +7273,13 @@ struct TVHomeView: View {
                 return
             }
 
-            guard let settledMeta = focusWork.pendingFocusedMeta,
-                  settledMeta.id == targetMetaId,
+            guard let pendingMeta = focusWork.pendingFocusedMeta,
+                  pendingMeta.id == targetMetaId,
                   let targetSectionId,
                   focusWork.pendingSectionId == targetSectionId else { return }
+
+            let settledMeta = collectionHome?.preparedHero(for: pendingMeta) ?? pendingMeta
+            focusWork.pendingFocusedMeta = settledMeta
 
             // Leaving a folder hero: clear only after settle so backdrop stays frozen.
             focusedSectionId = targetSectionId
@@ -7551,12 +7696,25 @@ struct TVHomeView: View {
         }
     }
 
-    /// Publishes Continue Watching and its derived lookup data together. The
-    /// row is updated from notifications and source refreshes, while Home can
-    /// re-evaluate its body dozens of times during focus movement; keeping the
-    /// metadata array and progress index out of those body computations is the
-    /// important part of this helper.
+    /// Prepare annotations outside focus-driven body evaluation. Resolve the
+    /// current collection definition so deletes and artwork edits are honored.
+    private func refreshContinueWatchingOrigins(_ items: [ContinueWatchingItem]) {
+        guard collectionHome == nil,
+              ProfileSettings.activeProfileID == contentIdentity.profileId else {
+            continueWatchingOrigins = [:]
+            return
+        }
+        let services = CollectionOriginPresentation.configured(profileID: contentIdentity.profileId)
+        let origins = CollectionPlaybackOriginStore.presentations(
+            for: items.filter { !$0.isUpNextEntry }.map(\.meta),
+            profileID: contentIdentity.profileId, services: services
+        )
+        if origins != continueWatchingOrigins { continueWatchingOrigins = origins }
+    }
+
+    /// Publish Continue Watching and derived lookups together, outside body.
     private func setContinueWatching(_ rawItems: [ContinueWatchingItem]) {
+        refreshContinueWatchingOrigins(rawItems)
         if appliedContinueWatchingSort == continueWatchingSort,
            rawContinueWatchingItems.count == rawItems.count {
             let isIdentical = zip(rawContinueWatchingItems, rawItems).allSatisfy { $0.isContentEqual(to: $1) }
@@ -8060,9 +8218,14 @@ enum TVHomeCatalogOrder {
     static let forceRefreshNotification = Notification.Name("nuvio.tv.homeCatalog.forceRefresh")
     private static let snapshotDirectoryName = "catalogSnapshots"
     private static let snapshotWriter = TVHomeCatalogSnapshotWriter()
+    private static let snapshotPersistenceQueue = DispatchQueue(label: "nuvio.tv.catalogSnapshot.persistence", qos: .utility)
     private static let snapshotCacheLock = NSLock()
     private static var snapshotCacheData: [String: Data] = [:]
     private static var snapshotCacheRows: [String: [SnapshotRow]] = [:]
+
+    static func waitForSnapshotPersistenceForTesting() {
+        snapshotPersistenceQueue.sync {}
+    }
 
     static func invalidateSnapshotCache(for storageKey: String? = nil) {
         snapshotCacheLock.lock()
@@ -8241,8 +8404,8 @@ enum TVHomeCatalogOrder {
     }
 
     /// Keys or IDs permanently deleted locally from Home layout.
-    static func deletedCatalogKeys() -> Set<String> {
-        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogDeleted),
+    static func deletedCatalogKeys(in settings: UserDefaults = ProfileSettings.current) -> Set<String> {
+        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogDeleted, in: settings),
               let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         return Set(keys)
     }
@@ -8305,11 +8468,54 @@ enum TVHomeCatalogOrder {
         )
     }
 
-    /// Collection ids the user has hidden from Home on another device.
+    private static let pendingCollectionVisibilityKey = "nuvio.tv.homeCollectionVisibility.pending"
+
+    /// Local choices remain authoritative until an explicit remote item confirms
+    /// them. This small profile-scoped journal also survives a failed push/restart.
+    static func pendingCollectionVisibility(in settings: UserDefaults = ProfileSettings.current) -> [String: Bool] {
+        guard let data = settings.data(forKey: pendingCollectionVisibilityKey),
+              let values = try? JSONDecoder().decode([String: Bool].self, from: data) else { return [:] }
+        return values
+    }
+
+    private static func savePendingCollectionVisibility(_ values: [String: Bool], in settings: UserDefaults) {
+        if values.isEmpty {
+            settings.removeObject(forKey: pendingCollectionVisibilityKey)
+        } else if let data = try? JSONEncoder().encode(values) {
+            settings.set(data, forKey: pendingCollectionVisibilityKey)
+        }
+    }
+
+    private static func recordCollectionVisibility(_ id: String, isEnabled: Bool) {
+        let settings = ProfileSettings.current
+        var pending = pendingCollectionVisibility(in: settings)
+        pending[id] = isEnabled
+        savePendingCollectionVisibility(pending, in: settings)
+    }
+
+    /// A missing remote item is not an acknowledgement. Conflicting duplicate
+    /// items are also left pending rather than discarding the user's choice.
+    static func acknowledgeCollectionVisibility(_ remote: [(id: String, enabled: Bool)], in settings: UserDefaults) {
+        var pending = pendingCollectionVisibility(in: settings)
+        let original = pending
+        for (id, enabled) in original {
+            let matches = remote.filter { $0.id == id }
+            if !matches.isEmpty, matches.allSatisfy({ $0.enabled == enabled }) {
+                pending.removeValue(forKey: id)
+            }
+        }
+        if pending != original { savePendingCollectionVisibility(pending, in: settings) }
+    }
+
+    /// Remote visibility plus local choices not yet acknowledged by the account.
     static func disabledCollectionIds() -> Set<String> {
-        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCollectionDisabled),
-              let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return Set(keys)
+        let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCollectionDisabled)
+        let keys = data.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        var disabled = Set(keys)
+        for (id, enabled) in pendingCollectionVisibility() {
+            if enabled { disabled.remove(id) } else { disabled.insert(id) }
+        }
+        return disabled
     }
 
     /// Account catalog keys in the account's Home order → position, used by the
@@ -8422,6 +8628,11 @@ enum TVHomeCatalogOrder {
         _ updates: [(addonID: String, addonName: String, additions: [SnapshotRow])]
     ) {
         guard !updates.isEmpty else { return }
+        for update in updates {
+            if let url = update.additions.compactMap(\.manifestURL).first {
+                AddonCatalogRemovalStore.didDiscover(addonID: update.addonID, manifestURL: url, in: ProfileSettings.current)
+            }
+        }
         let current = snapshotRows()
         let deleted = deletedCatalogKeys()
         func isDeleted(_ row: SnapshotRow) -> Bool {
@@ -8463,8 +8674,10 @@ enum TVHomeCatalogOrder {
 
     static func writeSnapshotRows(_ rows: [SnapshotRow], in settings: UserDefaults = ProfileSettings.current) {
         TVHomeDebugTrace.measure("TVHomeCatalogOrder.writeSnapshotRows count=\(rows.count)") {
-            let deleted = deletedCatalogKeys()
+            let deleted = deletedCatalogKeys(in: settings)
+            let removed = AddonCatalogRemovalStore.context(in: settings)
             let filteredRows = rows.filter { row in
+                if removed.removes(row) { return false }
                 if deleted.contains(row.id) { return false }
                 if let key = row.settingsKey, deleted.contains(key) { return false }
                 let normalized = sectionOrderKey(row.id)
@@ -8473,14 +8686,18 @@ enum TVHomeCatalogOrder {
             }
             let uniqueRows = uniqueSnapshotRows(filteredRows)
             let storageKey = snapshotStorageKey(for: settings)
+            let removalGeneration = AddonCatalogRemovalStore.generation(in: settings)
 
             // Synchronously update in-memory row cache under lock so immediate callers/reads reflect changes
             snapshotCacheLock.withLock {
                 snapshotCacheRows[storageKey] = uniqueRows
             }
 
-            Task.detached(priority: .utility) {
-                let payload = uniqueRows.map { row -> [String: String] in
+            // Serial persistence stops an older write landing after cleanup.
+            snapshotPersistenceQueue.async {
+                guard AddonCatalogRemovalStore.generation(in: settings) == removalGeneration else { return }
+                let removedNow = AddonCatalogRemovalStore.context(in: settings)
+                let payload = uniqueRows.filter { !removedNow.removes($0) }.map { row -> [String: String] in
                     var entry = ["id": row.id, "title": row.title]
                     if let addonName = row.addonName { entry["addon"] = addonName }
                     if let addonId = row.addonId { entry["addonId"] = addonId }
@@ -8543,7 +8760,8 @@ enum TVHomeCatalogOrder {
             snapshotCacheRows[storageKey]
         }
         if let cached {
-            return cached
+            let removed = AddonCatalogRemovalStore.context(in: settings)
+            return cached.filter { !removed.removes($0) }
         }
         let data: Data? = {
             if let fileData = LargePayloadStore.read(key: storageKey, directory: snapshotDirectoryName) {
@@ -8575,7 +8793,8 @@ enum TVHomeCatalogOrder {
         } else {
             customTitles = [:]
         }
-        let deleted = deletedCatalogKeys()
+        let deleted = deletedCatalogKeys(in: settings)
+        let removed = AddonCatalogRemovalStore.context(in: settings)
         let resolvedRows: [SnapshotRow] = rows.compactMap { (row: [String: String]) -> SnapshotRow? in
             guard let id = row["id"], let title = row["title"] else { return nil }
             if deleted.contains(id) { return nil }
@@ -8605,7 +8824,7 @@ enum TVHomeCatalogOrder {
                 posterShape: row["posterShape"]
             )
         }
-        let uniqueRows = uniqueSnapshotRows(resolvedRows)
+        let uniqueRows = uniqueSnapshotRows(resolvedRows.filter { !removed.removes($0) })
         snapshotCacheLock.withLock {
             snapshotCacheData[storageKey] = data
             snapshotCacheRows[storageKey] = uniqueRows
@@ -8676,13 +8895,14 @@ enum TVHomeCatalogOrder {
     /// media type, catalog id, enabled state, and saved row order.
     static func syncItems() -> [[String: Any]] {
         var items: [[String: Any]] = []
+        var seenCollectionIds = Set<String>()
         let visibility = homeVisibilityContext()
         for row in snapshotRows() {
             guard let settingsKey = row.settingsKey else { continue }
 
             if settingsKey.hasPrefix(TVHomeSection.collectionIdPrefix) {
                 let collectionId = String(settingsKey.dropFirst(TVHomeSection.collectionIdPrefix.count))
-                guard !collectionId.isEmpty else { continue }
+                guard !collectionId.isEmpty, seenCollectionIds.insert(collectionId).inserted else { continue }
                 let customTitle = customTitle(forCatalogKey: settingsKey) ?? ""
                 items.append([
                     "addon_id": "",
@@ -8726,6 +8946,25 @@ enum TVHomeCatalogOrder {
                 "is_collection": false,
                 "collection_id": ""
             ])
+        }
+        // Hidden/new collections may never have appeared in a rendered Home
+        // snapshot. Still send their visibility, otherwise the remote merge
+        // preserves an old enabled item and the next pull turns them back on.
+        if CollectionsStore.activeProfileId == ProfileSettings.activeProfileID {
+            let disabled = disabledCollectionIds()
+            let deleted = deletedCatalogKeys()
+            for collection in CollectionsStore.collections() {
+                guard !collection.id.isEmpty, seenCollectionIds.insert(collection.id).inserted else { continue }
+                let key = TVHomeSection.collectionIdPrefix + collection.id
+                items.append([
+                    "addon_id": "", "type": "", "catalog_id": "",
+                    "enabled": !disabled.contains(collection.id) && !deleted.contains(key),
+                    "order": items.count,
+                    "custom_title": customTitle(forCatalogKey: key) ?? "",
+                    "is_collection": true,
+                    "collection_id": collection.id
+                ])
+            }
         }
         return items
     }
@@ -8835,6 +9074,7 @@ enum TVHomeCatalogOrder {
     /// Also used before Home has recorded a snapshot for a newly added collection.
     static func setCollectionEnabled(_ id: String, isEnabled: Bool) {
         guard !id.isEmpty else { return }
+        recordCollectionVisibility(id, isEnabled: isEnabled)
         var ids = disabledCollectionIds()
         if isEnabled { ids.remove(id) } else { ids.insert(id) }
         if isEnabled {
@@ -8867,6 +9107,7 @@ enum TVHomeCatalogOrder {
         if let key = row.settingsKey {
             if key.hasPrefix(TVHomeSection.collectionIdPrefix) {
                 let id = String(key.dropFirst(TVHomeSection.collectionIdPrefix.count))
+                recordCollectionVisibility(id, isEnabled: false)
                 var ids = disabledCollectionIds()
                 ids.insert(id)
                 persist(ids, forKey: SettingsKey.homeCollectionDisabled)

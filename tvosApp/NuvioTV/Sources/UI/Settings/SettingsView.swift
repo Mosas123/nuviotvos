@@ -122,6 +122,7 @@ enum SettingsKey {
     static let reduceMotion = "nuvio.tv.settings.appearance.reduceMotion"
 
     static let homeLayout = "nuvio.tv.settings.layout.homeLayout"
+    static let sidebarClockFormat = "nuvio.tv.settings.layout.sidebarClockFormat"
     static let gridRows = "nuvio.tv.settings.layout.gridRows"
     static let catalogAutoRefreshInterval = "nuvio.tv.settings.layout.catalogAutoRefreshInterval"
     /// JSON `[String]` of home section ids in the user's preferred order.
@@ -346,7 +347,7 @@ enum SettingsKey {
         profileName, profilePinEnabled, profileAutoSelectLast, profileRequireSelectionAfterBackground,
         accountSyncWatchState,
         theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
-        homeLayout, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, homeHeroRatingSource, posterLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
+        homeLayout, sidebarClockFormat, gridRows, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, homeHeroRatingSource, posterLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
         searchStyle, preferAddonArtworkInSearch,
         continueWatchingVisible, continueWatchingLandscape, continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp,
         cardCornerRadius, cardSize, liquidGlassCards,
@@ -3048,6 +3049,7 @@ private struct LayoutDiscoverySettingsView: View {
     let accentColor: Color
 
     @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
+    @AppStorage(SettingsKey.sidebarClockFormat) private var sidebarClockFormat = SidebarClockFormat.automatic.rawValue
     @AppStorage(SettingsKey.gridRows) private var gridRows = TVHomeGridLayout.defaultRows
     @AppStorage(SettingsKey.heroEnabled) private var heroEnabled = true
     @AppStorage(SettingsKey.heroCatalogs) private var heroCatalogsData = Data()
@@ -3115,6 +3117,20 @@ private struct LayoutDiscoverySettingsView: View {
                 .settingsEntryAnchor()
                 .onAppear {
                     if homeLayout == "Classic" { homeLayout = "Modern" }
+                }
+
+                if #available(tvOS 27.0, *) {
+                    SettingsOptionRow(
+                        title: L10n.string("sidebar_clock_format_title", fallback: "Sidebar Clock"),
+                        subtitle: L10n.string(
+                            "sidebar_clock_format_subtitle",
+                            fallback: "Time format beside your profile"
+                        ),
+                        selection: $sidebarClockFormat,
+                        options: SidebarClockFormat.allCases.map(\.rawValue),
+                        accentColor: accentColor,
+                        optionLabel: { SidebarClockFormat.fromStored($0).title }
+                    )
                 }
 
                 SettingsToggleRow(
@@ -3558,7 +3574,21 @@ private func layoutVisibleHomeCatalogRows() -> [TVHomeCatalogOrder.SnapshotRow] 
     let deletedKeys = TVHomeCatalogOrder.deletedCatalogKeys()
     let cinemetaPrefix = "\(CinemetaCatalogRepository.cinemetaAddonId)_"
     let isCinemetaActive = CinemetaCatalogRepository.isCinemetaEnabled
+    let installedManifestURLs = Set(
+        CinemetaCatalogRepository.configuredStreamAddonPreferences.compactMap {
+            CinemetaCatalogRepository.normalizedManifestURL(from: $0.url)
+        }
+    )
     let sourceRows = rows.filter { row in
+        // Snapshots intentionally retain rows across Home reloads. A removed
+        // add-on must not remain selectable just because its snapshot survives.
+        // Use installed preferences, not network results or enabled-only URLs.
+        if row.addonId != CinemetaCatalogRepository.cinemetaAddonId,
+           let rawURL = row.manifestURL,
+           let manifestURL = CinemetaCatalogRepository.normalizedManifestURL(from: rawURL),
+           !installedManifestURLs.contains(manifestURL) {
+            return false
+        }
         if deletedKeys.contains(row.id) { return false }
         if let sk = row.settingsKey, deletedKeys.contains(sk) { return false }
         if deletedKeys.contains(TVHomeCatalogOrder.sectionOrderKey(row.id)) { return false }
@@ -10671,8 +10701,8 @@ private struct AddonsSettingsSection: View {
     /// the account instead of returning on the next pull.
     private func removeAddon(at index: Int) {
         guard syncedAddons.indices.contains(index) else { return }
-        syncedAddons.remove(at: index)
-        persistSyncedAddons()
+        let removed = syncedAddons.remove(at: index)
+        persistSyncedAddons(removedAddon: removed)
     }
 
     /// Finalizing the URL field is an add operation, not just a local settings
@@ -10707,12 +10737,16 @@ private struct AddonsSettingsSection: View {
         )
     }
 
-    private func persistSyncedAddons() {
+    private func persistSyncedAddons(removedAddon: SyncedAddon? = nil) {
         let editedProfileId = ProfileSettings.activeProfileID ?? ""
         let preferences = syncedAddons.map {
             StreamAddonPreference(url: $0.url.absoluteString, enabled: $0.isEnabled)
         }
-        CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences)
+        var identities: [String: String] = [:]
+        for addon in syncedAddons + [removedAddon].compactMap({ $0 }) {
+            if let id = addon.manifestID { identities[addon.url.absoluteString] = id }
+        }
+        CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, knownManifestIDs: identities)
         TVHomeCatalogOrder.setDisabledAddonSources(
             ids: Set(syncedAddons.filter { !$0.isEnabled }.compactMap(\.manifestID)),
             names: Set(
@@ -10924,6 +10958,7 @@ private struct AddonsSettingsSection: View {
             preferences.removeAll(where: { $0.url.caseInsensitiveCompare(cinemetaURL) == .orderedSame })
             CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences)
             CinemetaCatalogRepository.setCinemetaDisabled(true)
+            AddonCatalogRemovalStore.removeBuiltInCinemeta(in: ProfileSettings.current)
             streamAddonManifestStates = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestStates) ?? ""
             NotificationCenter.default.post(
                 name: NuvioSyncManager.addonOrderChangedNotification,
@@ -11474,6 +11509,7 @@ private struct CollectionsSettingsSection: View {
                         name: (collection["title"] as? String) ?? "Untitled",
                         detail: detailText(for: collection),
                         isPinned: (collection["pinToTop"] as? Bool) ?? false,
+                        canTogglePin: !usesSidebar(collection),
                         accentColor: accentColor,
                         onEdit: { activeSheet = .editor(index) },
                         onTogglePin: { togglePin(index) },
@@ -11636,8 +11672,13 @@ private struct CollectionsSettingsSection: View {
         showToast("Imported \(imported.count) collection\(imported.count == 1 ? "" : "s")")
     }
 
+    private func usesSidebar(_ collection: [String: Any]) -> Bool {
+        guard #available(tvOS 18.0, *), let id = collection["id"] as? String else { return false }
+        return sidebarCollectionIDs.contains(id)
+    }
+
     private func togglePin(_ index: Int) {
-        guard collections.indices.contains(index) else { return }
+        guard collections.indices.contains(index), !usesSidebar(collections[index]) else { return }
         let pinned = (collections[index]["pinToTop"] as? Bool) ?? false
         collections[index]["pinToTop"] = !pinned
         CollectionsStore.saveLocalEdit(collections)
@@ -12929,6 +12970,7 @@ private struct CollectionSettingsRow: View {
     let name: String
     let detail: String
     let isPinned: Bool
+    var canTogglePin = true
     let accentColor: Color
     let onEdit: () -> Void
     let onTogglePin: () -> Void
@@ -12977,7 +13019,7 @@ private struct CollectionSettingsRow: View {
             .focusEffectDisabledIfAvailable()
             .entryLockable()
 
-            AddonReorderButton(systemImage: isPinned ? "pin.slash" : "pin", disabled: false, action: onTogglePin)
+            AddonReorderButton(systemImage: isPinned ? "pin.slash" : "pin", disabled: !canTogglePin, action: onTogglePin)
             AddonReorderButton(systemImage: "trash", disabled: false, action: onDelete)
         }
     }
@@ -12999,6 +13041,7 @@ private struct CollectionEditorSheet: View {
     @State private var focusGlowEnabled = true
     @State private var viewMode = "TABBED_GRID"
     @State private var showAllTab = true
+    @State private var sidebarLayoutLocked = false
     @State private var folders: [[String: Any]] = []
     @State private var sourcePicker: FolderSourcePicker?
 
@@ -13086,21 +13129,24 @@ private struct CollectionEditorSheet: View {
                             title: L10n.string("tvos_settings_pin_above_catalogs", fallback: "Pin above catalogs"),
                             subtitle: L10n.string("tvos_settings_show_this_collection_above_standard_home_rows", fallback: "Show this collection above standard Home rows"),
                             isOn: $pinToTop,
-                            accentColor: accentColor
+                            accentColor: accentColor,
+                            enabled: !sidebarLayoutLocked
                         )
 
                         SettingsToggleRow(
                             title: L10n.string("tvos_settings_focus_glow", fallback: "Focus glow"),
                             subtitle: L10n.string("tvos_settings_soft_glow_around_focused_folder_cards_android", fallback: "Soft glow around focused folder cards (Android)"),
                             isOn: $focusGlowEnabled,
-                            accentColor: accentColor
+                            accentColor: accentColor,
+                            enabled: !sidebarLayoutLocked
                         )
 
                         SettingsToggleRow(
                             title: L10n.string("tvos_settings_show_all_tab", fallback: "Show All tab"),
                             subtitle: L10n.string("tvos_settings_include_an_all_tab_when_browsing_folder_tabs", fallback: "Include an All tab when browsing folder tabs"),
                             isOn: $showAllTab,
-                            accentColor: accentColor
+                            accentColor: accentColor,
+                            enabled: !sidebarLayoutLocked
                         )
 
                         VStack(alignment: .leading, spacing: 12) {
@@ -13117,6 +13163,18 @@ private struct CollectionEditorSheet: View {
                                     }
                                 }
                             }
+                        }
+                        .disabled(sidebarLayoutLocked)
+                        .opacity(sidebarLayoutLocked ? 0.45 : 1)
+
+                        if sidebarLayoutLocked {
+                            Text(L10n.string(
+                                "collection_sidebar_layout_locked",
+                                fallback: "Turn off collection pages in sidebar to change these options. Sidebar pages use your Home layout."
+                            ))
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundColor(.white.opacity(0.6))
+                            .fixedSize(horizontal: false, vertical: true)
                         }
 
                         Divider().background(Color.white.opacity(0.1)).padding(.vertical, 2)
@@ -13198,6 +13256,9 @@ private struct CollectionEditorSheet: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear(perform: loadExisting)
+        .onReceive(NotificationCenter.default.publisher(for: CollectionSidebarPreferences.changedNotification).receive(on: RunLoop.main)) { _ in
+            refreshSidebarLayoutLock()
+        }
         .sheet(item: $sourcePicker) { picker in
             switch picker {
             case .catalogs(let index):
@@ -13223,6 +13284,7 @@ private struct CollectionEditorSheet: View {
     }
 
     private func loadExisting() {
+        refreshSidebarLayoutLock()
         guard let existing else {
             // Seed one empty folder (title is placeholder-only until the user types).
             folders = [Self.makeEmptyFolder(title: "")]
@@ -13237,6 +13299,17 @@ private struct CollectionEditorSheet: View {
         if folders.isEmpty {
             folders = [Self.makeEmptyFolder(title: "")]
         }
+    }
+
+    private func refreshSidebarLayoutLock() {
+        guard #available(tvOS 18.0, *), !isNew,
+              let id = existing?["id"] as? String else {
+            sidebarLayoutLocked = false
+            return
+        }
+        sidebarLayoutLocked = CollectionSidebarPreferences.collectionIDs(
+            profileID: CollectionsStore.activeProfileId
+        ).contains(id)
     }
 
     private static func makeEmptyFolder(title: String) -> [String: Any] {
@@ -14613,6 +14686,7 @@ private struct SettingsOptionRow: View {
     @Binding var selection: String
     let options: [String]
     let accentColor: Color
+    var optionLabel: (String) -> String = { L10n.optionLabel($0) }
 
     @FocusState private var isFocused: Bool
 
@@ -14624,7 +14698,7 @@ private struct SettingsOptionRow: View {
                 Spacer(minLength: 24)
 
                 HStack(spacing: 10) {
-                    Text(L10n.optionLabel(currentStored))
+                    Text(optionLabel(currentStored))
                         .font(.system(size: 19, weight: .bold))
                         .foregroundColor(.white)
                         .lineLimit(1)

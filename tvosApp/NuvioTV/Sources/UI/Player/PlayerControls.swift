@@ -161,15 +161,16 @@ struct PlayerControls: View {
             if onTimeline {
                 viewModel.setControlsAutoHideSuspended(false)
                 viewModel.scheduleControlsHide(after: 5.0)
-            } else if newControl == .subtitles || newControl == .audio {
-                // Focus is on a native Menu button or inside its presented menu.
-                // Suspend auto-hide so controls don't disappear while the user browses the menu.
-                viewModel.setControlsAutoHideSuspended(true)
             } else if newControl != nil {
+                // A focused Menu button is not an open menu. Returning to it
+                // after selecting or cancelling must resume the hide timer.
                 viewModel.setControlsAutoHideSuspended(false)
                 viewModel.scheduleControlsHide(after: 10.0)
-            } else if let old = oldControl, old == .subtitles || old == .audio {
+            } else if viewModel.showControls,
+                      let old = oldControl, old == .subtitles || old == .audio {
                 // Focus transitioned from a native Menu button into the presented menu items.
+                // Losing focus because controls were hidden must not suspend
+                // auto-hide and block a later revealControls() call.
                 viewModel.setControlsAutoHideSuspended(true)
             }
         }

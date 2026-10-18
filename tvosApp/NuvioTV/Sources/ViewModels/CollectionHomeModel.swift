@@ -19,6 +19,41 @@ struct CollectionHomeDestination: Identifiable, Equatable {
     let collectionTitle: String
     let folder: TVCollectionFolderItem
 
+    /// Classify the folder's configured sources, never the genres attached to
+    /// its movie metadata or its editable/localized display name.
+    var isGenreDestination: Bool {
+        let style = folder.presentationStyle?.uppercased()
+        guard style != "STREAMING_SERVICE", style != "STUDIO_FRANCHISE",
+              !folder.sources.isEmpty else { return false }
+        var hasGenreFilter = false
+        for source in folder.sources {
+            if source.normalizedProvider == "addon" {
+                guard let genre = source.genre,
+                      !genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+                hasGenreFilter = true
+                continue
+            }
+            guard source.normalizedProvider == "tmdb",
+                  source.tmdbSourceType?.uppercased() == "DISCOVER",
+                  let filters = source.filters else { return false }
+            // A provider/company/network collection can also constrain genres;
+            // those destinations must remain direct service/studio entries.
+            let providerFilters = [filters.withWatchProviders, filters.withCompanies, filters.withNetworks]
+            guard providerFilters.allSatisfy({
+                $0?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+            }) else { return false }
+            if let genres = filters.withGenres,
+               !genres.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                hasGenreFilter = true
+            } else if !["315058", "9840"].contains(filters.withKeywords ?? "") {
+                // Horror and Romance use keyword-based TV discovery in the
+                // built-in template, alongside their movie genre filters.
+                return false
+            }
+        }
+        return hasGenreFilter
+    }
+
     /// Preserve source and presentation edits when the tab shell is rebuilt.
     /// This value is used as a SwiftUI identity, never a persisted setting.
     var revision: CollectionHomeRevision {
@@ -93,6 +128,12 @@ final class CollectionHomeModel: ObservableObject {
     private var sourceErrors: [String: String] = [:]
     private var lastInputSignature: String?
     private var rowOrder: [String: Int] = [:]
+    private var logoPrefetchTasks: [String: Task<Void, Never>] = [:]
+    private var pendingLogoItems: [NuvioMeta] = []
+    private var requestedLogoItems: Set<String> = []
+    private var preparedHeroMetadata: [String: NuvioMeta] = [:]
+    private var preparedHeroOrder: [String] = []
+    private var heroMetadataContext: String?
 
     init(destination: CollectionHomeDestination, repository: CatalogRepository) {
         self.destination = destination
@@ -103,6 +144,13 @@ final class CollectionHomeModel: ObservableObject {
         generation &+= 1
         pageTasks.values.forEach { $0.cancel() }
         pageTasks.removeAll()
+        logoPrefetchTasks.values.forEach { $0.cancel() }
+        logoPrefetchTasks.removeAll()
+        pendingLogoItems.removeAll()
+        requestedLogoItems.removeAll()
+        preparedHeroMetadata.removeAll()
+        preparedHeroOrder.removeAll()
+        heroMetadataContext = nil
         retryingRows = []
         for index in store.sections.indices { store.sections[index].isLoadingMore = false }
     }
@@ -144,6 +192,8 @@ final class CollectionHomeModel: ObservableObject {
         let signature = inputSignature
         if !force, store.isLoaded(for: identity), sourceErrors.isEmpty,
            lastInputSignature == signature {
+            heroMetadataContext = CinemetaCatalogRepository.metadataCacheContext
+            prefetchHeroLogos()
             return store.sections.allSatisfy { $0.items.isEmpty }
                 ? L10n.string("collection_folder_empty", fallback: "No titles found in this folder") : nil
         }
@@ -209,6 +259,8 @@ final class CollectionHomeModel: ObservableObject {
         store.hero = rows.lazy.flatMap { $0.items }.first
         store.finishLoad(token, for: identity)
         refreshFailures()
+        heroMetadataContext = CinemetaCatalogRepository.metadataCacheContext
+        prefetchHeroLogos()
         if rows.allSatisfy({ $0.items.isEmpty }) {
             return errors.isEmpty
                 ? L10n.string("collection_folder_empty", fallback: "No titles found in this folder")
@@ -228,6 +280,96 @@ final class CollectionHomeModel: ObservableObject {
 
     func source(for rowID: String) -> NuvioCollectionSource? {
         sourcesByRow[rowID]
+    }
+
+    func preparedHero(for item: NuvioMeta) -> NuvioMeta {
+        guard CollectionsStore.activeProfileId == destination.id.profileID,
+              heroMetadataContext == CinemetaCatalogRepository.metadataCacheContext,
+              let prepared = preparedHeroMetadata[item.homeTitleIdentity] else { return item }
+        return item.fillingMissingHeroMetadata(from: prepared)
+    }
+
+    /// Warm only a small window around the current card. Replacing the pending
+    /// queue on focus changes keeps older rows from delaying the new target.
+    func prefetchHeroLogos(rowID: String? = nil, near item: NuvioMeta? = nil) {
+        guard CollectionsStore.activeProfileId == destination.id.profileID,
+              heroMetadataContext == CinemetaCatalogRepository.metadataCacheContext else { return }
+        let row = rowID.flatMap { id in store.sections.first(where: { $0.id == id }) }
+            ?? store.sections.first(where: { !$0.items.isEmpty })
+        guard let row else { return }
+        let index = item.flatMap { target in
+            row.items.firstIndex(where: { $0.homeTitleIdentity == target.homeTitleIdentity })
+        } ?? 0
+        let start = max(0, index - 1)
+        let end = min(row.items.count, index + 5)
+        guard start < end else { return }
+        var candidates = Array(row.items[start..<end])
+        if let item {
+            candidates.removeAll { $0.homeTitleIdentity == item.homeTitleIdentity }
+            candidates.insert(item, at: 0)
+        } else if let nextRow = store.sections.drop(while: { $0.id != row.id }).dropFirst().first {
+            candidates.append(contentsOf: nextRow.items.prefix(2))
+        }
+        var seen = Set<String>()
+        pendingLogoItems = candidates.filter { meta in
+            seen.insert(meta.homeTitleIdentity).inserted
+                && !requestedLogoItems.contains(meta.homeTitleIdentity)
+        }
+        drainLogoPrefetchQueue()
+    }
+
+    private func drainLogoPrefetchQueue() {
+        guard CollectionsStore.activeProfileId == destination.id.profileID,
+              heroMetadataContext == CinemetaCatalogRepository.metadataCacheContext else { return }
+        while logoPrefetchTasks.count < 2, !pendingLogoItems.isEmpty {
+            let item = pendingLogoItems.removeFirst()
+            let key = item.homeTitleIdentity
+            let expected = generation
+            let context = heroMetadataContext
+            let repository = self.repository
+            requestedLogoItems.insert(key)
+            logoPrefetchTasks[key] = Task { @MainActor [weak self] in
+                defer {
+                    if let self, self.generation == expected {
+                        self.logoPrefetchTasks[key] = nil
+                        self.drainLogoPrefetchQueue()
+                    }
+                }
+                var prepared = item
+                if item.logoUrl?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                    // Mirror focused-card enrichment, including add-on metadata
+                    // when TMDB is disabled, without decoding it on the UI actor.
+                    let request = Task.detached(priority: .utility) {
+                        try? await repository.getMetadata(id: item.id, type: item.type)
+                    }
+                    let fullMeta = await withTaskCancellationHandler {
+                        await request.value
+                    } onCancel: {
+                        request.cancel()
+                    }
+                    guard !Task.isCancelled else { return }
+                    if let fullMeta { prepared = item.fillingMissingHeroMetadata(from: fullMeta) }
+                }
+                guard let self, self.isCurrent(expected),
+                      context == CinemetaCatalogRepository.metadataCacheContext else { return }
+                // Shared with CachedHeroLogo: image decoding/caching remains in
+                // the existing bounded cache, and simultaneous URL reads coalesce.
+                if let value = prepared.logoUrl,
+                   let url = URL(string: value),
+                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                    _ = await BackdropImageCache.shared.image(for: url)
+                }
+                guard self.isCurrent(expected),
+                      context == CinemetaCatalogRepository.metadataCacheContext else { return }
+                self.preparedHeroMetadata[key] = prepared
+                self.preparedHeroOrder.append(key)
+                if self.preparedHeroOrder.count > 24 {
+                    let oldest = self.preparedHeroOrder.removeFirst()
+                    self.preparedHeroMetadata[oldest] = nil
+                    self.requestedLogoItems.remove(oldest)
+                }
+            }
+        }
     }
 
     func retry(rowID: String) {
