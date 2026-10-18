@@ -17,6 +17,23 @@ enum WatchPartyConnectionState: Equatable { case stopped, connecting, reconcilin
 enum WatchPartySessionError: Error, Equatable { case invalidSnapshot, notReady, forbidden, sequenceExhausted }
 enum WatchPartyMembershipExit: Equatable { case membershipLost, removed, ended, notFound, unavailable }
 
+/// Minted only by the explicit host approval path; exact payload and current context are captured.
+struct WatchPartyStreamConsent {
+    fileprivate let nonce: UUID
+    fileprivate let generation: UUID
+    fileprivate let connectionID: UUID
+    fileprivate let roomID: String
+    fileprivate let memberID: String
+    fileprivate let stream: WatchPartyStream
+}
+
+struct WatchPartySharedStreamSelection {
+    let candidate: WatchPartyStreamCandidate
+    fileprivate let generation: UUID
+    fileprivate let connectionID: UUID
+    fileprivate let revision: UUID
+}
+
 /// Owns one accepted create/join result. WatchPartyService replaces it on context changes.
 /// No player, view, global Auth, or automatic create/join retries are owned here.
 @MainActor
@@ -33,8 +50,9 @@ final class WatchPartySession {
     private(set) var failure: WatchPartyFailure?
     private(set) var membershipExit: WatchPartyMembershipExit?
     var onChange: (@MainActor () -> Void)?
-    /// Stream sharing remains opt-in in the future binding; never automatically resolve a URL here.
-    var onStream: (@MainActor (Data) -> Void)?
+    private(set) var sharedStream: WatchPartyStream?
+    /// A received candidate is inert. The future UI must explicitly select it before resolution/playback.
+    var onStream: (@MainActor (WatchPartyStream?) -> Void)?
 
     private let remote: any WatchPartySessionRemote
     private let context: WatchPartyRequestContext
@@ -58,6 +76,8 @@ final class WatchPartySession {
     private var pendingPersistence: WatchPartyPlayback?
     private var persistenceDeadline: TimeInterval?
     private var localPresence: WatchPartyPresence?
+    private var streamConsentNonce: UUID?
+    private var sharedStreamRevision = UUID()
 
     init(remote: any WatchPartySessionRemote, context: WatchPartyRequestContext, deviceID: String,
          isCurrent: @escaping WatchPartyAPI.ContextValidator, makeChannel: @escaping ChannelFactory,
@@ -129,6 +149,7 @@ final class WatchPartySession {
         failure = nil
         membershipExit = nil
         waitingCoordinator.reset()
+        clearSharedStream()
         clock.reset()
     }
 
@@ -173,6 +194,73 @@ final class WatchPartySession {
             lost(epoch: epoch, attempt: attempt)
             throw error
         }
+    }
+
+    /// Called only by an explicit user approval after reviewing the link and all included headers.
+    /// No caller in the app invokes this yet; the future UI/runtime supplies the actual source origin.
+    func approveStreamSharing(_ stream: WatchPartyStream, origin: WatchPartyStreamOrigin) throws -> WatchPartyStreamConsent {
+        streamConsentNonce = nil
+        try requireReady(generation)
+        guard let party, let memberID, party.hostMemberID == memberID else { throw WatchPartyStreamError.notHost }
+        guard origin == .directHTTP else { throw WatchPartyStreamError.unsupportedSource }
+        guard stream.mediaKey == party.media.key else { throw WatchPartyStreamError.wrongMedia }
+        try WatchPartyStreamPolicy.validate(stream)
+        guard try JSONEncoder().encode(WatchPartyStreamMessage(memberID: memberID, stream: stream)).count
+                <= WatchPartyStreamPolicy.maximumPayloadBytes else { throw WatchPartyStreamError.oversizedPayload }
+        let nonce = UUID()
+        streamConsentNonce = nonce
+        return WatchPartyStreamConsent(nonce: nonce, generation: generation, connectionID: connectionID,
+                                       roomID: party.id, memberID: memberID, stream: stream)
+    }
+
+    func revokeStreamConsent() { streamConsentNonce = nil }
+
+    /// One approval authorizes one exact send. No source URL is automatically resent on reconnect/state_request.
+    func shareStream(_ stream: WatchPartyStream, consent: WatchPartyStreamConsent) async throws {
+        try requireReady(generation)
+        guard let party, let memberID, party.hostMemberID == memberID else { throw WatchPartyStreamError.notHost }
+        guard stream.mediaKey == party.media.key else { throw WatchPartyStreamError.wrongMedia }
+        guard consent.nonce == streamConsentNonce, consent.generation == generation,
+              consent.connectionID == connectionID, consent.roomID == party.id,
+              consent.memberID == memberID, consent.stream == stream else { throw WatchPartyStreamError.consentRequired }
+        try WatchPartyStreamPolicy.validate(stream)
+        streamConsentNonce = nil // Consume before the first await, including an ambiguous failed send.
+        let epoch = generation, attempt = connectionID
+        do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: stream), epoch: epoch) }
+        catch { lost(epoch: epoch, attempt: attempt); throw error }
+    }
+
+    /// Revocation can clear an already shared candidate but cannot retract a URL a peer has received.
+    func stopSharingStream() async throws {
+        revokeStreamConsent()
+        try requireReady(generation)
+        guard let memberID, party?.hostMemberID == memberID else { throw WatchPartyStreamError.notHost }
+        let epoch = generation, attempt = connectionID
+        do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: nil), epoch: epoch) }
+        catch { lost(epoch: epoch, attempt: attempt); throw error }
+    }
+
+    /// Explicit guest selection returns all metadata, including response headers missing in NuvioStream.
+    func selectSharedStream(_ expected: WatchPartyStream) throws -> WatchPartySharedStreamSelection {
+        try requireReady(generation)
+        guard let party, memberID != party.hostMemberID, sharedStream == expected,
+              expected.mediaKey == party.media.key else { throw WatchPartyStreamError.unavailable }
+        return WatchPartySharedStreamSelection(candidate: try expected.playbackCandidate(), generation: generation,
+                                               connectionID: connectionID, revision: sharedStreamRevision)
+    }
+
+    /// The future async resolver/player binding must recheck this after each suspension.
+    func isCurrentSharedStreamSelection(_ selection: WatchPartySharedStreamSelection) -> Bool {
+        !Task.isCancelled && isCurrent(context) && connection == .ready && channel?.isConnected == true
+            && selection.generation == generation && selection.connectionID == connectionID
+            && selection.revision == sharedStreamRevision && sharedStream == selection.candidate.metadata
+            && selection.candidate.metadata.mediaKey == party?.media.key
+    }
+
+    private func clearSharedStream() {
+        streamConsentNonce = nil
+        sharedStreamRevision = UUID()
+        if sharedStream != nil { sharedStream = nil; onStream?(nil) }
     }
 
     /// The future intent dispatcher calls this only after admitting a local user/coordinator action.
@@ -286,6 +374,7 @@ final class WatchPartySession {
         cancelPersistence()
         channel?.close(); channel = nil
         connection = .recovering
+        clearSharedStream()
         presence = presence.filter { $0.key == memberID }
         onChange?()
     }
@@ -480,6 +569,7 @@ final class WatchPartySession {
               snapshot.memberID == nil || snapshot.memberID == memberID,
               snapshot.members.contains(where: { $0.id == memberID }) else { throw WatchPartySessionError.invalidSnapshot }
         let mediaChanged = info.media.key != party?.media.key
+        if mediaChanged || info.hostMemberID != party?.hostMemberID { clearSharedStream() }
         party = info; members = snapshot.members
         presence = presence.filter { key, _ in members.contains { $0.id == key } }
         waitingCoordinator.retainMembers(Set(members.map(\.id)))
@@ -550,8 +640,18 @@ final class WatchPartySession {
                 // Reconcile once through RPC before reopening the send gate.
                 lost(epoch: epoch, attempt: attempt)
             case "stream":
-                if let sender = try? JSONDecoder().decode(MemberPayload.self, from: data),
-                   sender.memberID == party.hostMemberID, memberID != party.hostMemberID { onStream?(data) }
+                guard data.count <= WatchPartyStreamPolicy.maximumPayloadBytes,
+                      let message = try? JSONDecoder().decode(WatchPartyStreamMessage.self, from: data),
+                      message.memberID == party.hostMemberID, memberID != party.hostMemberID else { return }
+                if let stream = message.stream {
+                    guard stream.mediaKey == party.media.key else { return }
+                    do { try WatchPartyStreamPolicy.validate(stream) } catch { return }
+                }
+                if sharedStream != message.stream {
+                    sharedStream = message.stream
+                    sharedStreamRevision = UUID()
+                    onStream?(sharedStream); onChange?()
+                }
             default: break
             }
         }

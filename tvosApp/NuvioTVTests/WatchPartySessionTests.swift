@@ -188,6 +188,91 @@ final class WatchPartySessionTests: XCTestCase {
         XCTAssertFalse(channel.isConnected)
     }
 
+    func testHostSharingRequiresExactOneUseConsent() async throws {
+        let remote = Remote(snapshot()), channel = Channel()
+        let session = session(remote, channels: [channel])
+        defer { session.stop() }
+        try await session.start(snapshot: snapshot())
+        let stream = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://cdn.example.test/a", headers: ["Authorization": "Bearer test-only"])
+        let consent = try session.approveStreamSharing(stream, origin: .directHTTP)
+        var changed = stream
+        changed.headers = ["Authorization": "Bearer changed"]
+        do { try await session.shareStream(changed, consent: consent); XCTFail("Expected exact-payload consent guard") }
+        catch { XCTAssertEqual(error as? WatchPartyStreamError, .consentRequired) }
+        XCTAssertFalse(channel.sent.contains { $0.0 == "stream" })
+        try await session.shareStream(stream, consent: consent)
+        do { try await session.shareStream(stream, consent: consent); XCTFail("Expected consumed consent") }
+        catch { XCTAssertEqual(error as? WatchPartyStreamError, .consentRequired) }
+        XCTAssertEqual(channel.sent.filter { $0.0 == "stream" }.count, 1)
+    }
+
+    func testConsentIsInvalidatedByReconnectionAndOriginRestrictions() async throws {
+        let remote = Remote(snapshot()), old = Channel(), fresh = Channel()
+        let session = session(remote, channels: [old, fresh])
+        defer { session.stop() }
+        try await session.start(snapshot: snapshot())
+        let stream = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://cdn.example.test/a")
+        XCTAssertThrowsError(try session.approveStreamSharing(stream, origin: .localTorrent))
+        XCTAssertThrowsError(try session.approveStreamSharing(stream, origin: .serverManaged))
+        let consent = try session.approveStreamSharing(stream, origin: .directHTTP)
+        try await session.reconnect()
+        do { try await session.shareStream(stream, consent: consent); XCTFail("Expected stale consent") }
+        catch { XCTAssertEqual(error as? WatchPartyStreamError, .consentRequired) }
+        XCTAssertFalse(fresh.sent.contains { $0.0 == "stream" })
+    }
+
+    func testGuestCannotApproveSharing() async throws {
+        let initial = snapshot(host: "other"), channel = Channel()
+        let session = session(Remote(initial), channels: [channel])
+        defer { session.stop() }
+        try await session.start(snapshot: initial)
+        let stream = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://cdn.example.test/a")
+        XCTAssertThrowsError(try session.approveStreamSharing(stream, origin: .directHTTP)) { error in
+            XCTAssertEqual(error as? WatchPartyStreamError, .notHost)
+        }
+    }
+
+    func testGuestReceivesInertCandidateAndSelectionExpiresAfterClear() async throws {
+        let initial = snapshot(host: "other"), channel = Channel()
+        let session = session(Remote(initial), channels: [channel])
+        defer { session.stop() }
+        try await session.start(snapshot: initial)
+        let stream = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://cdn.example.test/a", responseHeaders: ["Content-Type": "video/mp4"])
+        channel.receive?(.message(name: "stream", payload: try JSONEncoder().encode(WatchPartyStreamMessage(memberID: "other", stream: stream))))
+        XCTAssertEqual(session.sharedStream, stream)
+        let selection = try session.selectSharedStream(stream)
+        XCTAssertEqual(selection.candidate.responseHeaders, stream.responseHeaders)
+        XCTAssertTrue(session.isCurrentSharedStreamSelection(selection))
+        channel.receive?(.message(name: "stream", payload: try JSONEncoder().encode(WatchPartyStreamMessage(memberID: "other", stream: nil))))
+        XCTAssertNil(session.sharedStream)
+        XCTAssertFalse(session.isCurrentSharedStreamSelection(selection))
+        XCTAssertFalse(channel.sent.contains { $0.0 == "stream" })
+    }
+
+    func testWrongSenderMediaAndLoopbackStreamAreIgnored() async throws {
+        let initial = snapshot(host: "other"), channel = Channel()
+        let session = session(Remote(initial), channels: [channel])
+        defer { session.stop() }
+        try await session.start(snapshot: initial)
+        let valid = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://cdn.example.test/a")
+        let messages = [WatchPartyStreamMessage(memberID: "me", stream: valid),
+                        WatchPartyStreamMessage(memberID: "other", stream: WatchPartyStream(mediaKey: "wrong", url: valid.url)),
+                        WatchPartyStreamMessage(memberID: "other", stream: WatchPartyStream(mediaKey: valid.mediaKey, url: "http://127.0.0.1/a"))]
+        for message in messages { channel.receive?(.message(name: "stream", payload: try JSONEncoder().encode(message))) }
+        XCTAssertNil(session.sharedStream)
+    }
+
+    func testStopSharingBroadcastsExplicitNull() async throws {
+        let remote = Remote(snapshot()), channel = Channel()
+        let session = session(remote, channels: [channel])
+        defer { session.stop() }
+        try await session.start(snapshot: snapshot())
+        try await session.stopSharingStream()
+        let data = try XCTUnwrap(channel.sent.first { $0.0 == "stream" }?.1)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertTrue(object["stream"] is NSNull)
+    }
+
     func testOldSendFailureCannotCloseAReplacementConnection() async throws {
         let remote = Remote(snapshot())
         let old = Channel(), fresh = Channel()
