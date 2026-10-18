@@ -1312,8 +1312,15 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
     static func setConfiguredStreamAddonPreferences(
         _ preferences: [StreamAddonPreference],
-        in defaults: UserDefaults = ProfileSettings.current
+        in defaults: UserDefaults = ProfileSettings.current,
+        knownManifestIDs: [String: String] = [:],
+        profileID: String? = nil,
+        isLocalEdit: Bool = true
     ) {
+        if let profileID {
+            defaults.set(profileID, forKey: "nuvio.tv.profile.settings.profileID")
+        }
+        let previous = configuredStreamAddonPreferences(in: defaults)
         let normalized = normalizedPreferences(preferences)
         let enabledURLs = normalized
             .filter(\.enabled)
@@ -1327,6 +1334,10 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
         defaults.set(enabledURLs.first ?? "", forKey: SettingsKey.streamAddonManifestURL)
         defaults.set(enabledURLs.joined(separator: "\n"), forKey: SettingsKey.streamAddonManifestURLs)
+        AddonCatalogRemovalStore.update(
+            previous: previous, current: normalized,
+            knownManifestIDs: knownManifestIDs, in: defaults, isLocalEdit: isLocalEdit
+        )
     }
 
     private static func legacyStreamAddonURLs(in defaults: UserDefaults) -> [URL] {

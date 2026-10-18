@@ -316,6 +316,7 @@ final class NuvioSyncManager: ObservableObject {
                       ProfileSettings.activeProfileID == profileId else { return }
                 self.homeCatalogRevision &+= 1
                 self.pushAddonPreferences(preferences, originatingProfileId: profileId)
+                self.scheduleHomeCatalogPush()
             }
         })
         observers.append(center.addObserver(
@@ -1449,6 +1450,10 @@ final class NuvioSyncManager: ObservableObject {
                 let (appliedCount, didChange) = client.applyAddons(remoteAddons, localProfileId: activeProfile.id)
                 if didChange {
                     homeCatalogRevision &+= 1
+                }
+                if AddonCatalogRemovalStore.hasPendingRemoval(in: ProfileSettings.store(for: activeProfile.id)) {
+                    pushAddonPreferences(CinemetaCatalogRepository.configuredStreamAddonPreferences,
+                                         originatingProfileId: activeProfile.id)
                 }
                 Self.addonSyncDiagnostic = "remote \(remoteAddons.count), enabled \(appliedCount)"
                 print("Nuvio sync pulled \(appliedCount) enabled add-on(s).")
@@ -3065,7 +3070,7 @@ final class NuvioAPIClient {
     }
 
     fileprivate func applyAddons(_ addons: [RemoteAddon], localProfileId: String) -> (appliedCount: Int, didChange: Bool) {
-        let preferences = addons
+        let receivedPreferences = addons
             .sorted { $0.sortOrder < $1.sortOrder }
             .compactMap { addon -> StreamAddonPreference? in
                 guard let url = CinemetaCatalogRepository.normalizedManifestURL(from: addon.url) else { return nil }
@@ -3073,10 +3078,12 @@ final class NuvioAPIClient {
             }
 
         let defaults = ProfileSettings.store(for: localProfileId)
+        let preferences = AddonCatalogRemovalStore.filterRemote(receivedPreferences, in: defaults)
         let currentPreferences = CinemetaCatalogRepository.configuredStreamAddonPreferences(in: defaults)
         let didChange = currentPreferences != preferences
         if didChange {
-            CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, in: defaults)
+            CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, in: defaults,
+                profileID: localProfileId, isLocalEdit: false)
             Task {
                 await StremioManifestDataCache.shared.clear()
             }
@@ -3214,12 +3221,14 @@ final class NuvioAPIClient {
     /// `collection_<collectionId>` so rows can be ordered alongside catalogs.
     @discardableResult
     func applyHomeCatalogSettings(_ payload: HomeCatalogSyncPayload, localProfileId: String) -> Bool {
-        let catalogItems = payload.items.filter { !$0.isCollection }
-        let collectionItems = payload.items.filter(\.isCollection)
+        let removedIDs = AddonCatalogRemovalStore.context(in: ProfileSettings.store(for: localProfileId)).addonIDs
+        let items = payload.items.filter { $0.isCollection || !removedIDs.contains($0.addonId) }
+        let catalogItems = items.filter { !$0.isCollection }
+        let collectionItems = items.filter(\.isCollection)
 
         // Interleave catalogs and collections in the account's saved order so
         // Home can place collection rows among addon catalogs.
-        let orderKeys = payload.items
+        let orderKeys = items
             .sorted { $0.order < $1.order }
             .map { item -> String in
                 if item.isCollection {
@@ -3436,6 +3445,7 @@ final class NuvioAPIClient {
         )
         importMdbListSettings(mdbListFeature, localProfileId: localProfileId)
         ThemeSettingsSyncMapper.importPayload(themeFeature, localProfileId: localProfileId)
+        AddonCatalogRemovalStore.reconcile(in: ProfileSettings.store(for: localProfileId), profileID: localProfileId)
         return true
     }
 

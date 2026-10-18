@@ -8216,9 +8216,14 @@ enum TVHomeCatalogOrder {
     static let forceRefreshNotification = Notification.Name("nuvio.tv.homeCatalog.forceRefresh")
     private static let snapshotDirectoryName = "catalogSnapshots"
     private static let snapshotWriter = TVHomeCatalogSnapshotWriter()
+    private static let snapshotPersistenceQueue = DispatchQueue(label: "nuvio.tv.catalogSnapshot.persistence", qos: .utility)
     private static let snapshotCacheLock = NSLock()
     private static var snapshotCacheData: [String: Data] = [:]
     private static var snapshotCacheRows: [String: [SnapshotRow]] = [:]
+
+    static func waitForSnapshotPersistenceForTesting() {
+        snapshotPersistenceQueue.sync {}
+    }
 
     static func invalidateSnapshotCache(for storageKey: String? = nil) {
         snapshotCacheLock.lock()
@@ -8397,8 +8402,8 @@ enum TVHomeCatalogOrder {
     }
 
     /// Keys or IDs permanently deleted locally from Home layout.
-    static func deletedCatalogKeys() -> Set<String> {
-        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogDeleted),
+    static func deletedCatalogKeys(in settings: UserDefaults = ProfileSettings.current) -> Set<String> {
+        guard let data = HomeCatalogPayloadStore.data(forKey: SettingsKey.homeCatalogDeleted, in: settings),
               let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         return Set(keys)
     }
@@ -8621,6 +8626,11 @@ enum TVHomeCatalogOrder {
         _ updates: [(addonID: String, addonName: String, additions: [SnapshotRow])]
     ) {
         guard !updates.isEmpty else { return }
+        for update in updates {
+            if let url = update.additions.compactMap(\.manifestURL).first {
+                AddonCatalogRemovalStore.didDiscover(addonID: update.addonID, manifestURL: url, in: ProfileSettings.current)
+            }
+        }
         let current = snapshotRows()
         let deleted = deletedCatalogKeys()
         func isDeleted(_ row: SnapshotRow) -> Bool {
@@ -8662,8 +8672,10 @@ enum TVHomeCatalogOrder {
 
     static func writeSnapshotRows(_ rows: [SnapshotRow], in settings: UserDefaults = ProfileSettings.current) {
         TVHomeDebugTrace.measure("TVHomeCatalogOrder.writeSnapshotRows count=\(rows.count)") {
-            let deleted = deletedCatalogKeys()
+            let deleted = deletedCatalogKeys(in: settings)
+            let removed = AddonCatalogRemovalStore.context(in: settings)
             let filteredRows = rows.filter { row in
+                if removed.removes(row) { return false }
                 if deleted.contains(row.id) { return false }
                 if let key = row.settingsKey, deleted.contains(key) { return false }
                 let normalized = sectionOrderKey(row.id)
@@ -8672,14 +8684,18 @@ enum TVHomeCatalogOrder {
             }
             let uniqueRows = uniqueSnapshotRows(filteredRows)
             let storageKey = snapshotStorageKey(for: settings)
+            let removalGeneration = AddonCatalogRemovalStore.generation(in: settings)
 
             // Synchronously update in-memory row cache under lock so immediate callers/reads reflect changes
             snapshotCacheLock.withLock {
                 snapshotCacheRows[storageKey] = uniqueRows
             }
 
-            Task.detached(priority: .utility) {
-                let payload = uniqueRows.map { row -> [String: String] in
+            // Serial persistence stops an older write landing after cleanup.
+            snapshotPersistenceQueue.async {
+                guard AddonCatalogRemovalStore.generation(in: settings) == removalGeneration else { return }
+                let removedNow = AddonCatalogRemovalStore.context(in: settings)
+                let payload = uniqueRows.filter { !removedNow.removes($0) }.map { row -> [String: String] in
                     var entry = ["id": row.id, "title": row.title]
                     if let addonName = row.addonName { entry["addon"] = addonName }
                     if let addonId = row.addonId { entry["addonId"] = addonId }
@@ -8742,7 +8758,8 @@ enum TVHomeCatalogOrder {
             snapshotCacheRows[storageKey]
         }
         if let cached {
-            return cached
+            let removed = AddonCatalogRemovalStore.context(in: settings)
+            return cached.filter { !removed.removes($0) }
         }
         let data: Data? = {
             if let fileData = LargePayloadStore.read(key: storageKey, directory: snapshotDirectoryName) {
@@ -8774,7 +8791,8 @@ enum TVHomeCatalogOrder {
         } else {
             customTitles = [:]
         }
-        let deleted = deletedCatalogKeys()
+        let deleted = deletedCatalogKeys(in: settings)
+        let removed = AddonCatalogRemovalStore.context(in: settings)
         let resolvedRows: [SnapshotRow] = rows.compactMap { (row: [String: String]) -> SnapshotRow? in
             guard let id = row["id"], let title = row["title"] else { return nil }
             if deleted.contains(id) { return nil }
@@ -8804,7 +8822,7 @@ enum TVHomeCatalogOrder {
                 posterShape: row["posterShape"]
             )
         }
-        let uniqueRows = uniqueSnapshotRows(resolvedRows)
+        let uniqueRows = uniqueSnapshotRows(resolvedRows.filter { !removed.removes($0) })
         snapshotCacheLock.withLock {
             snapshotCacheData[storageKey] = data
             snapshotCacheRows[storageKey] = uniqueRows
