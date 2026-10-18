@@ -7,6 +7,8 @@ protocol WatchPartySessionRemote: AnyObject {
     func clock() async throws -> Int64
     func leave(partyID: String, deviceID: String) async throws -> WatchPartySnapshot
     func end(partyID: String, deviceID: String) async throws -> WatchPartySnapshot
+    func update(partyID: String, deviceID: String, media: WatchPartyMedia?,
+                playback: WatchPartyPlayback?) async throws -> WatchPartySnapshot
 }
 
 extension WatchPartyAPI: WatchPartySessionRemote {}
@@ -45,6 +47,10 @@ final class WatchPartySession {
     private var channel: (any WatchPartyChannel)?
     private var recoveryTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var persistTask: Task<Void, Never>?
+    private var persistenceID = UUID()
+    private var pendingPersistence: WatchPartyPlayback?
+    private var persistenceDeadline: TimeInterval?
     private var localPresence: WatchPartyPresence?
 
     init(remote: any WatchPartySessionRemote, context: WatchPartyRequestContext, deviceID: String,
@@ -100,6 +106,7 @@ final class WatchPartySession {
         generation = UUID()
         recoveryTask?.cancel(); recoveryTask = nil
         heartbeatTask?.cancel(); heartbeatTask = nil
+        cancelPersistence()
         channel?.close(); channel = nil
         connection = .stopped
         party = nil; memberID = nil; members = []; playback = nil; presence = [:]
@@ -173,7 +180,9 @@ final class WatchPartySession {
             try requireReady(epoch)
             accept(next)
         } catch { lost(epoch: epoch, attempt: attempt); throw error }
-        // Debounced RPC persistence and waiting coordination are added with the player binding.
+        if playback == next, active(epoch), connectionID == attempt {
+            schedulePersistence(next, epoch: epoch, attempt: attempt)
+        }
     }
 
     func leave(endForEveryone: Bool = false) async throws {
@@ -255,10 +264,65 @@ final class WatchPartySession {
 
     private func invalidateConnection() {
         connectionID = UUID()
+        cancelPersistence()
         channel?.close(); channel = nil
         connection = .recovering
         presence = presence.filter { $0.key == memberID }
         onChange?()
+    }
+
+    private func cancelPersistence() {
+        persistenceID = UUID()
+        persistTask?.cancel(); persistTask = nil
+        pendingPersistence = nil
+        persistenceDeadline = nil
+    }
+
+    /// One serial worker: debounce pending state, finish one RPC, then consider the latest state.
+    /// A newer gesture never cancels an in-flight HTTP mutation just to start a competing one.
+    private func schedulePersistence(_ value: WatchPartyPlayback, epoch: UUID, attempt: UUID) {
+        pendingPersistence = value
+        persistenceDeadline = clock.mark() + 1.5
+        guard persistTask == nil else { return }
+        let worker = UUID()
+        persistenceID = worker
+        let sleep = self.sleep
+        persistTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let deadline = self?.persistenceDeadline else { return }
+                let remaining = max(0, deadline - (self?.clock.mark() ?? deadline))
+                let delay = UInt64(max(0, WatchPartyTimeMath.integer(remaining * 1_000_000_000)))
+                do { try await sleep(delay) } catch { return }
+                guard let self, self.active(epoch), self.connectionID == attempt,
+                      self.persistenceID == worker, !Task.isCancelled else { return }
+                // A new gesture during sleep moves the deadline; wait only its remaining interval.
+                if let deadline = self.persistenceDeadline, self.clock.mark() < deadline { continue }
+                guard self.canControl, let party = self.party, let value = self.pendingPersistence,
+                      value == self.playback, value.mediaKey == party.media.key else {
+                    self.pendingPersistence = nil
+                    self.persistenceDeadline = nil
+                    self.persistTask = nil
+                    return
+                }
+                self.pendingPersistence = nil
+                self.persistenceDeadline = nil
+                do {
+                    let snapshot = try await self.remote.update(partyID: party.id, deviceID: self.deviceID,
+                                                               media: nil, playback: value)
+                    guard self.active(epoch), self.connectionID == attempt, self.persistenceID == worker,
+                          self.party?.media.key == value.mediaKey, !Task.isCancelled else { return }
+                    try self.apply(snapshot)
+                } catch {
+                    guard self.active(epoch), self.connectionID == attempt,
+                          self.persistenceID == worker, !Task.isCancelled else { return }
+                    // The request may already have reached the server. Never retry it automatically.
+                    self.failure = .network
+                    self.onChange?()
+                }
+                guard self.persistenceID == worker else { return }
+                if self.pendingPersistence == nil { self.persistTask = nil; return }
+            }
+        }
     }
 
     private func lost(epoch: UUID, attempt: UUID) {

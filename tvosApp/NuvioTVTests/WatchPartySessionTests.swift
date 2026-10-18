@@ -264,6 +264,9 @@ final class WatchPartySessionTests: XCTestCase {
         func end(partyID: String, deviceID: String) async throws -> WatchPartySnapshot {
             calls.append("end"); return WatchPartySnapshot(ok: true)
         }
+        func update(partyID: String, deviceID: String, media: WatchPartyMedia?, playback: WatchPartyPlayback?) async throws -> WatchPartySnapshot {
+            calls.append("update"); return snapshot
+        }
     }
 
     @MainActor
