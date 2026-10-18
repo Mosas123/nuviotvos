@@ -1517,15 +1517,52 @@ private struct TmdbCreatorDTO: Decodable {
     }
 }
 
+/// A bounded working set of reusable responses. Accesses keep recently used
+/// entries warm; eviction only discards data that can be fetched again.
+/// The limit counts responses, not bytes or an exact memory budget.
+struct TmdbResponseCache<Value> {
+    private let capacity: Int
+    private var values: [String: Value] = [:]
+    private var recency: [String] = []
+
+    init(capacity: Int) {
+        self.capacity = max(0, capacity)
+    }
+
+    var count: Int { values.count }
+
+    mutating func value(for key: String) -> Value? {
+        guard let value = values[key] else { return nil }
+        recency.removeAll { $0 == key }
+        recency.append(key)
+        return value
+    }
+
+    mutating func insert(_ value: Value, for key: String) {
+        guard capacity > 0 else { return }
+        recency.removeAll { $0 == key }
+        values[key] = value
+        recency.append(key)
+        if recency.count > capacity {
+            values.removeValue(forKey: recency.removeFirst())
+        }
+    }
+
+    mutating func removeAll() {
+        values.removeAll()
+        recency.removeAll()
+    }
+}
+
 private actor TmdbDetailsCache {
-    private var values: [String: TmdbDetailsResponse] = [:]
+    private var values = TmdbResponseCache<TmdbDetailsResponse>(capacity: 256)
     private var inFlight: [String: Task<TmdbDetailsResponse?, Never>] = [:]
 
     func resolve(
         for key: String,
         fetcher: @Sendable @escaping () async -> TmdbDetailsResponse?
     ) async -> TmdbDetailsResponse? {
-        if let cached = values[key] {
+        if let cached = values.value(for: key) {
             return cached
         }
         if let existingTask = inFlight[key] {
@@ -1538,7 +1575,7 @@ private actor TmdbDetailsCache {
         let result = await task.value
         inFlight.removeValue(forKey: key)
         if let result {
-            values[key] = result
+            values.insert(result, for: key)
         }
         return result
     }
@@ -1550,22 +1587,22 @@ private actor TmdbDetailsCache {
 }
 
 private actor TmdbFindCache {
-    private var values: [String: (id: Int, mediaType: String)] = [:]
+    private var values = TmdbResponseCache<(id: Int, mediaType: String)>(capacity: 1024)
     private var inFlight: [String: Task<(id: Int, mediaType: String)?, Never>] = [:]
 
     func value(for key: String) -> (id: Int, mediaType: String)? {
-        values[key]
+        values.value(for: key)
     }
 
     func insert(_ value: (id: Int, mediaType: String), for key: String) {
-        values[key] = value
+        values.insert(value, for: key)
     }
 
     func resolve(
         for key: String,
         fetcher: @Sendable @escaping () async -> (id: Int, mediaType: String)?
     ) async -> (id: Int, mediaType: String)? {
-        if let cached = values[key] {
+        if let cached = values.value(for: key) {
             return cached
         }
         if let existingTask = inFlight[key] {
@@ -1578,7 +1615,7 @@ private actor TmdbFindCache {
         let result = await task.value
         inFlight.removeValue(forKey: key)
         if let result {
-            values[key] = result
+            values.insert(result, for: key)
         }
         return result
     }
@@ -1590,7 +1627,7 @@ private actor TmdbFindCache {
 }
 
 private actor TmdbLocalizedDetailsCache {
-    private var values: [String: TmdbLocalizedDetailsResponse] = [:]
+    private var values = TmdbResponseCache<TmdbLocalizedDetailsResponse>(capacity: 256)
     private var generation: UInt64 = 0
 
     func snapshotGeneration() -> UInt64 {
@@ -1598,7 +1635,7 @@ private actor TmdbLocalizedDetailsCache {
     }
 
     func value(for key: String) -> TmdbLocalizedDetailsResponse? {
-        values[key]
+        values.value(for: key)
     }
 
     func insert(
@@ -1607,7 +1644,7 @@ private actor TmdbLocalizedDetailsCache {
         ifGeneration expectedGeneration: UInt64
     ) {
         guard generation == expectedGeneration else { return }
-        values[key] = value
+        values.insert(value, for: key)
     }
 
     func clear() {
