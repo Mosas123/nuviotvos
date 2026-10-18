@@ -17,11 +17,15 @@ final class CloudLibraryViewModel: ObservableObject {
     @Published var focusedKey: String?
 
     private let service: CloudLibraryService
+    private let loadItems: () async throws -> [CloudItem]
+    private var loadGeneration: UInt64 = 0
     private var resolveTask: Task<Void, Never>?
     private var resolutionGeneration: UInt64 = 0
 
-    init(store: UserDefaults) {
-        self.service = CloudLibraryService(store: store)
+    init(store: UserDefaults, loadItems: (() async throws -> [CloudItem])? = nil) {
+        let service = CloudLibraryService(store: store)
+        self.service = service
+        self.loadItems = loadItems ?? { try await service.loadItems() }
     }
 
     var isAvailable: Bool { service.isAvailable }
@@ -47,19 +51,28 @@ final class CloudLibraryViewModel: ObservableObject {
     var providerName: String { service.providerName ?? "Cloud" }
 
     func load() async {
+        guard !Task.isCancelled else { return }
+        loadGeneration &+= 1
+        let generation = loadGeneration
         isLoading = true
         errorMessage = nil
+        defer {
+            // An earlier completion cannot end a newer screen's loading state.
+            if loadGeneration == generation { isLoading = false }
+        }
         do {
-            items = try await service.loadItems()
+            let loaded = try await loadItems()
+            guard !Task.isCancelled, loadGeneration == generation else { return }
+            items = loaded
             if items.isEmpty {
                 errorMessage = L10n.string("cloud_library_empty_message", fallback: "No playable cloud files match the current filters.")
             }
         } catch is CancellationError {
             // Screen went away; ignore.
         } catch {
+            guard !Task.isCancelled, loadGeneration == generation else { return }
             errorMessage = L10n.string("cloud_library_load_failed", fallback: "Couldn't load your \(providerName) library.")
         }
-        isLoading = false
     }
 
     /// Resolves a file to a URL and hands it back via `onResolved`. Sets an error
