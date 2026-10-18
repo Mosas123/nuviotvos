@@ -89,6 +89,7 @@ enum WatchPartyPolicy {
     static func shouldRejoin(gapMs: Int64, playing: Bool) -> Bool { playing && gapMs <= rejoinGapMs }
 
     static func reportedGap(_ gapMs: Int64) -> Int64 {
+        if gapMs == .max { return .max }
         let gap = max(0, gapMs)
         let steps = gap / behindStepMs + (gap % behindStepMs >= behindStepMs / 2 ? 1 : 0)
         let rounded = steps.multipliedReportingOverflow(by: behindStepMs)
