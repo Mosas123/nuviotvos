@@ -4,6 +4,7 @@ import XCTest
 @MainActor
 final class WatchPartyPlayerBridgeTests: XCTestCase {
     private final class Engine {}
+    @MainActor
     private final class Gate {
         var continuation: CheckedContinuation<Void, Never>?
         var entered = false
@@ -14,6 +15,7 @@ final class WatchPartyPlayerBridgeTests: XCTestCase {
         func release() { continuation?.resume(); continuation = nil }
     }
 
+    @MainActor
     private final class Fixture {
         let engine = Engine()
         var stamp: WatchPartyPlayerStamp
