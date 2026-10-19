@@ -72,6 +72,28 @@ final class WatchPartyFoundationTests: XCTestCase {
         ))
     }
 
+    func testMediaReviewRequiresConfirmationForDifferentMovieOrEpisode() {
+        let movie = WatchPartyMedia(type: "movie", metaID: "ttA", metaType: "movie")
+        let another = WatchPartyMedia(type: "movie", metaID: "ttB", metaType: "movie")
+        let episode1 = WatchPartyMedia(type: "series", metaID: "ttS", metaType: "series",
+                                       season: 1, episode: 1)
+        let episode2 = WatchPartyMedia(type: "series", metaID: "ttS", metaType: "series",
+                                       season: 1, episode: 2)
+        XCTAssertFalse(WatchPartyMediaReviewPolicy.needsConfirmation(
+            previewKey: movie.key, joinedKey: movie.key
+        ))
+        XCTAssertTrue(WatchPartyMediaReviewPolicy.needsConfirmation(
+            previewKey: movie.key, joinedKey: another.key
+        ))
+        XCTAssertTrue(WatchPartyMediaReviewPolicy.needsConfirmation(
+            previewKey: episode1.key, joinedKey: episode2.key
+        ))
+        XCTAssertFalse(WatchPartyMediaReviewPolicy.changed(from: nil, to: movie.key))
+        XCTAssertFalse(WatchPartyMediaReviewPolicy.changed(from: movie.key, to: nil))
+        XCTAssertFalse(WatchPartyMediaReviewPolicy.changed(from: movie.key, to: movie.key))
+        XCTAssertTrue(WatchPartyMediaReviewPolicy.changed(from: episode1.key, to: episode2.key))
+    }
+
     func testRoomSelectionRejectsWrongMovieAndWrongEpisode() throws {
         let roomMovie = WatchPartyMedia(type: "movie", metaID: "tt001", metaType: "movie", title: "A")
         let sameMovie = WatchPartyMedia(type: "movie", metaID: "tt001", metaType: "movie", title: "Different display title")
