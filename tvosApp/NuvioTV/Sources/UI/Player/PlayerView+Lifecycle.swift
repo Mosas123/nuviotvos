@@ -92,6 +92,25 @@ extension PlayerView {
                     )
                 }
             }
+            .onChange(of: partyPlaybackIdentity) { oldIdentity, newIdentity in
+                // In-place room adoption keeps this PlayerView and its StateObject alive.
+                // Attach the runtime surface without repeating load() for the current source.
+                guard oldIdentity == nil, newIdentity != nil,
+                      let partyPlayback, partySurface == nil,
+                      partyPlayback.viewModel === viewModel else { return }
+                do {
+                    let attachment = try partyPlayback.attach()
+                    partySurface = attachment.surface
+                    guard viewModel.rebindWatchPartyFullscreen() else {
+                        partyPlayback.finish()
+                        return
+                    }
+                    PlaybackWakeLock.acquire(ownerID: viewModel.sessionCoordinator.wakeLockOwnerID)
+                    syncPlaybackWakeLock()
+                } catch {
+                    return
+                }
+            }
             .onDisappear {
                 if let partyPlayback {
                     guard let surface = partySurface else { return }

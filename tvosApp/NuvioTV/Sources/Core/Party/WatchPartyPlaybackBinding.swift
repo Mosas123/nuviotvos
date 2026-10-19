@@ -195,11 +195,73 @@ final class WatchPartyPlaybackBinding {
         return sample
     }
 
+    /// Pause needs a current checked player/source binding, but no seek receipt or duration.
+    private func pauseSample() -> WatchPartyPlayerSample? {
+        guard active, !suspended, state.connected, room.bindingState == state, let sample,
+              !sample.failed, sample.stamp.mediaKey == mediaKey,
+              bridge.sample?.stamp == sample.stamp else { return nil }
+        return sample
+    }
+
+    private func performPause(onApplied: (@MainActor () -> Void)?) async throws {
+        try Task.checkCancellation()
+        guard let initial = pauseSample() else { throw WatchPartyPlaybackBindingError.notReady }
+        guard !localBusy else { throw WatchPartyPlaybackBindingError.busy }
+        localBusy = true
+        defer { localBusy = false }
+
+        // Revoke automatic room correction before waiting for it to drain. Its permit observes
+        // the new revision, so a late seek/play receipt cannot reapply the old room state.
+        revision = UUID()
+        lastApplied = nil
+        let correction = worker
+        correction?.cancel()
+        if let correction { await correction.value }
+
+        try Task.checkCancellation()
+        guard active, !suspended, state.connected,
+              let sample = pauseSample(), sample.stamp == initial.stamp else {
+            throw WatchPartyPlaybackBindingError.staleOperation
+        }
+
+        let mark = revision
+        let controlsRoom = state.canControl
+        let previousBehind = isBehind
+        if !controlsRoom { isBehind = true }
+        let rate = controlsRoom ? (state.playback?.rate ?? sample.rate) : sample.rate
+        guard rate.isFinite, (0.25...4).contains(rate) else {
+            isBehind = previousBehind
+            throw WatchPartyPlaybackBindingError.notReady
+        }
+        let permit: @MainActor () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.admitted(mark, stamp: initial.stamp) && self.state.canControl == controlsRoom
+        }
+        do {
+            let receipt = try await bridge.apply(WatchPartyPlayerEffect(paused: true, rate: rate),
+                                                  origin: .localUser, isPauseOnly: true, isAdmitted: permit)
+            guard permit() else { throw WatchPartyPlaybackBindingError.staleOperation }
+            onApplied?()
+            guard permit() else { throw WatchPartyPlaybackBindingError.staleOperation }
+            if controlsRoom {
+                let position = bridge.sample?.positionMs ?? sample.positionMs
+                try await room.publish(paused: true, positionMs: position,
+                                       rate: receipt.appliedRate, waiting: false)
+                // The publish updates room playback and may advance its binding revision.
+                guard active else { throw WatchPartyPlaybackBindingError.staleOperation }
+            }
+        } catch {
+            if revision == mark { isBehind = controlsRoom ? false : previousBehind }
+            throw error
+        }
+    }
+
     private func reconcile() {
-        guard active, state.connected, !localBusy, worker == nil,
-              let sample = usableSample(), !isBehind else { return }
-        if let blocked, blocked.0 == revision, blocked.1 == sample.stamp { return }
+        guard active, state.connected, !localBusy, worker == nil, !isBehind else { return }
+        let readySample = usableSample()
         guard let playback = state.playback else {
+            guard let sample = readySample else { return }
+            if let blocked, blocked.0 == revision, blocked.1 == sample.stamp { return }
             if state.isHost, !initialPublicationAttempted {
                 guard sample.rate.isFinite, (0.25...4).contains(sample.rate) else {
                     blocked = (revision, sample.stamp)
@@ -210,6 +272,20 @@ final class WatchPartyPlaybackBinding {
             }
             return
         }
+        if playback.paused, readySample == nil, let sample = pauseSample() {
+            guard playback.mediaKey == nil || playback.mediaKey == mediaKey,
+                  playback.rate.isFinite, (0.25...4).contains(playback.rate) else {
+                blocked = (revision, sample.stamp)
+                onError?(WatchPartyPlayerBridgeError.invalidRate)
+                return
+            }
+            if let blocked, blocked.0 == revision, blocked.1 == sample.stamp { return }
+            guard lastApplied?.0 != playback || lastApplied?.1 != sample.stamp else { return }
+            startRemotePause(playback, sample: sample)
+            return
+        }
+        guard let sample = readySample else { return }
+        if let blocked, blocked.0 == revision, blocked.1 == sample.stamp { return }
         guard playback.mediaKey == nil || playback.mediaKey == mediaKey,
               playback.rate.isFinite, (0.25...4).contains(playback.rate) else {
             blocked = (revision, sample.stamp)
@@ -245,6 +321,36 @@ final class WatchPartyPlaybackBinding {
                 case .seek: break
                 }
             } catch { blocked = (revision, sample.stamp); onError?(error) }
+        }
+    }
+
+    /// Pauses are transport-only room effects, so they do not wait for seek-ready samples.
+    private func startRemotePause(_ playback: WatchPartyPlayback, sample initial: WatchPartyPlayerSample) {
+        let mark = revision
+        worker = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.worker = nil
+                if !self.stopped, self.revision != mark { self.reconcile() }
+            }
+            do {
+                let permit: @MainActor () -> Bool = { [weak self] in
+                    guard let self else { return false }
+                    return self.admitted(mark, stamp: initial.stamp)
+                        && !self.isBehind && self.state.playback == playback
+                }
+                try Task.checkCancellation()
+                guard permit() else { throw WatchPartyPlaybackBindingError.staleOperation }
+                _ = try await self.bridge.apply(WatchPartyPlayerEffect(paused: true, rate: playback.rate),
+                                                origin: .remoteRoom, isPauseOnly: true, isAdmitted: permit)
+                guard permit() else { throw WatchPartyPlaybackBindingError.staleOperation }
+                self.lastApplied = (playback, initial.stamp)
+            } catch {
+                if self.active, self.revision == mark, !(error is CancellationError) {
+                    self.blocked = (mark, initial.stamp)
+                    self.onError?(error)
+                }
+            }
         }
     }
 
@@ -315,6 +421,10 @@ final class WatchPartyPlaybackBinding {
     /// Called only for an explicit control intent. Observer-driven reconciliation never calls publish.
     func perform(_ intent: WatchPartyLocalIntent, onApplied: (@MainActor () -> Void)? = nil) async throws {
         try Task.checkCancellation()
+        if case .pause = intent {
+            try await performPause(onApplied: onApplied)
+            return
+        }
         guard active, state.connected, let sample = usableSample() else { throw WatchPartyPlaybackBindingError.notReady }
         guard !localBusy, worker == nil else { throw WatchPartyPlaybackBindingError.busy }
         if case .catchUp = intent {

@@ -50,6 +50,9 @@ struct DetailsScreen: View {
     let initiallyPresentStreamPicker: Bool
     let initialStreamPickerEpisode: NuvioVideo?
     let onInitialStreamPickerPresented: (() -> Void)?
+    var onWatchPartyMovieReady: ((NuvioMeta) -> Void)? = nil
+    var creatingWatchPartyRoom = false
+    var onWatchPartyMediaSelected: ((NuvioMeta, NuvioVideo?) -> Void)? = nil
 
     @StateObject private var viewModel: DetailsViewModel
     @State private var isStreamPickerPresented = false
@@ -123,6 +126,9 @@ struct DetailsScreen: View {
         initiallyPresentStreamPicker: Bool = false,
         initialStreamPickerEpisode: NuvioVideo? = nil,
         onInitialStreamPickerPresented: (() -> Void)? = nil,
+        onWatchPartyMovieReady: ((NuvioMeta) -> Void)? = nil,
+        creatingWatchPartyRoom: Bool = false,
+        onWatchPartyMediaSelected: ((NuvioMeta, NuvioVideo?) -> Void)? = nil,
         onPlayClick: @escaping (
             _ streamUrl: String,
             _ httpHeaders: [String: String],
@@ -158,6 +164,9 @@ struct DetailsScreen: View {
         self.initiallyPresentStreamPicker = initiallyPresentStreamPicker
         self.initialStreamPickerEpisode = initialStreamPickerEpisode
         self.onInitialStreamPickerPresented = onInitialStreamPickerPresented
+        self.onWatchPartyMovieReady = onWatchPartyMovieReady
+        self.creatingWatchPartyRoom = creatingWatchPartyRoom
+        self.onWatchPartyMediaSelected = onWatchPartyMediaSelected
         _isPreparingInitialPlayback = State(initialValue: initialPlaybackRequestID != nil)
         _viewModel = StateObject(wrappedValue: DetailsViewModel(repository: repository))
         TVHomeDebugTrace.log("details.init id=\(id) type=\(type)")
@@ -200,12 +209,20 @@ struct DetailsScreen: View {
                         // Movie (or a series with no episode list): make sure streams
                         // are loaded for the canonical title id, then either auto-select
                         // or open the picker.
+                        if creatingWatchPartyRoom, let meta = viewModel.uiState.meta, !meta.isSeries {
+                            onWatchPartyMediaSelected?(meta, nil)
+                            return
+                        }
                         pendingEpisodeSubtitle = ""
                         pendingEpisode = nil
                         startStreamFlow(streamId: viewModel.uiState.meta?.streamId ?? id, type: viewModel.uiState.meta?.type ?? type, reload: viewModel.uiState.streams.isEmpty)
                     },
                     onPlayManually: {
                         // Hold-to-play-manually: always open the picker even when Auto Select is on.
+                        if creatingWatchPartyRoom, let meta = viewModel.uiState.meta, !meta.isSeries {
+                            onWatchPartyMediaSelected?(meta, nil)
+                            return
+                        }
                         pendingEpisodeSubtitle = ""
                         pendingEpisode = nil
                         startStreamFlow(
@@ -216,6 +233,10 @@ struct DetailsScreen: View {
                         )
                     },
                     onEpisodeSelected: { video in
+                        if creatingWatchPartyRoom, let meta = viewModel.uiState.meta {
+                            onWatchPartyMediaSelected?(meta, video)
+                            return
+                        }
                         pendingEpisodeSubtitle = "S\(video.season) · E\(video.episode) · \(video.title)"
                         pendingEpisode = video
                         let streamId = canonicalEpisodeStreamId(for: video, meta: viewModel.uiState.meta)
@@ -223,6 +244,10 @@ struct DetailsScreen: View {
                         startStreamFlow(streamId: streamId, type: "series", reload: !isPreFetched)
                     },
                     onEpisodePlayManually: { video in
+                        if creatingWatchPartyRoom, let meta = viewModel.uiState.meta {
+                            onWatchPartyMediaSelected?(meta, video)
+                            return
+                        }
                         pendingEpisodeSubtitle = "S\(video.season) · E\(video.episode) · \(video.title)"
                         pendingEpisode = video
                         let streamId = canonicalEpisodeStreamId(for: video, meta: viewModel.uiState.meta)
@@ -384,8 +409,15 @@ struct DetailsScreen: View {
         }
         .onChange(of: viewModel.uiState.isLoading) { _, isLoading in
             if !isLoading {
+                if let meta = viewModel.uiState.meta, meta.id == id, !meta.isSeries {
+                    onWatchPartyMovieReady?(meta)
+                }
                 presentInitialStreamPickerIfNeeded()
             }
+        }
+        .onChange(of: viewModel.uiState.meta?.id) { _, newID in
+            guard let newID, newID == id, let meta = viewModel.uiState.meta, meta.id == newID, !meta.isSeries else { return }
+            onWatchPartyMovieReady?(meta)
         }
         .onChange(of: initialPlaybackRequestID) { oldRequestID, newRequestID in
             if let newRequestID {
@@ -413,6 +445,9 @@ struct DetailsScreen: View {
             } else if viewModel.uiState.meta == nil || viewModel.uiState.meta?.id != id {
                 viewModel.loadDetails(id: id, type: type)
             } else {
+                if let meta = viewModel.uiState.meta, !meta.isSeries {
+                    onWatchPartyMovieReady?(meta)
+                }
                 viewModel.refreshWatchlistAndWatchedStatus()
             }
             presentInitialStreamPickerIfNeeded()

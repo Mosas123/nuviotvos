@@ -2,8 +2,8 @@ import Foundation
 import Combine
 
 /// One root-owned composition, attached to ContentView's existing account/profile objects.
-/// Construction and attachment do not create/join rooms, resolve sources or construct a player.
-/// Player presentation and exact PiP lease restoration remain explicit launch transitions.
+/// Construction and attachment remain inert. Explicit room requests may adopt the current player;
+/// new playback and exact PiP lease restoration remain explicit launch transitions.
 @MainActor
 final class WatchPartyAppOwner: ObservableObject {
     struct Presentation: Identifiable {
@@ -14,6 +14,7 @@ final class WatchPartyAppOwner: ObservableObject {
     @Published private(set) var service: WatchPartyService?
     @Published private(set) var presentation: Presentation?
     @Published var message: String?
+    private var preservePlayerAfterRoomExit = false
     private var lease: WatchPartyPlayerRuntime.Lease?
     private var browsingTask: Task<Void, Never>?
     private(set) var runtime: WatchPartyPlayerRuntime?
@@ -39,7 +40,15 @@ final class WatchPartyAppOwner: ObservableObject {
             authManager: authManager, deviceID: SyncClientIdentity.current(),
             profile: { [weak profiles] in
                 guard let profile = profiles?.activeProfile else { return nil }
-                return WatchPartyProfileIdentity(id: profile.id, name: profile.name)
+                let avatarStore = AvatarCatalogStore.shared
+                let avatarURL = avatarStore.imageURL(for: profile.avatarId)?.absoluteString
+                let avatarColor = avatarStore.item(for: profile.avatarId)?.bgColor
+                return WatchPartyProfileIdentity(
+                    id: profile.id,
+                    name: profile.name,
+                    avatarURL: avatarURL,
+                    avatarColor: avatarColor
+                )
             }
         )
         configure(service: service, contextChanges: authManager.contextWillChange
@@ -72,6 +81,147 @@ final class WatchPartyAppOwner: ObservableObject {
             message = nil
             return result
         } catch { runtime.finish(lease); throw error }
+    }
+
+    /// Create and adopt the player's current media without resolving or loading another source.
+    /// An accepted room is deliberately retained if the player becomes stale during attachment.
+    func createRoomForCurrentPlayback(
+        using viewModel: PlayerViewModel,
+        isCurrentPlayerSurface: @escaping @MainActor () -> Bool
+    ) async {
+        message = nil
+        guard isCurrentPlayerSurface() else { return }
+        guard let service, let runtime else {
+            message = "Watch Party isn't available right now."
+            return
+        }
+        guard presentation == nil, lease == nil, runtime.currentContext == nil else {
+            message = "This player is already attached to a Watch Party."
+            return
+        }
+
+        let initialSnapshot: WatchPartyRoomCreationSnapshot
+        do {
+            initialSnapshot = try viewModel.watchPartyRoomCreationSnapshot()
+        } catch let error as WatchPartyRoomCreationError {
+            message = error.message
+            return
+        } catch {
+            message = "Playback isn't ready to host a Watch Party."
+            return
+        }
+
+        var roomWasAccepted = false
+        do {
+            try await service.create(media: initialSnapshot.media)
+            roomWasAccepted = true
+
+            guard self.service === service,
+                  isCurrentPlayerSurface(),
+                  viewModel.isSameWatchPartyRoomCreationPlayback(initialSnapshot),
+                  let room = service.session,
+                  let context = room.playbackContext,
+                  context.mediaKey == initialSnapshot.media.key,
+                  room.party?.media.key == initialSnapshot.media.key,
+                  service.isCurrent(context.request),
+                  self.runtime === runtime else {
+                throw WatchPartyRoomCreationError.stalePlayback
+            }
+            guard room.connection == .ready else {
+                message = "Room created, but the connection isn't ready. The room remains open; playback isn't attached."
+                return
+            }
+
+            // Use the latest transport sample after the room request, while retaining the exact
+            // load/media identity captured when the user pressed Create.
+            var snapshot = try viewModel.watchPartyRoomCreationSnapshot()
+            guard snapshot.media.key == initialSnapshot.media.key,
+                  viewModel.isSameWatchPartyRoomCreationPlayback(initialSnapshot) else {
+                throw WatchPartyRoomCreationError.stalePlayback
+            }
+
+            // Publish before binding so the first host tick cannot reconcile against empty room
+            // state. If local intent changes during a publish, refresh and publish again before
+            // binding. Clock progression alone does not invalidate this snapshot.
+            var publicationIsStable = false
+            for attempt in 0..<3 {
+                guard self.service === service, service.session === room,
+                      isCurrentPlayerSurface(),
+                      service.isCurrent(context.request), room.playbackContext == context,
+                      room.connection == .ready, room.party?.media.key == snapshot.media.key,
+                      viewModel.isSameWatchPartyRoomCreationPlayback(initialSnapshot),
+                      self.runtime === runtime else {
+                    throw WatchPartyRoomCreationError.stalePlayback
+                }
+
+                try await room.publish(
+                    paused: snapshot.paused,
+                    positionMs: snapshot.positionMs,
+                    rate: snapshot.rate,
+                    waiting: false
+                )
+
+                guard self.service === service, service.session === room,
+                      isCurrentPlayerSurface(),
+                      service.isCurrent(context.request), room.playbackContext == context,
+                      room.connection == .ready, room.party?.media.key == snapshot.media.key,
+                      viewModel.isSameWatchPartyRoomCreationPlayback(initialSnapshot),
+                      self.runtime === runtime else {
+                    throw WatchPartyRoomCreationError.stalePlayback
+                }
+                if viewModel.isCurrentWatchPartyRoomCreationSnapshot(snapshot) {
+                    publicationIsStable = true
+                    break
+                }
+                guard attempt < 2 else {
+                    message = "Room created, but playback kept changing. The room remains open; playback isn't attached."
+                    return
+                }
+
+                snapshot = try viewModel.watchPartyRoomCreationSnapshot()
+                guard snapshot.media.key == initialSnapshot.media.key,
+                      viewModel.isSameWatchPartyRoomCreationPlayback(initialSnapshot) else {
+                    throw WatchPartyRoomCreationError.stalePlayback
+                }
+            }
+
+            guard publicationIsStable else {
+                message = "Room created, but playback kept changing. The room remains open; playback isn't attached."
+                return
+            }
+
+            let lease = try runtime.begin(context: context) { viewModel }
+            do {
+                try runtime.markInitialLoadClaimed(lease)
+                _ = try runtime.bindPlayback(lease, room: room)
+                let id = UUID()
+                let mount = try WatchPartyPlayerMount(runtime: runtime, lease: lease, onDetached: { [weak self] in
+                    guard self?.presentation?.id == id else { return }
+                    self?.finishPlayback()
+                })
+                viewModel.suspendNextEpisodeStateForWatchParty()
+                self.lease = lease
+                presentation = Presentation(id: id, mount: mount, context: context)
+                message = nil
+            } catch {
+                runtime.abandon(lease)
+                throw error
+            }
+        } catch let error as WatchPartyRoomCreationError {
+            if roomWasAccepted {
+                message = "Room created, but playback changed before it could attach. The room remains open; playback isn't attached."
+            } else {
+                message = error.message
+            }
+        } catch {
+            if roomWasAccepted {
+                message = "Room created, but playback couldn't attach. The room is still open in Watch Party."
+            } else if service.membershipOutcomeUncertain {
+                message = "Room status is uncertain. Check Watch Party before trying again."
+            } else if service.failure == nil {
+                message = "Could not create the room. Check your connection and try again."
+            }
+        }
     }
 
     func owns(_ coordinator: PlaybackSessionCoordinator?) -> Bool {
@@ -112,6 +262,30 @@ final class WatchPartyAppOwner: ObservableObject {
             do { try await room.setPresence(status: .browsing, mediaKey: nil, behindMs: nil) }
             catch { if !Task.isCancelled { self?.message = "Could not update your room status." } }
         }
+    }
+
+    /// Leave or end a room without shutting down the player that is already on screen.
+    /// Abandoning the lease stops the room binding and removes Party controls, but preserves
+    /// its PlayerViewModel so video, audio, and playback position continue locally.
+    func leaveRoomPreservingPlayback(endForEveryone: Bool = false) async throws {
+        guard let service else { throw WatchPartyServiceError.requestFailed }
+        browsingTask?.cancel(); browsingTask = nil
+        if let lease, let runtime, presentation?.context == lease.context {
+            preservePlayerAfterRoomExit = true
+            self.lease = nil
+            presentation = nil
+            runtime.abandon(lease)
+            lease.resource.resumeNextEpisodeStateAfterWatchParty()
+        } else {
+            finishPlayback(reportBrowsing: false)
+        }
+        try await service.leave(endForEveryone: endForEveryone)
+    }
+
+    /// Root consumes this when the presentation disappears after an explicit leave/end.
+    func consumePreservePlayerAfterRoomExit() -> Bool {
+        defer { preservePlayerAfterRoomExit = false }
+        return preservePlayerAfterRoomExit
     }
 
     /// Explicit root teardown; never use an asynchronous deinit for resource cleanup.

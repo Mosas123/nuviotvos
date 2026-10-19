@@ -316,6 +316,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var activeScreen: TVScreen = .login
     @State private var playbackPartyID: UUID?
+    @State private var playerSurfaceID = UUID()
     @State private var creatingParty = false
     @State private var choosingPartySource = false
     @State private var partyLaunchTask: Task<Void, Never>?
@@ -575,9 +576,16 @@ struct ContentView: View {
         // so this only kicks in for the in-between frames.
         .onExitCommand(perform: isOverlayPresented ? dismissOverlay : nil)
         .onChange(of: watchPartyOwner.presentation?.id) { old, new in
+            if old == nil, let new, activeScreen.isPlayer, playbackPartyID == nil {
+                // InSight adopted the already-playing PlayerViewModel. Keep its view identity stable.
+                playbackPartyID = new
+            }
             if let old, old == playbackPartyID, new == nil {
                 playbackPartyID = nil
-                if activeScreen.isPlayer { activeScreen = .main; selectedTab = .party }
+                let keepPlayer = watchPartyOwner.consumePreservePlayerAfterRoomExit()
+                if activeScreen.isPlayer, !keepPlayer {
+                    activeScreen = .main; selectedTab = .party
+                }
             }
         }
         .onReceive(authManager.contextWillChange.merge(with: profileViewModel.contextWillChange)) { _ in
@@ -1682,13 +1690,8 @@ struct ContentView: View {
         guard let service = watchPartyOwner.service else { return }
         let createsRoom = creatingParty
         let roomMedia = service.session?.party?.media
-        let identifiers = [meta.id, meta.imdbId].compactMap { $0 }
-        let mediaID = roomMedia.flatMap { identifiers.contains($0.metaID) ? $0.metaID : nil }
-            ?? meta.imdbId ?? meta.id
         let episode = meta.isSeries ? playbackCurrentEpisode : nil
-        let media = WatchPartyMedia(type: meta.isSeries ? "series" : "movie", metaID: mediaID,
-            metaType: meta.type, videoID: episode?.id, season: episode?.season,
-            episode: episode?.episode, title: meta.name)
+        let media = watchPartyMedia(for: meta, episode: episode, matchingRoom: roomMedia)
         partyLaunchTask?.cancel()
         let mark = UUID()
         partyLaunchID = mark
@@ -1718,6 +1721,74 @@ struct ContentView: View {
                     ? "That title or episode doesn't match the room. Choose the matching entry; you can use any source."
                     : "Watch Party could not start. Check the room status and choose your source again."
                 selectedTab = .party; activeScreen = .main
+            }
+        }
+    }
+
+    private func watchPartyMedia(
+        for meta: NuvioMeta,
+        episode: NuvioVideo? = nil,
+        matchingRoom: WatchPartyMedia? = nil
+    ) -> WatchPartyMedia {
+        let identifiers = [meta.id, meta.imdbId].compactMap { $0 }
+        let metaID = matchingRoom.flatMap { identifiers.contains($0.metaID) ? $0.metaID : nil }
+            ?? meta.imdbId ?? meta.id
+        let mediaType = meta.isSeries ? "series" : "movie"
+        return WatchPartyMedia(
+            type: mediaType,
+            metaID: metaID,
+            metaType: mediaType,
+            videoID: episode?.id,
+            season: episode?.season,
+            episode: episode?.episode,
+            title: meta.name,
+            episodeTitle: episode?.title,
+            description: meta.description,
+            poster: meta.posterUrl,
+            background: meta.backgroundUrl,
+            logo: meta.logoUrl
+        )
+    }
+
+    private func createWatchPartyRoom(media: WatchPartyMedia) {
+        guard creatingParty, partyLaunchTask == nil else { return }
+        guard let service = watchPartyOwner.service else {
+            creatingParty = false
+            watchPartyOwner.message = "Watch Party is unavailable on this server."
+            selectedTab = .party; activeScreen = .main
+            return
+        }
+
+        let mark = UUID()
+        partyLaunchID = mark
+        partyLaunchTask = Task { @MainActor in
+            defer { if partyLaunchID == mark { partyLaunchTask = nil } }
+            do {
+                try WatchPartyLaunchPolicy.validate(media)
+                try await service.create(media: media)
+                try Task.checkCancellation()
+                guard partyLaunchID == mark, watchPartyOwner.service === service,
+                      let roomMedia = service.session?.party?.media else {
+                    throw WatchPartyPlaybackRuntimeError.staleContext
+                }
+                try WatchPartyLaunchPolicy.validateSelection(media, room: roomMedia)
+
+                creatingParty = false
+                choosingPartySource = false
+                watchPartyOwner.message = nil
+                partyLaunchTask = nil
+                selectedTab = .party
+                activeScreen = .main
+            } catch {
+                guard partyLaunchID == mark, !Task.isCancelled else { return }
+                creatingParty = false
+                choosingPartySource = false
+                watchPartyOwner.message = error is WatchPartyLaunchError
+                    ? "That title or episode isn't supported for a Watch Party."
+                    : "Watch Party could not be created. Check the room status and try again."
+                partyLaunchTask = nil
+                selectedTab = .party
+                activeScreen = .main
             }
         }
     }
@@ -1766,6 +1837,7 @@ struct ContentView: View {
         playbackCacheFileIdentity = cacheFileIdentity
         playbackStartupBenchmarkToken = startupBenchmarkToken
         playbackDidStart = false
+        playerSurfaceID = UUID()
         withAnimation(.easeInOut(duration: 0.28)) {
             activeScreen = .player(
                 url: url,
@@ -1801,6 +1873,7 @@ struct ContentView: View {
             }
             withAnimation(.easeInOut(duration: 0.24)) {
                 self.playbackIsActionPlaybackSession = false
+                self.playerSurfaceID = UUID()
                 self.playbackOrigin = context.playbackOrigin
                 self.playbackCollectionContext = self.collectionContext(
                     id: context.meta.id, type: context.meta.type, resuming: true
@@ -2074,6 +2147,8 @@ struct ContentView: View {
             watchPartyOwner: watchPartyOwner,
             onCreateParty: {
                 creatingParty = true; choosingPartySource = false
+                reopenStreamPickerOnDetails = false
+                reopenStreamPickerEpisode = nil
                 selectedTab = .search
             },
             onChoosePartySource: { media in
@@ -2266,6 +2341,15 @@ struct ContentView: View {
             onInitialStreamPickerPresented: {
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
+            },
+            onWatchPartyMovieReady: { meta in
+                guard creatingParty, !meta.isSeries else { return }
+                createWatchPartyRoom(media: watchPartyMedia(for: meta))
+            },
+            creatingWatchPartyRoom: creatingParty,
+            onWatchPartyMediaSelected: { meta, episode in
+                guard creatingParty else { return }
+                createWatchPartyRoom(media: watchPartyMedia(for: meta, episode: episode))
             },
             onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity, filename, videoSize, videoHash, resumeFrom, startupToken, sourceID, isActionPlaybackSession in
                 if let url = URL(string: streamUrlString) {
@@ -2806,6 +2890,7 @@ struct ContentView: View {
         let autoPlayNext = store.object(forKey: SettingsKey.autoPlayNext) as? Bool ?? true
         let autoPlayNextCountdown = store.object(forKey: SettingsKey.autoPlayNextCountdown) as? Int ?? 10
         let provenance = playbackCollectionContext
+        let surfaceIdentity = playerSurfaceID
         let party = playbackPartyID.flatMap { id in
             watchPartyOwner.presentation.flatMap { $0.id == id && $0.mount.isCurrent ? $0.mount : nil }
         }
@@ -2916,7 +3001,13 @@ struct ContentView: View {
                 }
             },
             partyPlayback: party,
+            partyPlaybackIdentity: playbackPartyID,
             watchPartyOwner: watchPartyOwner,
+            isCurrentPlayerSurface: {
+                self.activeScreen.isPlayer
+                    && self.playerSurfaceID == surfaceIdentity
+                    && UIApplication.shared.applicationState == .active
+            },
             onOpenWatchPartyLobby: {
                 guard party == nil else { return }
                 selectedTab = .party
@@ -2924,7 +3015,7 @@ struct ContentView: View {
             },
             onBack: { dismissPlayer(meta: meta, subtitle: subtitle) }
         )
-        .id(playbackPartyID?.uuidString ?? "standalone-player")
+        .id(playerSurfaceID.uuidString)
         }
     }
 

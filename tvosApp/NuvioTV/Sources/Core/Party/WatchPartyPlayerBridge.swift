@@ -114,11 +114,16 @@ final class WatchPartyPlayerBridge {
     /// Serial compound operation: pause → seek confirmation → rate and final play/pause.
     /// The origin is preserved for admission/publication by the future binding, not inferred from UI state.
     func apply(_ effect: WatchPartyPlayerEffect, origin: WatchPartyEffectOrigin,
+               isPauseOnly: Bool = false,
                isAdmitted: @escaping @MainActor () -> Bool = { true }) async throws -> WatchPartyPlayerReceipt {
         try Task.checkCancellation()
         guard effect.rate.isFinite, (0.25...4).contains(effect.rate) else { throw WatchPartyPlayerBridgeError.invalidRate }
         guard effectID == nil else { throw WatchPartyPlayerBridgeError.busy }
-        guard let initial = sample, initial.coherent, !initial.loading else { throw WatchPartyPlayerBridgeError.notReady }
+        guard let initial = sample else { throw WatchPartyPlayerBridgeError.notReady }
+        let pauseOnly = isPauseOnly && effect.paused && effect.seekToMs == nil
+        guard pauseOnly ? !initial.failed : (initial.coherent && !initial.loading) else {
+            throw WatchPartyPlayerBridgeError.notReady
+        }
         try validate(initial.stamp)
         let maximum = rateLimit()
         guard maximum.isFinite, effect.rate <= maximum + 0.001 else { throw WatchPartyPlayerBridgeError.unsupportedRate }

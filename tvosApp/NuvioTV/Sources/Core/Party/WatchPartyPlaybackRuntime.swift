@@ -127,6 +127,12 @@ final class WatchPartyPlaybackRuntime<Resource: AnyObject> {
         return true
     }
 
+    /// Adopt an already-running player without letting its first Watch Party surface call load().
+    func markInitialLoadClaimed(_ lease: Lease) throws {
+        try validate(lease)
+        initialLoadClaimed = true
+    }
+
     @discardableResult
     func detachFullscreen(_ surface: Surface, keepingPictureInPicture: Bool) -> Bool {
         guard surface.ownerID == ownerID, active?.id == surface.runtimeID,
@@ -158,9 +164,18 @@ final class WatchPartyPlaybackRuntime<Resource: AnyObject> {
         return true
     }
 
+    /// Roll back an incomplete adoption while preserving a resource that was already playing
+    /// outside the runtime. Once a presentation is published, normal invalidation owns shutdown.
+    func abandon(_ lease: Lease) {
+        guard lease.ownerID == ownerID, active?.id == lease.id else { return }
+        invalidate(stopResource: false)
+    }
+
     /// Clear identity before invoking callbacks so old completions cannot stop a successor.
     /// Explicit owner teardown is required; no asynchronous deinit cleanup.
-    func invalidate() {
+    func invalidate() { invalidate(stopResource: true) }
+
+    private func invalidate(stopResource shouldStopResource: Bool) {
         guard !invalidating else { return }
         invalidating = true
         defer { invalidating = false }
@@ -174,7 +189,7 @@ final class WatchPartyPlaybackRuntime<Resource: AnyObject> {
         initialLoadClaimed = false
         phase = .idle
         cleanup?()
-        if let resource { stopResource(resource) }
+        if shouldStopResource, let resource { stopResource(resource) }
     }
 
     private func validate(_ lease: Lease) throws {

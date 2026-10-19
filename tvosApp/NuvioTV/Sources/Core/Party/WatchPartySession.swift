@@ -7,14 +7,27 @@ protocol WatchPartySessionRemote: AnyObject {
     func clock() async throws -> Int64
     func leave(partyID: String, deviceID: String) async throws -> WatchPartySnapshot
     func end(partyID: String, deviceID: String) async throws -> WatchPartySnapshot
+    func setHostOnly(partyID: String, deviceID: String, enabled: Bool) async throws -> WatchPartySnapshot
+    func removeMember(partyID: String, deviceID: String, memberID: String) async throws -> WatchPartySnapshot
     func update(partyID: String, deviceID: String, media: WatchPartyMedia?,
                 playback: WatchPartyPlayback?) async throws -> WatchPartySnapshot
 }
 
 extension WatchPartyAPI: WatchPartySessionRemote {}
 
+extension WatchPartySessionRemote {
+    /// Keeps lightweight test remotes source-compatible; the app's WatchPartyAPI implements this RPC.
+    func setHostOnly(partyID: String, deviceID: String, enabled: Bool) async throws -> WatchPartySnapshot {
+        throw WatchPartySessionError.operationUnavailable
+    }
+
+    func removeMember(partyID: String, deviceID: String, memberID: String) async throws -> WatchPartySnapshot {
+        throw WatchPartySessionError.operationUnavailable
+    }
+}
+
 enum WatchPartyConnectionState: Equatable { case stopped, connecting, reconciling, ready, recovering }
-enum WatchPartySessionError: Error, Equatable { case invalidSnapshot, notReady, forbidden, sequenceExhausted }
+enum WatchPartySessionError: Error, Equatable { case invalidSnapshot, notReady, forbidden, operationUnavailable, sequenceExhausted }
 enum WatchPartyMembershipExit: Equatable { case membershipLost, removed, ended, notFound, unavailable }
 
 /// Minted only by the explicit host approval path; exact payload and current context are captured.
@@ -64,6 +77,7 @@ final class WatchPartySession {
     private var clock: WatchPartyClock
     private var generation = UUID()
     private var connectionID = UUID()
+    private var authoritativeSnapshotRevision = UUID()
     private var outboundSequence: Int64 = 0
     private var channel: (any WatchPartyChannel)?
     private var recoveryTask: Task<Void, Never>?
@@ -158,6 +172,76 @@ final class WatchPartySession {
     func stop() {
         clearState()
         notifyChange()
+    }
+
+    /// Applies only the server-returned room snapshot; local state never assumes the mutation succeeded.
+    func setHostOnly(_ enabled: Bool) async throws {
+        try requireReady(generation)
+        guard let party, let memberID, party.hostMemberID == memberID else {
+            throw WatchPartySessionError.forbidden
+        }
+        guard channel?.isConnected == true else { throw WatchPartySessionError.notReady }
+        let epoch = generation
+        let attempt = connectionID
+        let roomID = party.id
+        let requestingMemberID = memberID
+        let snapshotRevision = authoritativeSnapshotRevision
+        do {
+            let snapshot = try await remote.setHostOnly(partyID: party.id, deviceID: deviceID, enabled: enabled)
+            try checkContext()
+            guard generation == epoch, self.party?.id == roomID, self.memberID == requestingMemberID else {
+                throw WatchPartyAPIError.staleContext
+            }
+            // A control broadcast may invalidate this channel before the mutation RPC returns.
+            // The response is still authoritative for the same live membership, so apply it
+            // without reviving or reopening that connection. If recovery has already reconciled
+            // a newer server snapshot, preserve that newer state instead of rolling it back.
+            if authoritativeSnapshotRevision == snapshotRevision { try apply(snapshot) }
+        } catch {
+            if shouldRecover(after: error) { lost(epoch: epoch, attempt: attempt) }
+            throw error
+        }
+    }
+
+    /// Removes one other room member; only the current host may request this mutation.
+    func removeMember(_ targetMemberID: String) async throws {
+        try requireReady(generation)
+        guard let party, let memberID, party.hostMemberID == memberID,
+              targetMemberID != memberID,
+              members.contains(where: { $0.id == targetMemberID }) else {
+            throw WatchPartySessionError.forbidden
+        }
+        guard channel?.isConnected == true else { throw WatchPartySessionError.notReady }
+        let epoch = generation
+        let attempt = connectionID
+        let roomID = party.id
+        let requestingMemberID = memberID
+        let snapshotRevision = authoritativeSnapshotRevision
+        do {
+            let snapshot = try await remote.removeMember(
+                partyID: party.id, deviceID: deviceID, memberID: targetMemberID
+            )
+            try checkContext()
+            guard generation == epoch, self.party?.id == roomID, self.memberID == requestingMemberID else {
+                throw WatchPartyAPIError.staleContext
+            }
+            // The RPC broadcast can invalidate the realtime channel. Apply its snapshot only
+            // while no newer recovery snapshot has already reconciled the membership.
+            if authoritativeSnapshotRevision == snapshotRevision { try apply(snapshot) }
+        } catch {
+            if shouldRecover(after: error) { lost(epoch: epoch, attempt: attempt) }
+            throw error
+        }
+    }
+
+    private func shouldRecover(after error: Error) -> Bool {
+        if error is CancellationError { return false }
+        guard let error = error as? WatchPartyAPIError else { return true }
+        switch error {
+        case .transport, .invalidResponse: return true
+        case .httpStatus(let status): return status >= 500
+        case .invalidConfiguration, .staleContext, .signInRequired, .invalidCode: return false
+        }
     }
 
     private func clearState() {
@@ -603,6 +687,7 @@ final class WatchPartySession {
             if mediaChanged { waitingCoordinator.reset() }
             playback = validPlayback(info.playback, for: info)
         } else if let value = info.playback { accept(value) }
+        authoritativeSnapshotRevision = UUID()
         notifyChange()
     }
 

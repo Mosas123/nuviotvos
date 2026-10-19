@@ -17,7 +17,19 @@ final class WatchPartyControlRouter {
     private var stopped = false
     private var suspended = false
     private var revision = UUID()
-    private var pending: (completion: PlayerControlCompletion, stamp: WatchPartyPlayerStamp)?
+    private struct RunningControl {
+        let id: UUID
+        let stamp: WatchPartyPlayerStamp
+        let completions: [PlayerControlCompletion]
+    }
+    private struct QueuedPause {
+        let stamp: WatchPartyPlayerStamp
+        var completions: [PlayerControlCompletion]
+        var onApplied: [@MainActor () -> Void]
+        var wantsReceipt: Bool
+    }
+    private var running: RunningControl?
+    private var queuedPause: QueuedPause?
 
     init(isCurrent: @escaping @MainActor () -> Bool,
          currentStamp: @escaping @MainActor () -> WatchPartyPlayerStamp?,
@@ -36,36 +48,66 @@ final class WatchPartyControlRouter {
     func submit(_ intent: WatchPartyLocalIntent, completion: (@MainActor () -> Void)? = nil,
                 onApplied: (@MainActor () -> Void)? = nil) -> Submission {
         let finished = PlayerControlCompletion(completion)
-        guard !stopped, !suspended, isCurrent(), let stamp = currentStamp() else {
+        guard !stopped, !suspended else {
             onError(WatchPartyPlaybackBindingError.notReady)
             finished.finish()
             return .unavailable
         }
+        guard isCurrent(), let stamp = currentStamp() else {
+            validateContext()
+            onError(WatchPartyPlaybackBindingError.notReady)
+            finished.finish()
+            return .unavailable
+        }
+        validateContext()
         guard task == nil else {
+            if case .pause = intent, running?.stamp == stamp {
+                if var queued = queuedPause, queued.stamp == stamp {
+                    queued.completions.append(finished)
+                    if let onApplied { queued.onApplied.append(onApplied) }
+                    queued.wantsReceipt = queued.wantsReceipt || completion != nil || onApplied != nil
+                    queuedPause = queued
+                } else {
+                    clearQueuedPause()
+                    queuedPause = QueuedPause(stamp: stamp, completions: [finished],
+                                              onApplied: onApplied.map { [$0] } ?? [],
+                                              wantsReceipt: completion != nil || onApplied != nil)
+                }
+                return .accepted
+            }
             onError(WatchPartyPlaybackBindingError.busy)
             finished.finish()
             return .busy
         }
+        start(intent, stamp: stamp, completions: [finished],
+              onApplied: onApplied.map { [$0] } ?? [], wantsReceipt: completion != nil || onApplied != nil)
+        return .accepted // Enqueued, NOT confirmation that engine or network succeeded.
+    }
+
+    private func start(_ intent: WatchPartyLocalIntent, stamp: WatchPartyPlayerStamp,
+                       completions: [PlayerControlCompletion], onApplied: [@MainActor () -> Void],
+                       wantsReceipt: Bool) {
         let mark = revision
-        let wantsReceipt = completion != nil || onApplied != nil
-        pending = (finished, stamp)
+        let id = UUID()
+        running = RunningControl(id: id, stamp: stamp, completions: completions)
         task = Task { [weak self] in
-            guard let self else { finished.finish(); return }
+            guard let self else { completions.forEach { $0.finish() }; return }
             defer {
                 self.task = nil
-                if self.pending?.completion === finished { self.pending = nil }
-                finished.finish()
+                if self.running?.id == id { self.running = nil }
+                completions.forEach { $0.finish() }
+                self.startQueuedPauseIfPossible()
             }
             do {
                 try Task.checkCancellation()
                 guard self.permitted(mark, stamp: stamp) else { throw WatchPartyPlaybackBindingError.staleOperation }
                 let applied: (@MainActor () -> Void)?
                 if wantsReceipt {
-                    applied = { [weak self, finished] in
-                        guard let self, self.permitted(mark, stamp: stamp) else { return }
-                        if self.pending?.completion === finished { self.pending = nil }
-                        onApplied?()
-                        finished.finish() // Engine receipt, not eventual room RPC confirmation.
+                    applied = { [weak self, completions] in
+                        guard let self, self.running?.id == id, self.permitted(mark, stamp: stamp) else { return }
+                        for callback in onApplied { callback() }
+                        // Engine receipt, not eventual room RPC confirmation.
+                        completions.forEach { $0.finish() }
                     }
                 } else {
                     applied = nil
@@ -78,7 +120,6 @@ final class WatchPartyControlRouter {
                 if self.permitted(mark, stamp: stamp), !(error is CancellationError) { self.onError(error) }
             }
         }
-        return .accepted // Enqueued, NOT confirmation that engine or network succeeded.
     }
 
     private func permitted(_ mark: UUID, stamp: WatchPartyPlayerStamp) -> Bool {
@@ -87,17 +128,36 @@ final class WatchPartyControlRouter {
 
     /// Reuse the VM tick; no additional timer. Context/source loss releases native waiters.
     func validateContext() {
-        guard let pending, !isCurrent() || currentStamp() != pending.stamp else { return }
+        let runningIsStale = running.map { !isCurrent() || currentStamp() != $0.stamp } ?? false
+        let queuedIsStale = queuedPause.map { !isCurrent() || currentStamp() != $0.stamp } ?? false
+        guard runningIsStale || queuedIsStale else { return }
         revision = UUID()
         task?.cancel()
-        self.pending = nil
-        pending.completion.finish()
+        finishRunning()
+        clearQueuedPause()
     }
 
-    private func finishPending() {
-        let completion = pending?.completion
-        pending = nil
-        completion?.finish()
+    private func finishRunning() {
+        let completions = running?.completions ?? []
+        running = nil
+        completions.forEach { $0.finish() }
+    }
+
+    private func clearQueuedPause() {
+        let completions = queuedPause?.completions ?? []
+        queuedPause = nil
+        completions.forEach { $0.finish() }
+    }
+
+    private func startQueuedPauseIfPossible() {
+        guard task == nil, !stopped, !suspended, let queued = queuedPause else { return }
+        queuedPause = nil
+        guard isCurrent(), currentStamp() == queued.stamp else {
+            queued.completions.forEach { $0.finish() }
+            return
+        }
+        start(.pause, stamp: queued.stamp, completions: queued.completions,
+              onApplied: queued.onApplied, wantsReceipt: queued.wantsReceipt)
     }
 
     /// Revoke effects before the lifecycle caller parks the engine. Never publishes a user pause.
@@ -107,7 +167,8 @@ final class WatchPartyControlRouter {
         revision = UUID()
         task?.cancel() // Keep its slot until the cancelled async operation actually returns.
         suspend(value)
-        finishPending()
+        finishRunning()
+        clearQueuedPause()
     }
 
     func stop() {
@@ -115,6 +176,7 @@ final class WatchPartyControlRouter {
         stopped = true
         revision = UUID()
         task?.cancel()
-        finishPending()
+        finishRunning()
+        clearQueuedPause()
     }
 }

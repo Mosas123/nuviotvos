@@ -11,13 +11,26 @@ final class WatchPartyServiceTests: XCTestCase {
     }
 
     private func service(_ remote: Remote, channel: Channel? = nil,
+                         sleep: @escaping WatchPartySession.Sleep = { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) },
                          environment: @escaping WatchPartyService.EnvironmentProvider) -> WatchPartyService {
         let channel = channel ?? Channel()
         return WatchPartyService(environment: environment, makeRemote: { _, _, _ in remote }, makeSession: { remote, env, context, validator in
             WatchPartySession(remote: remote, context: context, deviceID: env.identity.deviceID,
                               isCurrent: validator, makeChannel: { channel },
-                              sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+                              sleep: sleep)
         })
+    }
+
+    func testAvatarCatalogChangesDoNotInvalidateRoomIdentity() {
+        let configuration = ServerConfiguration(backendURL: "https://party.example.test", publishableKey: "public",
+                                                 capabilities: ServerCapabilities(), discoveryURL: nil)
+        let left = WatchPartyEnvironment(configuration: configuration, userID: "user", profileID: "profile",
+                                         identity: WatchPartyIdentity(deviceID: "device", displayName: "Viewer"))
+        let right = WatchPartyEnvironment(configuration: configuration, userID: "user", profileID: "profile",
+                                          identity: WatchPartyIdentity(deviceID: "device", displayName: "Viewer",
+                                                                       avatarURL: "https://party.example.test/avatar.png",
+                                                                       avatarColor: "#123456"))
+        XCTAssertEqual(left, right)
     }
 
     func testCreateChecksAvailabilityAndOwnsAcceptedMembership() async throws {
@@ -119,6 +132,51 @@ final class WatchPartyServiceTests: XCTestCase {
         _ = try await service.preview(code: "ABC234")
         XCTAssertTrue(service.session === current)
         XCTAssertEqual(service.session?.connection, .ready)
+    }
+
+    func testHostOnlyMutationAppliesSnapshotAfterControlBroadcastInvalidatesChannel() async throws {
+        let env = environment(), remote = Remote(), channel = Channel()
+        let service = service(remote, channel: channel, environment: { env })
+        defer { remote.onSetHostOnly = nil; service.invalidateContext() }
+        try await service.create(media: remote.media)
+        let before = remote.snapshot
+        remote.hostOnlyResult = WatchPartySnapshot(
+            party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: "me", hostOnly: true, media: remote.media),
+            members: before.members,
+            memberID: "me"
+        )
+        remote.onSetHostOnly = {
+            channel.receive?(.message(name: "control", payload: Data()))
+        }
+
+        try await service.setHostOnly(enabled: false)
+
+        XCTAssertEqual(remote.hostOnlyEnabled, false)
+        XCTAssertTrue(service.session?.party?.hostOnly == true)
+        XCTAssertEqual(service.session?.connection, .recovering)
+        XCTAssertFalse(service.busy)
+    }
+
+    func testNewerRecoverySnapshotWinsOverLateHostOnlyResponse() async throws {
+        let env = environment(), remote = Remote(), channel = Channel()
+        let service = service(remote, channel: channel, sleep: { _ in }, environment: { env })
+        defer { remote.onSetHostOnly = nil; service.invalidateContext() }
+        try await service.create(media: remote.media)
+        remote.hostOnlyResult = WatchPartySnapshot(
+            party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: "me", hostOnly: true, media: remote.media),
+            members: remote.snapshot.members,
+            memberID: "me"
+        )
+        remote.onSetHostOnly = {
+            channel.receive?(.message(name: "control", payload: Data()))
+            for _ in 0..<100 where service.session?.connection != .ready { await Task.yield() }
+        }
+
+        try await service.setHostOnly(enabled: true)
+
+        XCTAssertEqual(service.session?.connection, .ready)
+        XCTAssertFalse(service.session?.party?.hostOnly ?? true)
+        XCTAssertFalse(service.busy)
     }
 
     func testChangedProfileStopsOldRoomBeforeStartingAnotherRequest() async throws {
@@ -243,6 +301,9 @@ final class WatchPartyServiceTests: XCTestCase {
         var isEnabled = true
         var createError: Error?
         var createResult: WatchPartySnapshot?
+        var hostOnlyEnabled: Bool?
+        var hostOnlyResult: WatchPartySnapshot?
+        var onSetHostOnly: (@MainActor () async -> Void)?
         var onCreate: (@MainActor () async -> Void)?
         var joinedCode: String?
         var snapshot: WatchPartySnapshot {
@@ -263,6 +324,12 @@ final class WatchPartyServiceTests: XCTestCase {
         func clock() async throws -> Int64 { calls.append("clock"); return 100 }
         func leave(partyID: String, deviceID: String) async throws -> WatchPartySnapshot { calls.append("leave"); return WatchPartySnapshot(ok: true) }
         func end(partyID: String, deviceID: String) async throws -> WatchPartySnapshot { calls.append("end"); return WatchPartySnapshot(ok: true) }
+        func setHostOnly(partyID: String, deviceID: String, enabled: Bool) async throws -> WatchPartySnapshot {
+            calls.append("setHostOnly")
+            hostOnlyEnabled = enabled
+            await onSetHostOnly?()
+            return hostOnlyResult ?? snapshot
+        }
         func update(partyID: String, deviceID: String, media: WatchPartyMedia?, playback: WatchPartyPlayback?) async throws -> WatchPartySnapshot { calls.append("update"); return snapshot }
     }
 

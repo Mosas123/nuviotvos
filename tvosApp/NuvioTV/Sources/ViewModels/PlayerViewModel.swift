@@ -60,6 +60,43 @@ struct PlayerErrorRecoveryProgress {
             && uptime - firstObservedUptime >= 0.45
     }
 }
+
+struct WatchPartyRoomCreationSnapshot {
+    let media: WatchPartyMedia
+    let paused: Bool
+    let positionMs: Int64
+    let rate: Float
+    fileprivate let stamp: WatchPartyPlayerStamp
+    fileprivate let sourceURL: String
+    fileprivate let sourceID: String?
+    fileprivate let episodeID: String?
+    fileprivate let season: Int?
+    fileprivate let episode: Int?
+    fileprivate let transportIntentRevision: UInt64
+}
+
+enum WatchPartyRoomCreationError: Error {
+    case unsupportedMedia
+    case invalidEpisode
+    case transitionInProgress
+    case playbackNotReady
+    case stalePlayback
+
+    var message: String {
+        switch self {
+        case .unsupportedMedia:
+            return "Live streams, trailers, and previews can't host a Watch Party."
+        case .invalidEpisode:
+            return "Watch Party couldn't identify this episode. Start a numbered episode and try again."
+        case .transitionInProgress:
+            return "Wait for the source or episode change to finish before creating a room."
+        case .playbackNotReady:
+            return "Playback needs to be ready before creating a room."
+        case .stalePlayback:
+            return "Playback changed while the room was being created."
+        }
+    }
+}
 import UIKit
 import AVFoundation
 import AVKit
@@ -272,6 +309,7 @@ class PlayerViewModel: ObservableObject {
     private var autoHiddenNextEpisodeCard = false
     private var nextEpisodeAutoHideDeadline: Date?
     private var nextEpisodeAutoPlayDeadline: Date?
+    private var watchPartySuspendedAutoPlayWasCancelled: Bool?
     /// While a next-episode resolver is outstanding, engine polls still describe
     /// the previous episode and must not mark that old frame as the new load.
     private var pendingAdvanceResolutionGeneration: UInt64?
@@ -331,6 +369,7 @@ class PlayerViewModel: ObservableObject {
     private var didShutdown = false
     private(set) var watchPartyPlayerBridge: WatchPartyPlayerBridge?
     private var watchPartyAdmittedMedia: WatchPartyMedia?
+    private var watchPartyTransportIntentRevision: UInt64 = 0
     private var watchPartyLifecycle = PlayerLifecycleAdmission()
     private var watchPartyControls: WatchPartyControlRouter?
     private let adoptsPictureInPictureSession: Bool
@@ -1644,7 +1683,8 @@ class PlayerViewModel: ObservableObject {
     /// Re-evaluated on every poll tick: shows the card with Skip Ending (when
     /// IntroDB has an outro) and auto-hides it like the Skip Intro card.
     private func updateNextEpisodeState() {
-        guard let _ = nextEpisode,
+        guard watchPartyPlayerBridge == nil,
+              let _ = nextEpisode,
               !isStandalonePlaybackSession,
               !isAdvanceInFlight,
               !isAdvancingEpisode,
@@ -1731,6 +1771,27 @@ class PlayerViewModel: ObservableObject {
         autoHiddenNextEpisodeCard = false
         nextEpisodeAutoHideDeadline = nil
         nextEpisodeAutoPlayDeadline = nil
+    }
+
+    /// Stop autoplay UI/resolution after the current player is adopted into a room.
+    /// Keep `currentEpisodeVideo` intact because it supplies the canonical room media key.
+    func suspendNextEpisodeStateForWatchParty() {
+        guard watchPartySuspendedAutoPlayWasCancelled == nil else { return }
+        watchPartySuspendedAutoPlayWasCancelled = isAutoPlayCancelled
+        cancelPendingAdvanceResolution()
+        isAdvanceInFlight = false
+        isAdvancingEpisode = false
+        isAutoPlayCancelled = true
+        clearNextEpisodeCard()
+    }
+
+    /// Restore the standalone episode presentation after leaving a room while keeping playback.
+    func resumeNextEpisodeStateAfterWatchParty() {
+        guard watchPartyPlayerBridge == nil,
+              let wasCancelled = watchPartySuspendedAutoPlayWasCancelled else { return }
+        watchPartySuspendedAutoPlayWasCancelled = nil
+        isAutoPlayCancelled = wasCancelled
+        updateNextEpisodeState()
     }
 
     // MARK: - IntroDB skip segments
@@ -3196,6 +3257,7 @@ class PlayerViewModel: ObservableObject {
             showPlayerToast("Start a new room to watch again")
             return
         }
+        recordWatchPartyTransportIntent()
         if routeWatchPartyControl(status == .ended ? .seekAndPlay(0) : .play) { return }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] play() called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         if status == .ended {
@@ -3249,6 +3311,7 @@ class PlayerViewModel: ObservableObject {
             watchPartyLifecycle.suspend(engineWillPark: false)
             watchPartyControls?.setSuspended(true)
         } else if routeWatchPartyControl(.pause) { return }
+        if !forBackground { recordWatchPartyTransportIntent() }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] pause(forBackground=\(forBackground)) called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         cancelControlsHideTimer()
         engine.pausePlayback()
@@ -3296,7 +3359,109 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func watchPartyPlayerStamp() -> WatchPartyPlayerStamp? {
-        guard !didShutdown, hasLoaded, let meta = activeMeta else { return nil }
+        guard !didShutdown, hasLoaded, let meta = activeMeta,
+              let media = watchPartyCanonicalMedia(for: meta) else { return nil }
+        return WatchPartyPlayerStamp(generation: sessionCoordinator.loadGeneration,
+                                     engineID: ObjectIdentifier(engine), mediaKey: media.key)
+    }
+
+    /// Inert snapshot for hosting the current in-player title. It never refreshes, seeks, resumes,
+    /// or resolves a source, and its stamp prevents an asynchronous create from adopting a new load.
+    func watchPartyRoomCreationSnapshot() throws -> WatchPartyRoomCreationSnapshot {
+        guard !didShutdown, hasLoaded, !isStandalonePlaybackSession, !isLiveStream,
+              let meta = activeMeta, let sourceURL = activeStreamURL else {
+            throw WatchPartyRoomCreationError.unsupportedMedia
+        }
+        guard !isSwitchingSource, !isReloadingStream, !isFailingOver, !isAwaitingStreamStart,
+              pendingAdvanceResolutionGeneration == nil, !isAdvanceInFlight, !isAdvancingEpisode,
+              !isScrubbing, !isHoldingSeek, pendingSeekDelta == 0, seekDebounceTask == nil else {
+            throw WatchPartyRoomCreationError.transitionInProgress
+        }
+
+        let numbers = meta.isSeries ? resolvedEpisodeNumbers : nil
+        if meta.isSeries, !(numbers.map { $0.season >= 0 && $0.episode > 0 } ?? false) {
+            throw WatchPartyRoomCreationError.invalidEpisode
+        }
+        guard let canonicalMedia = watchPartyCanonicalMedia(for: meta),
+              let stamp = watchPartyPlayerStamp(),
+              stamp.mediaKey == canonicalMedia.key else {
+            throw WatchPartyRoomCreationError.unsupportedMedia
+        }
+        guard (try? WatchPartyLaunchPolicy.validate(canonicalMedia)) != nil else {
+            throw meta.isSeries ? WatchPartyRoomCreationError.invalidEpisode : .unsupportedMedia
+        }
+
+        let controller = engine
+        let generation = sessionCoordinator.loadGeneration
+        guard hasRenderedFirstFrame,
+              currentLoadPresentationIsConfirmed(engineKind: activeEngineKind, generation: generation),
+              controller.hasCoherentTimeSample, !controller.isPlayerLoading,
+              controller.currentErrorMessage.isEmpty, sessionCoordinator.lastLoadError == nil,
+              status == .playing || status == .paused,
+              controller.positionMs >= 0, controller.durationMs > 0,
+              controller.currentSpeed.isFinite, (0.25...4).contains(controller.currentSpeed) else {
+            throw WatchPartyRoomCreationError.playbackNotReady
+        }
+        let positionSeconds = clock.position
+        let rate = playbackSpeed.rawValue
+        guard positionSeconds.isFinite, positionSeconds >= 0,
+              rate.isFinite, (0.25...4).contains(rate) else {
+            throw WatchPartyRoomCreationError.playbackNotReady
+        }
+        let positionMs = Int64((min(positionSeconds, Double(controller.durationMs) / 1_000) * 1_000).rounded())
+
+        var media = canonicalMedia
+        media.videoID = currentEpisodeVideo?.id
+        media.title = meta.name
+        media.episodeTitle = meta.isSeries ? currentEpisodeVideo?.title : nil
+        return WatchPartyRoomCreationSnapshot(
+            media: media,
+            paused: status == .paused,
+            positionMs: min(positionMs, controller.durationMs),
+            rate: rate,
+            stamp: stamp,
+            sourceURL: sourceURL,
+            sourceID: activeSourceID,
+            episodeID: currentEpisodeVideo?.id,
+            season: numbers?.season,
+            episode: numbers?.episode,
+            transportIntentRevision: watchPartyTransportIntentRevision
+        )
+    }
+
+    /// Compare load/media/source identity separately so a new local transport intent can refresh
+    /// the snapshot without accidentally adopting another source or episode.
+    func isSameWatchPartyRoomCreationPlayback(_ snapshot: WatchPartyRoomCreationSnapshot) -> Bool {
+        guard !didShutdown, hasLoaded, !isStandalonePlaybackSession, !isLiveStream,
+              let meta = activeMeta,
+              activeStreamURL == snapshot.sourceURL,
+              activeSourceID == snapshot.sourceID,
+              currentEpisodeVideo?.id == snapshot.episodeID,
+              sessionCoordinator.loadGeneration == snapshot.stamp.generation,
+              ObjectIdentifier(engine) == snapshot.stamp.engineID,
+              let media = watchPartyCanonicalMedia(for: meta), media.key == snapshot.media.key,
+              let stamp = watchPartyPlayerStamp(), stamp == snapshot.stamp else { return false }
+        let numbers = meta.isSeries ? resolvedEpisodeNumbers : nil
+        guard numbers?.season == snapshot.season, numbers?.episode == snapshot.episode else { return false }
+        return hasRenderedFirstFrame
+            && currentLoadPresentationIsConfirmed(engineKind: activeEngineKind, generation: snapshot.stamp.generation)
+    }
+
+    /// Recheck after publication. Clock progression is intentionally excluded; only explicit
+    /// transport commands invalidate the snapshot.
+    func isCurrentWatchPartyRoomCreationSnapshot(_ snapshot: WatchPartyRoomCreationSnapshot) -> Bool {
+        watchPartyTransportIntentRevision == snapshot.transportIntentRevision
+            && !isSwitchingSource && !isReloadingStream && !isFailingOver && !isAwaitingStreamStart
+            && pendingAdvanceResolutionGeneration == nil && !isAdvanceInFlight && !isAdvancingEpisode
+            && !isScrubbing && !isHoldingSeek && pendingSeekDelta == 0 && seekDebounceTask == nil
+            && isSameWatchPartyRoomCreationPlayback(snapshot)
+    }
+
+    private func recordWatchPartyTransportIntent() {
+        watchPartyTransportIntentRevision &+= 1
+    }
+
+    private func watchPartyCanonicalMedia(for meta: NuvioMeta) -> WatchPartyMedia? {
         let numbers = meta.isSeries ? resolvedEpisodeNumbers : nil
         let canonicalID = watchPartyAdmittedMedia.flatMap { admitted in
             [meta.id, meta.imdbId].compactMap { $0 }.contains(admitted.metaID) ? admitted.metaID : nil
@@ -3306,8 +3471,7 @@ class PlayerViewModel: ObservableObject {
                                    season: numbers?.season, episode: numbers?.episode)
         if let admitted = watchPartyAdmittedMedia,
            (try? WatchPartyLaunchPolicy.validateSelection(media, room: admitted)) == nil { return nil }
-        return WatchPartyPlayerStamp(generation: sessionCoordinator.loadGeneration,
-                                     engineID: ObjectIdentifier(engine), mediaKey: media.key)
+        return media
     }
 
     /// Explicit opt-in for the future runtime binding. UI/room admission must precede apply().
@@ -3605,6 +3769,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     func togglePlayPause() {
+        recordWatchPartyTransportIntent()
         if isScrubbing {
             commitScrub(andPlay: true)
             return
@@ -3624,6 +3789,7 @@ class PlayerViewModel: ObservableObject {
 
     func seek(to seconds: Double) {
         guard !isLiveStream, seconds.isFinite else { return }
+        recordWatchPartyTransportIntent()
         if watchPartyPlayerBridge != nil {
             guard let target = Self.watchPartySeekMilliseconds(seconds) else { return }
             _ = routeWatchPartyControl(.seek(target))
@@ -3776,6 +3942,7 @@ class PlayerViewModel: ObservableObject {
             return
         }
         guard hasStartedPlayback, !isScrubbing, !showSettingsPanel, !showScenePanel, !isSceneDetailVisible else { return }
+        recordWatchPartyTransportIntent()
         hidePeek()
 
         stopRepeatingNudge(commit: false)
@@ -4212,6 +4379,7 @@ class PlayerViewModel: ObservableObject {
         guard !isHoldingSeek, pendingSeekDelta == 0 else { return }
         guard !isLiveStream, hasStartedPlayback, !showSettingsPanel, !showScenePanel, !isSceneDetailVisible else { return }
         guard status == .paused else { return }
+        recordWatchPartyTransportIntent()
         hidePeek()
         suspendCoarseThumbnailWork()
         commitPendingSeekIfNeeded()
@@ -4642,6 +4810,7 @@ class PlayerViewModel: ObservableObject {
         guard hasStartedPlayback, !isScrubbing, !showSettingsPanel, !showScenePanel, !isSceneDetailVisible else { return }
         // Discrete tap: do not interrupt an active hold-to-seek session
         guard !isHoldingSeek else { return }
+        recordWatchPartyTransportIntent()
         hidePeek()
 
         // A zero-to-nonzero transition starts a new seek interaction.
@@ -4740,6 +4909,7 @@ class PlayerViewModel: ObservableObject {
 
     func setSpeed(_ speed: PlaybackSpeed) {
         if routeWatchPartyControl(.speed(speed.rawValue)) { return }
+        recordWatchPartyTransportIntent()
         playbackSpeed = speed
         sessionCoordinator.updatePlaybackRate(speed.rawValue)
         engine.setSpeed(speed.rawValue)

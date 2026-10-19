@@ -14,6 +14,7 @@ struct WatchPartyLobbyView: View {
     let onOpenProfile: () -> Void
 
     @State private var code = ""
+    @State private var roomCodeIsEditing = false
     @State private var operation: Task<Void, Never>?
     @State private var endingRoom = false
     @FocusState private var focusedAction: String?
@@ -24,7 +25,11 @@ struct WatchPartyLobbyView: View {
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 30) {
-                header
+                if canUseAccount, let room = service.session, let party = room.party {
+                    activeRoomHeader(room: room, party: party)
+                } else {
+                    header
+                }
 
                 if !canUseAccount {
                     accountGateCard
@@ -42,10 +47,25 @@ struct WatchPartyLobbyView: View {
             .frame(maxWidth: 1500, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
         }
-        .background(Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea())
+        .background {
+            if canUseAccount, let media = service.session?.party?.media {
+                roomBackdrop(media)
+            } else {
+                Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
+            }
+        }
+        .onAppear {
+            if service.session?.party != nil {
+                focusedAction = owner.presentation == nil ? "choose-source" : "catch-up"
+            }
+        }
         .onChange(of: code) { _, newValue in
             let normalized = String(WatchPartyCode.normalize(newValue).prefix(WatchPartyCode.length))
             if normalized != newValue { code = normalized }
+        }
+        .onChange(of: service.session?.party?.code) { oldCode, newCode in
+            guard oldCode == nil, newCode != nil else { return }
+            focusedAction = owner.presentation == nil ? "choose-source" : "catch-up"
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
@@ -79,6 +99,59 @@ struct WatchPartyLobbyView: View {
         .padding(.bottom, 4)
     }
 
+    private func activeRoomHeader(room: WatchPartySession, party: WatchPartyInfo) -> some View {
+        let hostName = room.members.first(where: { $0.id == party.hostMemberID })?.displayName ?? "your friends"
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Watch party")
+                .font(.system(size: 52, weight: .regular))
+                .foregroundStyle(.white)
+            Text("Hosted by \(hostName)")
+                .font(.system(size: 31, weight: .regular))
+                .foregroundStyle(.white.opacity(0.74))
+        }
+        .padding(.top, 8)
+    }
+
+    @ViewBuilder
+    private func roomBackdrop(_ media: WatchPartyMedia) -> some View {
+        GeometryReader { proxy in
+            ZStack {
+                Color.nuvioBackground(amoled: amoled, body: bodyColor)
+                if let image = media.background ?? media.poster,
+                   let url = URL(string: image.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    AsyncImage(url: url) { phase in
+                        if case .success(let image) = phase {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Color.nuvioBackground(amoled: amoled, body: bodyColor)
+                        }
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+                }
+
+                Color.black.opacity(0.24)
+                LinearGradient(
+                    stops: [
+                        .init(color: .black.opacity(0.80), location: 0),
+                        .init(color: .black.opacity(0.60), location: 0.38),
+                        .init(color: .black.opacity(0.28), location: 0.72),
+                        .init(color: .black.opacity(0.62), location: 1)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                LinearGradient(
+                    colors: [.black.opacity(0.24), .clear, .black.opacity(0.42)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .ignoresSafeArea()
+    }
+
     private var createAndJoinCards: some View {
         HStack(alignment: .top, spacing: 24) {
             joinRoomCard
@@ -96,6 +169,11 @@ struct WatchPartyLobbyView: View {
 
             Spacer(minLength: 30)
 
+            Text("Rooms start paused. Press Play when your source is ready.")
+                .font(.system(size: 17))
+                .foregroundStyle(.white.opacity(0.62))
+                .padding(.bottom, 18)
+
             Button {
                 owner.message = nil
                 onCreate()
@@ -104,17 +182,19 @@ struct WatchPartyLobbyView: View {
                     symbol: "plus",
                     title: "Choose a title",
                     subtitle: "Start a new private room",
-                    isFocused: focusedAction == "create"
+                    isFocused: focusedAction == "create",
+                    emphasized: true
                 )
             }
             .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
             .focused($focusedAction, equals: "create")
+            .onMoveCommand { direction in
+                if direction == .left {
+                    focusedAction = WatchPartyCode.isValid(code) ? "join" : "room-code"
+                }
+            }
             .disabled(service.busy || operation != nil || service.membershipOutcomeUncertain)
-
-            Text("Rooms start paused. Press Play when your source is ready.")
-                .font(.system(size: 17))
-                .foregroundStyle(.white.opacity(0.62))
-                .padding(.top, 18)
         }
         .padding(32)
         .frame(maxWidth: .infinity, minHeight: 400, alignment: .topLeading)
@@ -143,23 +223,27 @@ struct WatchPartyLobbyView: View {
             }
             .padding(.bottom, 10)
 
-            TextField("ABC123", text: $code)
-                .textInputAutocapitalization(.characters)
-                .autocorrectionDisabled()
-                .font(.system(size: 28, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 20)
-                .frame(maxWidth: .infinity, minHeight: 70)
-                .background(.black.opacity(0.26), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(
-                            focusedAction == "room-code" ? AppFocusOutline.color : Color.white.opacity(0.16),
-                            lineWidth: focusedAction == "room-code" ? AppFocusOutline.width : 1
-                        )
-                }
-                .accessibilityLabel("Six-character room code")
-                .focused($focusedAction, equals: "room-code")
+            Button {
+                roomCodeIsEditing = true
+            } label: {
+                SettingsGlassTextField(
+                    text: $code,
+                    placeholder: "Room Code",
+                    focused: focusedAction == "room-code",
+                    isEditing: $roomCodeIsEditing,
+                    fieldWidth: 580,
+                    centerDisplayText: true,
+                    keyboardType: .asciiCapable,
+                    onCommit: { roomCodeIsEditing = false }
+                )
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
+            .accessibilityLabel("Six-character room code")
+            .focused($focusedAction, equals: "room-code")
+            .onMoveCommand { direction in
+                if direction == .right { focusedAction = "create" }
+            }
 
             Spacer(minLength: 20)
 
@@ -175,7 +259,11 @@ struct WatchPartyLobbyView: View {
                 )
             }
             .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
             .focused($focusedAction, equals: "join")
+            .onMoveCommand { direction in
+                if direction == .right { focusedAction = "create" }
+            }
             .disabled(service.busy || operation != nil || !WatchPartyCode.isValid(code) || service.membershipOutcomeUncertain)
         }
         .padding(32)
@@ -222,56 +310,120 @@ struct WatchPartyLobbyView: View {
     }
 
     private func roomContent(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
-            HStack(alignment: .top, spacing: 24) {
-                roomSummaryCard(room, party: party)
-                membersCard(room, party: party)
-            }
+        HStack(alignment: .center, spacing: 56) {
+            roomSummaryCard(room, party: party)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            roomActions(room, party: party)
+            VStack(alignment: .leading, spacing: 22) {
+                membersCard(room, party: party)
+                roomActions(room, party: party)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.vertical, 14)
+        .frame(minHeight: 600, alignment: .center)
     }
 
     private func roomSummaryCard(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack(alignment: .top, spacing: 18) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("ROOM CODE")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .tracking(1.4)
-                        .foregroundStyle(.white.opacity(0.62))
-                    Text(WatchPartyCode.formatted(party.code))
-                        .font(.system(size: 58, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .minimumScaleFactor(0.72)
-                        .lineLimit(1)
-                }
+        VStack(alignment: .leading, spacing: 24) {
+            roomMediaLogo(party.media)
 
-                Spacer(minLength: 8)
-                connectionBadge(room.connection)
+            if let episode = episodeDescription(party.media) {
+                Text(episode)
+                    .font(.system(size: 30, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.92))
             }
 
-            Rectangle()
-                .fill(.white.opacity(0.14))
-                .frame(height: 1)
+            if let description = party.media.description, !description.isEmpty {
+                Text(description)
+                    .font(.system(size: 23, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text(party.media.title.isEmpty ? "Room title" : party.media.title)
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.78)
+            hostSeatSummary(room, party: party)
+            roomCodeDisplay(party.code)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
-                if let episode = episodeDescription(party.media) {
-                    Text(episode)
-                        .font(.system(size: 19, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
+    private func roomMediaLogo(_ media: WatchPartyMedia) -> some View {
+        Group {
+            if let rawURL = media.logo,
+               let url = URL(string: rawURL.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                AsyncImage(url: url) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().scaledToFit()
+                    } else {
+                        roomTitleFallback(media.title)
+                    }
+                }
+            } else {
+                roomTitleFallback(media.title)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 142, maxHeight: 142, alignment: .leading)
+        .accessibilityLabel(media.title)
+    }
+
+    private func roomTitleFallback(_ title: String) -> some View {
+        Text(title.isEmpty ? "Watch Party" : title)
+            .font(.system(size: 58, weight: .heavy, design: .rounded))
+            .foregroundStyle(.white)
+            .lineLimit(2)
+            .minimumScaleFactor(0.72)
+            .shadow(color: .black.opacity(0.55), radius: 12, y: 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func hostSeatSummary(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
+        let host = room.members.first(where: { $0.id == party.hostMemberID })
+            ?? room.members.first(where: { $0.id == room.memberID })
+        let hostName: String
+        if let displayName = host?.displayName.trimmingCharacters(in: .whitespacesAndNewlines), !displayName.isEmpty {
+            hostName = displayName
+        } else {
+            hostName = "Host"
+        }
+        return HStack(spacing: 18) {
+            if let host {
+                memberAvatar(host, size: 62)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Hosted by \(hostName)")
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.86))
+                Text("\(room.members.count) of \(party.maxMembers) seats")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.65))
+            }
+        }
+    }
+
+    private func roomCodeDisplay(_ code: String) -> some View {
+        let characters = Array(WatchPartyCode.normalize(code))
+        return VStack(alignment: .leading, spacing: 14) {
+            Text("Party code")
+                .font(.system(size: 25, weight: .medium))
+                .foregroundStyle(.white.opacity(0.68))
+            HStack(spacing: 14) {
+                ForEach(characters.indices, id: \.self) { index in
+                    VStack(spacing: 12) {
+                        Text(String(characters[index]))
+                            .font(.system(size: 48, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        Rectangle()
+                            .fill(.white.opacity(0.68))
+                            .frame(height: 3)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
             }
         }
-        .padding(30)
-        .frame(maxWidth: .infinity, minHeight: 270, alignment: .topLeading)
-        .modifier(LiquidGlassSurface(cornerRadius: 28, prominent: true))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Party code \(WatchPartyCode.formatted(code))")
     }
 
     private func membersCard(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
@@ -281,9 +433,7 @@ struct WatchPartyLobbyView: View {
                     .font(.system(size: 26, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
                 Spacer()
-                Text("\(room.members.count) \(room.members.count == 1 ? "member" : "members")")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.62))
+                connectionBadge(room.connection)
             }
 
             if room.members.isEmpty {
@@ -299,17 +449,43 @@ struct WatchPartyLobbyView: View {
             }
         }
         .padding(30)
-        .frame(maxWidth: .infinity, minHeight: 270, alignment: .topLeading)
-        .modifier(LiquidGlassSurface(cornerRadius: 28, prominent: true))
+        .frame(maxWidth: .infinity, minHeight: 200, alignment: .topLeading)
+        .background(.black.opacity(0.32), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(.white.opacity(0.14), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func memberAvatar(_ member: WatchPartyMember, size: CGFloat) -> some View {
+        if let rawURL = member.avatarURL,
+           let url = URL(string: rawURL.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            AsyncImage(url: url) { phase in
+                if case .success(let image) = phase {
+                    image.resizable().scaledToFill()
+                } else {
+                    memberInitial(member, size: size)
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(Circle())
+        } else {
+            memberInitial(member, size: size)
+        }
+    }
+
+    private func memberInitial(_ member: WatchPartyMember, size: CGFloat) -> some View {
+        Text(member.displayName.trimmingCharacters(in: .whitespacesAndNewlines).first.map { String($0).uppercased() } ?? "?")
+            .font(.system(size: size * 0.4, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(.white.opacity(0.14), in: Circle())
     }
 
     private func memberRow(_ member: WatchPartyMember, room: WatchPartySession, party: WatchPartyInfo) -> some View {
         HStack(spacing: 14) {
-            Text(member.displayName.trimmingCharacters(in: .whitespacesAndNewlines).first.map { String($0).uppercased() } ?? "?")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(width: 48, height: 48)
-                .background(.white.opacity(0.12), in: Circle())
+            memberAvatar(member, size: 56)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(member.displayName.isEmpty ? "Viewer" : member.displayName)
@@ -345,6 +521,7 @@ struct WatchPartyLobbyView: View {
                         secondaryActionLabel(symbol: "arrow.clockwise", title: "Reconnect", isFocused: focusedAction == "reconnect")
                     }
                     .buttonStyle(PosterCardButtonStyle())
+                    .focusEffectDisabledIfAvailable()
                     .focused($focusedAction, equals: "reconnect")
                     .disabled(service.busy || operation != nil)
                 }
@@ -361,6 +538,7 @@ struct WatchPartyLobbyView: View {
                     )
                 }
                 .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
                 .focused($focusedAction, equals: "leave")
                 .disabled(service.busy || operation != nil)
 
@@ -375,10 +553,17 @@ struct WatchPartyLobbyView: View {
                         )
                     }
                     .buttonStyle(PosterCardButtonStyle())
+                    .focusEffectDisabledIfAvailable()
                     .focused($focusedAction, equals: "end")
                     .disabled(service.busy || operation != nil)
                 }
             }
+        }
+        .padding(20)
+        .background(.black.opacity(0.32), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(.white.opacity(0.14), lineWidth: 1)
         }
     }
 
@@ -397,6 +582,7 @@ struct WatchPartyLobbyView: View {
                 )
             }
             .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
             .focused($focusedAction, equals: "catch-up")
             .disabled(service.busy || operation != nil || room.connection != .ready)
         } else {
@@ -411,6 +597,7 @@ struct WatchPartyLobbyView: View {
                 )
             }
             .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
             .focused($focusedAction, equals: "choose-source")
             .disabled(service.busy || operation != nil || room.connection != .ready || room.membershipExit != nil)
         }
@@ -448,10 +635,17 @@ struct WatchPartyLobbyView: View {
                         title: "The server may have accepted the last request. Check the room with its host before trying again.",
                         tint: .yellow
                     )
-                    Button("I checked — allow a new attempt") {
+                    Button {
                         service.acknowledgeUncertainMembershipOutcome()
+                    } label: {
+                        secondaryActionLabel(
+                            symbol: "checkmark.circle",
+                            title: "I checked — allow a new attempt",
+                            isFocused: focusedAction == "allow-retry"
+                        )
                     }
                     .buttonStyle(PosterCardButtonStyle())
+                    .focusEffectDisabledIfAvailable()
                     .focused($focusedAction, equals: "allow-retry")
                 }
                 if isChoosing {
@@ -460,9 +654,16 @@ struct WatchPartyLobbyView: View {
                         title: "Choose the matching title and episode from your catalog. You can use any source available to you.",
                         tint: .white
                     )
-                    Button("Cancel title/source selection", action: onCancelSelection)
-                        .buttonStyle(PosterCardButtonStyle())
-                        .focused($focusedAction, equals: "cancel-selection")
+                    Button(action: onCancelSelection) {
+                        secondaryActionLabel(
+                            symbol: "xmark",
+                            title: "Cancel title/source selection",
+                            isFocused: focusedAction == "cancel-selection"
+                        )
+                    }
+                    .buttonStyle(PosterCardButtonStyle())
+                    .focusEffectDisabledIfAvailable()
+                    .focused($focusedAction, equals: "cancel-selection")
                 }
             }
             .padding(.horizontal, 24)
@@ -506,7 +707,13 @@ struct WatchPartyLobbyView: View {
         }
     }
 
-    private func primaryActionLabel(symbol: String, title: String, subtitle: String, isFocused: Bool = false) -> some View {
+    private func primaryActionLabel(
+        symbol: String,
+        title: String,
+        subtitle: String,
+        isFocused: Bool = false,
+        emphasized: Bool = false
+    ) -> some View {
         HStack(spacing: 16) {
             Image(systemName: symbol)
                 .font(.system(size: 25, weight: .bold))
@@ -525,21 +732,24 @@ struct WatchPartyLobbyView: View {
             Image(systemName: "chevron.right")
                 .font(.system(size: 17, weight: .bold))
         }
-        .foregroundStyle(Color.black.opacity(0.92))
+        .foregroundStyle(isFocused ? Color.black.opacity(0.92) : Color.white)
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [Color(red: 0.72, green: 0.88, blue: 1), Color(red: 0.48, green: 0.72, blue: 1)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(isFocused ? Color.white.opacity(0.98) : Color.white.opacity(emphasized ? 0.22 : 0.08))
+            }
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(isFocused ? AppFocusOutline.color : Color.clear, lineWidth: AppFocusOutline.width)
+                .strokeBorder(
+                    isFocused ? AppFocusOutline.color : Color.white.opacity(emphasized ? 0.34 : 0.18),
+                    lineWidth: isFocused ? AppFocusOutline.width : 1
+                )
         }
         .scaleEffect(isFocused ? 1.035 : 1)
         .animation(.easeOut(duration: 0.14), value: isFocused)
@@ -554,13 +764,20 @@ struct WatchPartyLobbyView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
-        .foregroundStyle(.white.opacity(0.9))
+        .foregroundStyle(isFocused ? Color.black.opacity(0.92) : Color.white.opacity(0.9))
         .padding(.horizontal, 20)
         .frame(maxWidth: .infinity, minHeight: 66)
-        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isFocused ? Color.white.opacity(0.98) : Color.white.opacity(0.08))
+            }
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(isFocused ? AppFocusOutline.color : Color.clear, lineWidth: AppFocusOutline.width)
+                .strokeBorder(isFocused ? AppFocusOutline.color : Color.white.opacity(0.15), lineWidth: AppFocusOutline.width)
         }
         .scaleEffect(isFocused ? 1.035 : 1)
         .animation(.easeOut(duration: 0.14), value: isFocused)

@@ -17,6 +17,14 @@ struct WatchPartyEnvironment: Equatable {
     let userID: String
     let profileID: String
     let identity: WatchPartyIdentity
+
+    /// Avatar metadata is cosmetic and can arrive after the profile catalog loads. It must not
+    /// invalidate a live room's authenticated membership context.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.configuration == rhs.configuration && lhs.userID == rhs.userID && lhs.profileID == rhs.profileID
+            && lhs.identity.deviceID == rhs.identity.deviceID
+            && lhs.identity.displayName == rhs.identity.displayName
+    }
 }
 
 enum WatchPartyServiceError: Error, Equatable {
@@ -134,6 +142,34 @@ final class WatchPartyService: ObservableObject {
         }
     }
 
+    /// Serializes the host-only change with other room mutations and lets the session apply
+    /// the authoritative snapshot returned by the RPC.
+    func setHostOnly(enabled: Bool) async throws {
+        let setup = try begin()
+        defer { finish(setup.operation) }
+        guard let current = session, current.party != nil else { throw WatchPartySessionError.notReady }
+        do {
+            try await current.setHostOnly(enabled)
+            try check(setup.context, operation: setup.operation)
+            if let reason = current.failure { throw WatchPartyServiceError.rejected(reason) }
+        } catch {
+            throw report(error, context: setup.context, operation: setup.operation)
+        }
+    }
+
+    func removeMember(memberID: String) async throws {
+        let setup = try begin()
+        defer { finish(setup.operation) }
+        guard let current = session, current.party != nil else { throw WatchPartySessionError.notReady }
+        do {
+            try await current.removeMember(memberID)
+            try check(setup.context, operation: setup.operation)
+            if let reason = current.failure { throw WatchPartyServiceError.rejected(reason) }
+        } catch {
+            throw report(error, context: setup.context, operation: setup.operation)
+        }
+    }
+
     func resume() async throws {
         let setup = try begin()
         defer { finish(setup.operation) }
@@ -217,6 +253,16 @@ final class WatchPartyService: ObservableObject {
             captured = current; context = value
             let validator: WatchPartyAPI.ContextValidator = { [weak self] in self?.isCurrent($0) == true }
             remote = makeRemote(current, value, validator)
+        } else if session?.party == nil,
+                  let context,
+                  let captured,
+                  (captured.identity.avatarURL != current.identity.avatarURL
+                    || captured.identity.avatarColor != current.identity.avatarColor) {
+            // Refresh the cosmetic identity before the next room entry, without changing the
+            // authenticated context or replacing a remote used by an active membership.
+            self.captured = current
+            let validator: WatchPartyAPI.ContextValidator = { [weak self] in self?.isCurrent($0) == true }
+            remote = makeRemote(current, context, validator)
         }
         guard let context, let remote else { throw WatchPartyAPIError.staleContext }
         let token = UUID()

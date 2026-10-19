@@ -67,7 +67,9 @@ struct PlayerView: View {
     var onOpenRecommendationDetails: ((_ meta: NuvioMeta) -> Void)? = nil
     var onBack: () -> Void
     let partyPlayback: WatchPartyPlayerMount?
+    let partyPlaybackIdentity: UUID?
     let watchPartyOwner: WatchPartyAppOwner?
+    let isCurrentPlayerSurface: @MainActor () -> Bool
     let onOpenWatchPartyLobby: () -> Void
 
     /// An explicit runtime can retain the same model across fullscreen / PiP surfaces.
@@ -108,13 +110,17 @@ struct PlayerView: View {
         onOpenRecommendationDetails: ((NuvioMeta) -> Void)? = nil,
         viewModel: PlayerViewModel? = nil,
         partyPlayback: WatchPartyPlayerMount? = nil,
+        partyPlaybackIdentity: UUID? = nil,
         watchPartyOwner: WatchPartyAppOwner? = nil,
+        isCurrentPlayerSurface: @escaping @MainActor () -> Bool = { true },
         onOpenWatchPartyLobby: @escaping () -> Void = {},
         onBack: @escaping () -> Void
     ) {
         _viewModel = StateObject(wrappedValue: partyPlayback?.viewModel ?? viewModel ?? PlayerViewModel())
         self.partyPlayback = partyPlayback
+        self.partyPlaybackIdentity = partyPlaybackIdentity
         self.watchPartyOwner = watchPartyOwner
+        self.isCurrentPlayerSurface = isCurrentPlayerSurface
         self.onOpenWatchPartyLobby = onOpenWatchPartyLobby
         self.url = url
         self.meta = meta
