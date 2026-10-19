@@ -65,14 +65,14 @@ struct WatchPartyLobbyView: View {
         .onChange(of: service.session?.party?.id) { _, _ in
             // Never keep an invitation visible after leaving or replacing a room.
             showingInvitation = false
-            focusedAction = preferredRoomFocus
+            focusedAction = canUseAccount ? preferredRoomFocus : nil
         }
         .onChange(of: service.session?.connection) { _, _ in
             // The source action is disabled during recovery. Focus Reconnect instead.
-            focusedAction = preferredRoomFocus
+            focusedAction = canUseAccount ? preferredRoomFocus : nil
         }
         .onChange(of: service.session?.membershipExit) { _, _ in
-            focusedAction = preferredRoomFocus
+            focusedAction = canUseAccount ? preferredRoomFocus : nil
         }
         .onChange(of: owner.presentation?.id) { _, _ in
             if canUseAccount { focusedAction = preferredRoomFocus }
@@ -639,7 +639,7 @@ struct WatchPartyLobbyView: View {
     private var footerNote: some View {
         HStack(spacing: 10) {
             Image(systemName: "info.circle")
-            Text("This first version doesn't include episode changes, autoplay, or shared links.")
+            Text("Episode changes and autoplay are not supported. Shared-source playback is not yet available on Apple TV.")
         }
         .font(.system(size: 16, weight: .medium))
         .foregroundStyle(.white.opacity(0.5))
