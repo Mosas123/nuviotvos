@@ -29,3 +29,18 @@ enum WatchPartyLaunchPolicy {
         guard selection.key == room.key else { throw WatchPartyLaunchError.differentMedia }
     }
 }
+
+    
+/// Picks an actually available tvOS focus destination when returning to the room.
+/// The room code field must not receive focus while a membership still exists.
+enum WatchPartyRoomFocusPolicy {
+    static func initialAction(hasRoom: Bool, membershipEnded: Bool,
+                              connectionReady: Bool, playerAttached: Bool,
+                              busy: Bool) -> String? {
+        guard !busy else { return nil }
+        guard hasRoom else { return "room-code" }
+        if membershipEnded { return "leave" }
+        if !connectionReady { return "reconnect" }
+        return playerAttached ? "catch-up" : "choose-source"
+    }
+}
