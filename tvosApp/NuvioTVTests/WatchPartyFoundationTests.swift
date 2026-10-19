@@ -9,6 +9,36 @@ final class WatchPartyFoundationTests: XCTestCase {
                            rate: rate, at: at, mediaKey: mediaKey, waiting: waiting)
     }
 
+    func testGuestSharedSourceNoticeNeverExposesURLOrHeaders() {
+        let stream = WatchPartyStream(
+            mediaKey: "movie|tt1||",
+            url: "https://stream.example.test/play?token=PRIVATE_LINK_TOKEN",
+            headers: ["Authorization": "Bearer PRIVATE_HEADER_TOKEN"],
+            name: "PRIVATE_SOURCE_NAME"
+        )
+        let notice = WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: stream, mediaKey: "movie|tt1||",
+            isGuest: true, connected: true
+        )
+        XCTAssertNotNil(notice)
+        XCTAssertTrue(notice?.contains("Alex") == true)
+        XCTAssertFalse(notice?.contains("PRIVATE_LINK_TOKEN") == true)
+        XCTAssertFalse(notice?.contains("PRIVATE_HEADER_TOKEN") == true)
+        XCTAssertFalse(notice?.contains("PRIVATE_SOURCE_NAME") == true)
+        XCTAssertNil(WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: stream, mediaKey: "movie|different||",
+            isGuest: true, connected: true
+        ))
+        XCTAssertNil(WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: stream, mediaKey: "movie|tt1||",
+            isGuest: false, connected: true
+        ))
+        XCTAssertNil(WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: stream, mediaKey: "movie|tt1||",
+            isGuest: true, connected: false
+        ))
+    }
+
     func testRoomSelectionRejectsWrongMovieAndWrongEpisode() throws {
         let roomMovie = WatchPartyMedia(type: "movie", metaID: "tt001", metaType: "movie", title: "A")
         let sameMovie = WatchPartyMedia(type: "movie", metaID: "tt001", metaType: "movie", title: "Different display title")
