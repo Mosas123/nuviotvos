@@ -6,14 +6,17 @@ import Foundation
 struct WatchPartyPlayerMount {
     private let runtime: WatchPartyPlayerRuntime
     private let lease: WatchPartyPlayerRuntime.Lease
+    private let onDetached: (@MainActor () -> Void)?
 
     var viewModel: PlayerViewModel { lease.resource }
     var isCurrent: Bool { runtime.isCurrent(lease) }
 
-    init(runtime: WatchPartyPlayerRuntime, lease: WatchPartyPlayerRuntime.Lease) throws {
+    init(runtime: WatchPartyPlayerRuntime, lease: WatchPartyPlayerRuntime.Lease,
+         onDetached: (@MainActor () -> Void)? = nil) throws {
         guard runtime.isCurrent(lease) else { throw WatchPartyPlaybackRuntimeError.staleLease }
         self.runtime = runtime
         self.lease = lease
+        self.onDetached = onDetached
     }
 
     func attach() throws -> (surface: WatchPartyPlayerRuntime.Surface, startsLoad: Bool) {
@@ -26,10 +29,14 @@ struct WatchPartyPlayerMount {
         let pip = PictureInPictureManager.shared
         let keepsPlayback = pip.activeCoordinator === viewModel.sessionCoordinator
             && (pip.isPictureInPictureActive || pip.isRestoringUIInProgress)
-        return runtime.detachFullscreen(surface, keepingPictureInPicture: keepsPlayback)
+        let detached = runtime.detachFullscreen(surface, keepingPictureInPicture: keepsPlayback)
+        if detached && !runtime.isCurrent(lease) { onDetached?() }
+        return detached
     }
 
-    func finish() { runtime.finish(lease) }
+    func finish() {
+        if runtime.finish(lease) { onDetached?() }
+    }
 }
 
 extension WatchPartyPlaybackRuntime where Resource == PlayerViewModel {
@@ -59,7 +66,7 @@ extension WatchPartyPlaybackRuntime where Resource == PlayerViewModel {
                 && current.roomID == context.roomID && current.memberID == context.memberID
         }
         let model = lease.resource
-        let bridge = try model.attachWatchPartyPlayerBridge(isCurrent: valid)
+        let bridge = try model.attachWatchPartyPlayerBridge(media: room.party?.media, isCurrent: valid)
         do {
             let binding = try WatchPartyPlaybackBinding(room: room, bridge: bridge, isCurrent: valid)
             do {

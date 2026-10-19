@@ -98,6 +98,9 @@ final class PictureInPictureManager: NSObject, ObservableObject {
 
     /// Invoked when PiP is closed by the user (via X button) without restoring full-screen UI.
     var onDidStopPiPWithoutRestoring: (() -> Void)?
+    /// Eligibility/layer loss can discard AVKit with its delegate already detached.
+    /// Root must close a retained Party model when no fullscreen surface remains.
+    var onDidLoseWatchPartyPiP: ((PlaybackSessionCoordinator) -> Void)?
 
     /// Invoked when the user clicks the expand / restore button on the system PiP window.
     var onRestoreUI: ((ActivePlaybackContext, @escaping (Bool) -> Void) -> Void)?
@@ -216,12 +219,16 @@ final class PictureInPictureManager: NSObject, ObservableObject {
         guard isPictureInPictureSupported, let controller = activeAetherController else { return }
         let mark = sessionGeneration
         if controller.isWatchPartyControlled, !controller.canUseWatchPartySoftwarePiP {
+            let lost = (isPictureInPictureActive || isRestoringUI) ? activeCoordinator : nil
             discardPipController()
+            if let lost { onDidLoseWatchPartyPiP?(lost) }
             return // Native Party PiP stays blocked; observe until an eligible software path exists.
         }
         if controller.isWatchPartyControlled, let layer = configuredSoftwareDisplayLayer,
            controller.engine.softwarePiPSource?.layer !== layer {
+            let lost = (isPictureInPictureActive || isRestoringUI) ? activeCoordinator : nil
             discardPipController()
+            if let lost { onDidLoseWatchPartyPiP?(lost) }
             guard sessionGeneration == mark, activeAetherController === controller else { return }
         }
         guard !isPictureInPictureActive else { return } // Don't disrupt active PiP window
@@ -356,6 +363,7 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         guard pipController === pictureInPictureController else { return }
+        let stoppedGeneration = sessionGeneration
         print("[PictureInPicture] didStopPictureInPicture (isRestoringUI=\(isRestoringUI))")
         isPictureInPictureActive = false
         activeAetherController?.engine.pictureInPictureActive = false
@@ -363,9 +371,11 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
 
         if !isRestoringUI {
             onDidStopPiPWithoutRestoring?()
+            guard sessionGeneration == stoppedGeneration else { return }
             invalidateSession()
+            return
         }
-        isRestoringUI = false
+        if sessionGeneration == stoppedGeneration { isRestoringUI = false }
     }
 
     /// Called by the mounted full-screen Aether surface. AVKit's restore

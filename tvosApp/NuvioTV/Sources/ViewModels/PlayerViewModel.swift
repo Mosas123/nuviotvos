@@ -328,6 +328,7 @@ class PlayerViewModel: ObservableObject {
     private var hasLoaded = false
     private var didShutdown = false
     private(set) var watchPartyPlayerBridge: WatchPartyPlayerBridge?
+    private var watchPartyAdmittedMedia: WatchPartyMedia?
     private var watchPartyControls: WatchPartyControlRouter?
     private let adoptsPictureInPictureSession: Bool
     private var isTrailerPlaybackSession = false
@@ -1056,7 +1057,7 @@ class PlayerViewModel: ObservableObject {
             isAnime: isAnime,
             isLiveStream: isLiveStream,
             isSports: activeMeta?.isSports ?? false,
-            autoplay: true,
+            autoplay: watchPartyPlayerBridge == nil,
             playbackRate: playbackSpeed.rawValue,
             aspectMode: aspectMode,
             subtitleDelaySeconds: Double(subtitleDelayMs) / 1_000,
@@ -1254,7 +1255,7 @@ class PlayerViewModel: ObservableObject {
         }
         self.activeStreamURL = url.absoluteString
         self.activeHTTPHeaders = httpHeaders
-        if !isTrailerPlayback {
+        if !isTrailerPlayback && watchPartyPlayerBridge == nil {
             postPlayController.start(
                 contentId: meta.id,
                 contentType: meta.isSeries ? "series" : meta.type,
@@ -1527,6 +1528,7 @@ class PlayerViewModel: ObservableObject {
         autoPlayCountdownSeconds: Int,
         resolver: @escaping (NuvioVideo, UUID?) async -> PreparedNextStream?
     ) {
+        guard watchPartyPlayerBridge == nil else { return }
         seriesEpisodes = episodes
         if currentEpisodeVideo?.id != current?.id {
             lastAdvancedEpisodeId = nil
@@ -1901,6 +1903,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     func advance() {
+        guard watchPartyPlayerBridge == nil else { return }
         guard !isAdvanceInFlight,
               let next = nextEpisode,
               currentEpisodeVideo?.id != next.id,
@@ -3041,7 +3044,7 @@ class PlayerViewModel: ObservableObject {
             updateNextEpisodeState()
         }
 
-        if !isLiveStream {
+        if !isLiveStream && watchPartyPlayerBridge == nil {
             let postPlayEnabled = ProfileSettings.current.object(forKey: SettingsKey.postPlayRecommendationsEnabled) as? Bool ?? true
             let hasBlockingOverlay = showSettingsPanel || showScenePanel || isSceneDetailVisible || sidePanel != nil || isScrubbing || showPauseOverlay
             let endingStartTime = skipIntervals.first(where: \.isEnding)?.startTime
@@ -3112,6 +3115,10 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Transport
 
     func play() {
+        if watchPartyPlayerBridge != nil && status == .ended {
+            showPlayerToast("Start a new room to watch again")
+            return
+        }
         if routeWatchPartyControl(status == .ended ? .seekAndPlay(0) : .play) { return }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] play() called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         if status == .ended {
@@ -3213,17 +3220,23 @@ class PlayerViewModel: ObservableObject {
     private func watchPartyPlayerStamp() -> WatchPartyPlayerStamp? {
         guard !didShutdown, hasLoaded, let meta = activeMeta else { return nil }
         let numbers = meta.isSeries ? resolvedEpisodeNumbers : nil
-        let media = WatchPartyMedia(type: meta.isSeries ? "episode" : "movie", metaID: meta.id,
+        let canonicalID = watchPartyAdmittedMedia.flatMap { admitted in
+            [meta.id, meta.imdbId].compactMap { $0 }.contains(admitted.metaID) ? admitted.metaID : nil
+        } ?? meta.id
+        let media = WatchPartyMedia(type: meta.isSeries ? "episode" : "movie", metaID: canonicalID,
                                    metaType: meta.isSeries ? "series" : meta.type,
                                    season: numbers?.season, episode: numbers?.episode)
+        if let admitted = watchPartyAdmittedMedia,
+           (try? WatchPartyLaunchPolicy.validateSelection(media, room: admitted)) == nil { return nil }
         return WatchPartyPlayerStamp(generation: sessionCoordinator.loadGeneration,
                                      engineID: ObjectIdentifier(engine), mediaKey: media.key)
     }
 
     /// Explicit opt-in for the future runtime binding. UI/room admission must precede apply().
     @discardableResult
-    func attachWatchPartyPlayerBridge(isCurrent: @escaping @MainActor () -> Bool) throws -> WatchPartyPlayerBridge {
+    func attachWatchPartyPlayerBridge(media: WatchPartyMedia? = nil, isCurrent: @escaping @MainActor () -> Bool) throws -> WatchPartyPlayerBridge {
         guard watchPartyPlayerBridge == nil else { throw WatchPartyPlayerBridgeError.alreadyAttached }
+        watchPartyAdmittedMedia = media
         let bridge = WatchPartyPlayerBridge(isCurrent: isCurrent, currentStamp: { [weak self] in
             self?.watchPartyPlayerStamp()
         }, issueSeek: { [weak self] target, stamp in
@@ -3283,6 +3296,7 @@ class PlayerViewModel: ObservableObject {
         watchPartyControls = nil
         watchPartyPlayerBridge?.stop()
         watchPartyPlayerBridge = nil
+        watchPartyAdmittedMedia = nil
         PictureInPictureManager.shared.refreshController(for: sessionCoordinator)
     }
 
@@ -3330,14 +3344,15 @@ class PlayerViewModel: ObservableObject {
 
     private func admitWatchPartyRemoteControl(_ intent: PlayerRemoteIntent, completion: (@MainActor () -> Void)? = nil,
                                              onApplied: (@MainActor () -> Void)? = nil) -> Bool {
+        guard status != .ended else { completion?(); return false }
         guard watchPartyPlayerBridge != nil, let watchPartyControls,
-              var local = intent.localIntent(positionMs: engine.positionMs, isPlaying: engine.isTransportPlaying) else { completion?(); return false }
-        if case .play = local, status == .ended { local = .seekAndPlay(0) }
+              let local = intent.localIntent(positionMs: engine.positionMs, isPlaying: engine.isTransportPlaying) else { completion?(); return false }
         return watchPartyControls.submit(local, completion: completion, onApplied: onApplied) == .accepted
     }
 
     /// Explicit root foreground hook; never called merely because a user presses Play.
     func resumeWatchPartyAfterForeground() { watchPartyControls?.setSuspended(false) }
+    func catchUpWithWatchParty() { _ = routeWatchPartyControl(.catchUp) }
 
     /// A mounted bridge without controls must fail closed rather than bypass room permissions.
     private func routeWatchPartyControl(_ intent: WatchPartyLocalIntent) -> Bool {
@@ -5440,6 +5455,10 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectSource(_ stream: NuvioStream) {
+        guard watchPartyPlayerBridge == nil else {
+            showPlayerToast("Choose a new source from the Watch Party room")
+            return
+        }
         PlaybackTimelineRecorder.record(.sourceSelectionRequested, engine: activeEngineKind)
         if let unavailableReason = stream.unavailabilityReason {
             showPlayerToast(unavailableReason)
@@ -5529,6 +5548,10 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectEpisode(_ episode: NuvioVideo) {
+        guard watchPartyPlayerBridge == nil else {
+            showPlayerToast("Episode switching is unavailable in Watch Party")
+            return
+        }
         guard let resolveNextStream else {
             showPlayerToast("Episode switching unavailable")
             return

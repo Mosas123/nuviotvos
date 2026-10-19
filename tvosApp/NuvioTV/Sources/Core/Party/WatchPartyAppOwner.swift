@@ -6,7 +6,16 @@ import Combine
 /// Player presentation and exact PiP lease restoration remain explicit launch transitions.
 @MainActor
 final class WatchPartyAppOwner: ObservableObject {
+    struct Presentation: Identifiable {
+        let id: UUID
+        let mount: WatchPartyPlayerMount
+        let context: WatchPartyPlaybackContext
+    }
     @Published private(set) var service: WatchPartyService?
+    @Published private(set) var presentation: Presentation?
+    @Published var message: String?
+    private var lease: WatchPartyPlayerRuntime.Lease?
+    private var browsingTask: Task<Void, Never>?
     private(set) var runtime: WatchPartyPlayerRuntime?
     private weak var authManager: AuthManager?
     private weak var profiles: ProfileViewModel?
@@ -40,10 +49,71 @@ final class WatchPartyAppOwner: ObservableObject {
     /// Explicit privacy gate (e.g. who's-watching on return) may revoke the same profile, too.
     func invalidateContext() { service?.invalidateContext() }
 
+    /// Only after an explicit, own-source choice for this exact accepted room/media.
+    func preparePlayback(media: WatchPartyMedia) throws -> Presentation {
+        guard let service, let room = service.session, room.connection == .ready,
+              let context = room.playbackContext, context.mediaKey == media.key,
+              service.isCurrent(context.request), let runtime else {
+            throw WatchPartyPlaybackRuntimeError.staleContext
+        }
+        finishPlayback(reportBrowsing: false)
+        browsingTask?.cancel(); browsingTask = nil
+        let lease = try runtime.beginPlayer(context: context)
+        do {
+            _ = try runtime.bindPlayback(lease, room: room)
+            let id = UUID()
+            let mount = try WatchPartyPlayerMount(runtime: runtime, lease: lease, onDetached: { [weak self] in
+                guard self?.presentation?.id == id else { return }
+                self?.finishPlayback()
+            })
+            let result = Presentation(id: id, mount: mount, context: context)
+            self.lease = lease
+            presentation = result
+            message = nil
+            return result
+        } catch { runtime.finish(lease); throw error }
+    }
+
+    func owns(_ coordinator: PlaybackSessionCoordinator?) -> Bool {
+        guard let coordinator, let lease else { return false }
+        return lease.resource.sessionCoordinator === coordinator
+    }
+
+    func restorePlayback(for coordinator: PlaybackSessionCoordinator?) -> Presentation? {
+        guard owns(coordinator), let presentation, let runtime,
+              (try? runtime.restore(context: presentation.context)) != nil,
+              presentation.mount.isCurrent else { return nil }
+        return presentation
+    }
+
+    func resumeAfterForeground() {
+        guard let presentation, presentation.mount.isCurrent else { return }
+        presentation.mount.viewModel.resumeWatchPartyAfterForeground()
+    }
+
+    func finishPlayback(reportBrowsing: Bool = true) {
+        let context = lease?.context
+        let oldRuntime = runtime
+        lease = nil
+        presentation = nil
+        browsingTask?.cancel(); browsingTask = nil
+        oldRuntime?.invalidate()
+        guard reportBrowsing, let context, let service, let room = service.session,
+              service.isCurrent(context.request), room.playbackContext == context else { return }
+        browsingTask = Task { [weak self, weak service, weak room] in
+            guard !Task.isCancelled, let service, let room,
+                  service.isCurrent(context.request), room.playbackContext == context,
+                  self?.lease == nil else { return }
+            do { try await room.setPresence(status: .browsing, mediaKey: nil, behindMs: nil) }
+            catch { if !Task.isCancelled { self?.message = "Could not update your room status." } }
+        }
+    }
+
     /// Explicit root teardown; never use an asynchronous deinit for resource cleanup.
     func stop() {
         subscriptions.removeAll()
         observeRoom(nil)
+        finishPlayback(reportBrowsing: false)
         let oldRuntime = runtime
         let oldService = service
         runtime = nil
@@ -66,14 +136,14 @@ final class WatchPartyAppOwner: ObservableObject {
         contextChanges.sink { [weak service] _ in
             MainActor.assumeIsolated { service?.invalidateContext() }
         }.store(in: &subscriptions)
-        service.contextDidInvalidate.sink { [weak runtime] _ in
-            MainActor.assumeIsolated { runtime?.invalidate() }
+        service.contextDidInvalidate.sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.finishPlayback(reportBrowsing: false) }
         }.store(in: &subscriptions)
         // @Published emits before the new pointer is installed. This also covers explicit
         // leave/replacement outside context invalidation. Do not adopt a new room implicitly.
-        service.$session.dropFirst().sink { [weak self, weak service, weak runtime] next in
+        service.$session.dropFirst().sink { [weak self, weak service] next in
             MainActor.assumeIsolated {
-                if service?.session !== next { runtime?.invalidate() }
+                if service?.session !== next { self?.finishPlayback(reportBrowsing: false) }
                 self?.observeRoom(next)
             }
         }.store(in: &subscriptions)
@@ -90,7 +160,8 @@ final class WatchPartyAppOwner: ObservableObject {
             if room?.playbackContext != context {
                 // Membership/media changes close the old player; source resolution is a later,
                 // explicit transition. No automatic reuse of its URL or host-provided link.
-                self.runtime?.invalidate()
+                self.finishPlayback(reportBrowsing: false)
+                if room?.playbackContext != nil { self.message = "The room changed title. Choose your source again." }
             }
         }
     }

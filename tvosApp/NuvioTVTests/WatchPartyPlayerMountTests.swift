@@ -102,6 +102,35 @@ final class WatchPartyPlayerMountTests: XCTestCase {
         XCTAssertNotNil(model.playerToast)
     }
 
+    func testCurrentDetachNotifiesRootOnceAndOldSurfaceCannotNotify() throws {
+        let runtime = WatchPartyPlayerRuntime.player(isCurrent: { _ in true })
+        defer { runtime.invalidate() }
+        let lease = try runtime.begin(context: context()) { model() }
+        var callbacks = 0
+        let mount = try WatchPartyPlayerMount(runtime: runtime, lease: lease, onDetached: { callbacks += 1 })
+        let old = try mount.attach().surface
+        let current = try mount.attach().surface
+        XCTAssertFalse(mount.detach(old))
+        XCTAssertEqual(callbacks, 0)
+        XCTAssertTrue(mount.detach(current))
+        XCTAssertEqual(callbacks, 1)
+        mount.finish()
+        XCTAssertEqual(callbacks, 1)
+    }
+
+    func testStaleFinishCallbackCannotClearSuccessorPresentation() throws {
+        let runtime = WatchPartyPlayerRuntime.player(isCurrent: { _ in true })
+        defer { runtime.invalidate() }
+        var oldCallbacks = 0
+        let lease = try runtime.begin(context: context()) { model() }
+        let old = try WatchPartyPlayerMount(runtime: runtime, lease: lease, onDetached: { oldCallbacks += 1 })
+        runtime.invalidate()
+        let successor = try runtime.begin(context: context()) { model() }
+        old.finish()
+        XCTAssertEqual(oldCallbacks, 0)
+        XCTAssertTrue(runtime.isCurrent(successor))
+    }
+
     func testContextLossMakesExistingMountInertAndTeardownStillWorks() throws {
         var current = true
         let runtime = WatchPartyPlayerRuntime.player(isCurrent: { _ in current })

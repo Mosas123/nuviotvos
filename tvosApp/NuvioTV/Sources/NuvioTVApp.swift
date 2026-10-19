@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 import Foundation
 import UIKit
 import ImageIO
@@ -270,10 +271,10 @@ private enum DetailsReturnDestination {
 }
 
 enum TVTab: Hashable, Identifiable, CaseIterable {
-    case profile, home, search, library, settings
+    case profile, home, search, library, settings, party
     case collection(CollectionHomeID)
 
-    static var allCases: [Self] { [.profile, .home, .search, .library, .settings] }
+    static var allCases: [Self] { [.profile, .home, .search, .library, .settings, .party] }
     var id: String { rawValue }
     var rawValue: String {
         switch self {
@@ -282,6 +283,7 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
         case .search: return "Search"
         case .library: return "Library"
         case .settings: return "Settings"
+        case .party: return "Watch Party"
         case .collection(let id): return "Collection:\(id.key)"
         }
     }
@@ -292,6 +294,7 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
         case .search: return L10n.string("nav_search", fallback: "Search")
         case .library: return L10n.string("nav_library", fallback: "Library")
         case .settings: return L10n.string("nav_settings", fallback: "Settings")
+        case .party: return "Watch Party"
         case .collection: return L10n.string("tmdb_collections_title", fallback: "Collections")
         }
     }
@@ -302,6 +305,7 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
         case .search: return "magnifyingglass"
         case .library: return "rectangle.stack"
         case .settings: return "gearshape"
+        case .party: return "person.2.fill"
         case .collection: return "rectangle.stack.fill"
         }
     }
@@ -311,6 +315,11 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var activeScreen: TVScreen = .login
+    @State private var playbackPartyID: UUID?
+    @State private var creatingParty = false
+    @State private var choosingPartySource = false
+    @State private var partyLaunchTask: Task<Void, Never>?
+    @State private var partyLaunchID = UUID()
     @State private var resolvedInitialScreen = false
     /// `nil` until tvOS has actually backgrounded the app, so the initial
     /// `.active` callback is never treated as a resume.
@@ -537,6 +546,23 @@ struct ContentView: View {
         }
         .onChange(of: activeScreen) { oldScreen, newScreen in
             TVHomeDebugTrace.log("app.activeScreen changed from \(oldScreen) to \(newScreen)")
+            if oldScreen != newScreen, !newScreen.isPlayer, partyLaunchTask != nil {
+                partyLaunchID = UUID(); partyLaunchTask?.cancel(); partyLaunchTask = nil
+            }
+        }
+        .overlay {
+            if partyLaunchTask != nil {
+                VStack(spacing: 24) {
+                    ProgressView("Preparing Watch Party…")
+                    Button("Cancel") {
+                        partyLaunchID = UUID(); partyLaunchTask?.cancel(); partyLaunchTask = nil
+                        creatingParty = false; choosingPartySource = false
+                        selectedTab = .party; activeScreen = .main
+                    }
+                }
+                .padding(50)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+            }
         }
         .background(Color.black.ignoresSafeArea())
         // Safety net for the Menu button while an overlay is up. During the
@@ -547,6 +573,17 @@ struct ContentView: View {
         // focus is settled inside Details/Player their own handler fires first,
         // so this only kicks in for the in-between frames.
         .onExitCommand(perform: isOverlayPresented ? dismissOverlay : nil)
+        .onChange(of: watchPartyOwner.presentation?.id) { old, new in
+            if let old, old == playbackPartyID, new == nil {
+                playbackPartyID = nil
+                if activeScreen.isPlayer { activeScreen = .main; selectedTab = .party }
+            }
+        }
+        .onReceive(authManager.contextWillChange.merge(with: profileViewModel.contextWillChange)) { _ in
+            partyLaunchID = UUID()
+            partyLaunchTask?.cancel(); partyLaunchTask = nil
+            creatingParty = false; choosingPartySource = false
+        }
         .onOpenURL(perform: handleDeepLink)
         .onAppear {
             watchPartyOwner.attach(authManager: authManager, profiles: profileViewModel)
@@ -639,6 +676,7 @@ struct ContentView: View {
             case .active:
                 syncManager.refreshAccountIfIdle()
                 presentProfileSelectionAfterBackgroundIfNeeded()
+                watchPartyOwner.resumeAfterForeground()
             default:
                 break
             }
@@ -1511,6 +1549,17 @@ struct ContentView: View {
         collectionContext: CollectionPlaybackContext? = nil
     ) {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
+        if !isTrailer && (creatingParty || choosingPartySource) {
+            launchPartyPlayback(url: url, meta: meta, subtitle: subtitle, httpHeaders: httpHeaders,
+                externalSubtitles: externalSubtitles, cacheFileIdentity: cacheFileIdentity,
+                filename: filename, videoSize: videoSize, videoHash: videoHash,
+                startupBenchmarkToken: startupBenchmarkToken, sourceID: sourceID)
+            return
+        }
+        if watchPartyOwner.presentation != nil {
+            watchPartyOwner.finishPlayback()
+            playbackPartyID = nil
+        }
         let provenance = collectionContext ?? self.collectionContext(id: meta.id, type: meta.type)
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
         let defaultPlayer = ExternalPlayer.from(store.string(forKey: SettingsKey.externalPlayer))
@@ -1611,6 +1660,55 @@ struct ContentView: View {
         )
     }
 
+    private func launchPartyPlayback(
+        url: URL, meta: NuvioMeta, subtitle: String, httpHeaders: [String: String],
+        externalSubtitles: [NuvioSubtitle], cacheFileIdentity: PlaybackCacheFileIdentity?,
+        filename: String?, videoSize: Int64?, videoHash: String?,
+        startupBenchmarkToken: UUID?, sourceID: String?
+    ) {
+        guard let service = watchPartyOwner.service else { return }
+        let createsRoom = creatingParty
+        let roomMedia = service.session?.party?.media
+        let identifiers = [meta.id, meta.imdbId].compactMap { $0 }
+        let mediaID = roomMedia.flatMap { identifiers.contains($0.metaID) ? $0.metaID : nil }
+            ?? meta.imdbId ?? meta.id
+        let episode = meta.isSeries ? playbackCurrentEpisode : nil
+        let media = WatchPartyMedia(type: meta.isSeries ? "series" : "movie", metaID: mediaID,
+            metaType: meta.type, videoID: episode?.id, season: episode?.season,
+            episode: episode?.episode, title: meta.name)
+        partyLaunchTask?.cancel()
+        let mark = UUID()
+        partyLaunchID = mark
+        partyLaunchTask = Task { @MainActor in
+            defer { if partyLaunchID == mark { partyLaunchTask = nil } }
+            do {
+                try WatchPartyLaunchPolicy.validate(media)
+                if createsRoom { try await service.create(media: media) }
+                try Task.checkCancellation()
+                guard partyLaunchID == mark, watchPartyOwner.service === service,
+                      let current = service.session?.party?.media else { throw WatchPartyPlaybackRuntimeError.staleContext }
+                try WatchPartyLaunchPolicy.validateSelection(media, room: current)
+                let presentation = try watchPartyOwner.preparePlayback(media: current)
+                creatingParty = false; choosingPartySource = false
+                presentBuiltInPlayer(url: url, meta: meta, subtitle: subtitle, httpHeaders: httpHeaders,
+                    externalSubtitles: externalSubtitles, resumeFrom: nil, origin: .main,
+                    cacheFileIdentity: cacheFileIdentity, filename: filename, videoSize: videoSize,
+                    videoHash: videoHash, startupBenchmarkToken: startupBenchmarkToken,
+                    sourceID: sourceID, party: presentation)
+            } catch {
+                PlaybackStartupTiming.cancel(token: startupBenchmarkToken)
+                if PictureInPictureManager.shared.activeCoordinator?.torrentStreamSourceURL != url {
+                    await TorrentEngineManager.shared.stopActiveStream(for: url)
+                }
+                guard partyLaunchID == mark, !Task.isCancelled else { return }
+                watchPartyOwner.message = error is WatchPartyLaunchError
+                    ? "Choose the room's exact movie or episode and the same edition."
+                    : "Watch Party could not start. Check the room status and choose your source again."
+                selectedTab = .party; activeScreen = .main
+            }
+        }
+    }
+
     private func presentBuiltInPlayer(
         url: URL,
         meta: NuvioMeta,
@@ -1625,8 +1723,18 @@ struct ContentView: View {
         videoHash: String? = nil,
         startupBenchmarkToken: UUID? = nil,
         sourceID: String? = nil,
-        collectionContext: CollectionPlaybackContext? = nil
+        collectionContext: CollectionPlaybackContext? = nil,
+        party: WatchPartyAppOwner.Presentation? = nil
     ) {
+        if party == nil {
+            partyLaunchID = UUID()
+            partyLaunchTask?.cancel(); partyLaunchTask = nil
+            watchPartyOwner.finishPlayback()
+        }
+        playbackPartyID = party?.id
+        if let party, PictureInPictureManager.shared.activeCoordinator !== party.mount.viewModel.sessionCoordinator {
+            PictureInPictureManager.shared.invalidateSession()
+        }
         if PictureInPictureManager.shared.isPictureInPictureActive,
            PictureInPictureManager.shared.activeContext?.url != url {
             PictureInPictureManager.shared.invalidateSession()
@@ -1658,7 +1766,25 @@ struct ContentView: View {
     }
 
     private func setupPictureInPicture() {
+        PictureInPictureManager.shared.onDidLoseWatchPartyPiP = { coordinator in
+            guard watchPartyOwner.owns(coordinator), !activeScreen.isPlayer else { return }
+            watchPartyOwner.finishPlayback()
+        }
         PictureInPictureManager.shared.onRestoreUI = { [self] context, completion in
+            if watchPartyOwner.owns(PictureInPictureManager.shared.activeCoordinator) {
+                guard let restored = watchPartyOwner.restorePlayback(for: PictureInPictureManager.shared.activeCoordinator) else {
+                    completion(false)
+                    watchPartyOwner.finishPlayback()
+                    return
+                }
+                playbackPartyID = restored.id
+            } else {
+                guard PictureInPictureManager.shared.activeCoordinator?.aetherController?.isWatchPartyControlled != true else {
+                    completion(false)
+                    return
+                }
+                playbackPartyID = nil
+            }
             withAnimation(.easeInOut(duration: 0.24)) {
                 self.playbackOrigin = context.playbackOrigin
                 self.playbackCollectionContext = self.collectionContext(
@@ -1684,6 +1810,10 @@ struct ContentView: View {
         }
 
         PictureInPictureManager.shared.onDidStopPiPWithoutRestoring = {
+            if watchPartyOwner.owns(PictureInPictureManager.shared.activeCoordinator) {
+                watchPartyOwner.finishPlayback()
+                return
+            }
             if let coordinator = PictureInPictureManager.shared.activeCoordinator {
                 PlaybackWakeLock.release(ownerID: coordinator.wakeLockOwnerID)
             }
@@ -1926,6 +2056,23 @@ struct ContentView: View {
             onProfileGateReadinessChange: profileGateReadinessChanged,
             authManager: authManager,
             syncManager: syncManager,
+            watchPartyOwner: watchPartyOwner,
+            onCreateParty: {
+                creatingParty = true; choosingPartySource = false
+                selectedTab = .search
+            },
+            onChoosePartySource: { media in
+                creatingParty = false; choosingPartySource = true
+                watchPartyOwner.finishPlayback()
+                reopenStreamPickerOnDetails = true
+                reopenStreamPickerEpisode = nil
+                openDetailsRoot(id: media.metaID, type: media.metaType)
+            },
+            partyIsChoosing: creatingParty || choosingPartySource,
+            onCancelPartySelection: {
+                creatingParty = false; choosingPartySource = false
+                partyLaunchID = UUID(); partyLaunchTask?.cancel(); partyLaunchTask = nil
+            },
             onSwitchProfile: {
                 // A fresh profile should get a fresh Home (different Continue
                 // Watching, etc.), so drop the cached catalog.
@@ -2632,6 +2779,10 @@ struct ContentView: View {
         let autoPlayNext = store.object(forKey: SettingsKey.autoPlayNext) as? Bool ?? true
         let autoPlayNextCountdown = store.object(forKey: SettingsKey.autoPlayNextCountdown) as? Int ?? 10
         let provenance = playbackCollectionContext
+        let party = playbackPartyID.flatMap { id in
+            watchPartyOwner.presentation.flatMap { $0.id == id && $0.mount.isCurrent ? $0.mount : nil }
+        }
+        if playbackPartyID == nil || party != nil {
         PlayerView(
             url: url,
             meta: meta,
@@ -2645,12 +2796,12 @@ struct ContentView: View {
             videoHash: isTrailer ? nil : playbackVideoHash,
             cacheFileIdentity: isTrailer ? nil : playbackCacheFileIdentity,
             sourceID: isTrailer ? nil : playbackSourceID,
-            episodes: isTrailer ? [] : playbackEpisodes,
+            episodes: (isTrailer || party != nil) ? [] : playbackEpisodes,
             currentEpisode: isTrailer ? nil : playbackCurrentEpisode,
             initialStartupBenchmarkToken: startupBenchmarkToken,
-            autoPlayNextEnabled: autoPlayNext,
+            autoPlayNextEnabled: party == nil && autoPlayNext,
             autoPlayNextCountdownSeconds: autoPlayNextCountdown,
-            resolveNextStream: (isTrailer || !meta.isSeries) ? nil : { episode, startupToken in
+            resolveNextStream: (isTrailer || party != nil || !meta.isSeries) ? nil : { episode, startupToken in
                 await Self.resolveNextEpisodeStream(
                     episode: episode,
                     seriesMeta: meta,
@@ -2658,7 +2809,7 @@ struct ContentView: View {
                     startupToken: startupToken
                 )
             },
-            reloadCurrentStream: isTrailer ? nil : { currentEpisode, excludedURLs in
+            reloadCurrentStream: (isTrailer || party != nil) ? nil : { currentEpisode, excludedURLs in
                 let profileId = profileViewModel.activeProfile?.id
                 let excluded = Set(excludedURLs)
                 if let episode = currentEpisode {
@@ -2685,14 +2836,14 @@ struct ContentView: View {
                     startupToken: nil
                 )
             },
-            fetchPlaybackSources: isTrailer ? nil : { contentId, type in
+            fetchPlaybackSources: (isTrailer || party != nil) ? nil : { contentId, type in
                 Self.playbackSourcesProgressively(
                     contentId: contentId,
                     type: type,
                     profileId: profileViewModel.activeProfile?.id
                 )
             },
-            resolvePlaybackStream: isTrailer ? nil : { stream, contentId, subtitleLine, startupToken in
+            resolvePlaybackStream: (isTrailer || party != nil) ? nil : { stream, contentId, subtitleLine, startupToken in
                 await Self.resolveChosenStream(
                     stream,
                     contentId: contentId,
@@ -2702,7 +2853,7 @@ struct ContentView: View {
                     startupToken: startupToken
                 )
             },
-            onRequestSources: isTrailer ? nil : {
+            onRequestSources: (isTrailer || party != nil) ? nil : {
                 withAnimation(.easeInOut(duration: 0.28)) {
                     reopenStreamPickerOnDetails = true
                     reopenStreamPickerEpisode = playbackCurrentEpisode
@@ -2725,17 +2876,22 @@ struct ContentView: View {
                 }
             },
             onPlayRecommendation: { recMeta, playManually in
+                guard party == nil else { return }
                 dismissPlayer(meta: meta, subtitle: subtitle)
                 playRecommendedTitle(meta: recMeta, playManually: playManually)
             },
             onOpenRecommendationDetails: { recMeta in
+                guard party == nil else { return }
                 dismissPlayer(meta: meta, subtitle: subtitle)
                 withAnimation(.easeInOut(duration: 0.28)) {
                     openDetailsRoot(id: recMeta.id, type: recMeta.type)
                 }
-            }
+            },
+            partyPlayback: party
         ) {
             dismissPlayer(meta: meta, subtitle: subtitle)
+        }
+        .id(playbackPartyID?.uuidString ?? "standalone-player")
         }
     }
 
@@ -2778,6 +2934,15 @@ struct ContentView: View {
     }
 
     private func dismissPlayer(meta: NuvioMeta, subtitle: String) {
+        if playbackPartyID != nil {
+            let pip = PictureInPictureManager.shared
+            let keepsPiP = watchPartyOwner.owns(pip.activeCoordinator)
+                && (pip.isPictureInPictureActive || pip.isRestoringUIInProgress)
+            if !keepsPiP { watchPartyOwner.finishPlayback(); playbackPartyID = nil }
+            selectedTab = .party
+            activeScreen = .main
+            return
+        }
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         withAnimation(.easeInOut(duration: 0.24)) {
             switch playbackOrigin {
@@ -3163,6 +3328,11 @@ private struct TVMainTabView: View {
     let onProfileGateReadinessChange: (TVHomeContentIdentity, UInt, TVProfileGateReadiness) -> Void
     let authManager: AuthManager
     let syncManager: NuvioSyncManager
+    @ObservedObject var watchPartyOwner: WatchPartyAppOwner
+    let onCreateParty: () -> Void
+    let onChoosePartySource: (WatchPartyMedia) -> Void
+    let partyIsChoosing: Bool
+    let onCancelPartySelection: () -> Void
     let onSwitchProfile: () -> Void
     let onChangeProfileAvatar: (String, String) -> Void
     let onChangeProfileName: (String, String) -> Void
@@ -3409,6 +3579,19 @@ private struct TVMainTabView: View {
                 .tabItem { Label(TVTab.library.title, systemImage: TVTab.library.symbol) }
                 .tag(TVTab.library)
             settingsTabContent.tabItem { settingsTabLabel }.tag(TVTab.settings)
+            partyTabContent.tabItem { Label("Watch Party", systemImage: "person.2.fill") }.tag(TVTab.party)
+        }
+    }
+
+    @ViewBuilder
+    private var partyTabContent: some View {
+        if let service = watchPartyOwner.service {
+            WatchPartyLobbyView(owner: watchPartyOwner, service: service,
+                canUseAccount: isAuthenticated && !sessionNeedsReauthentication && activeProfile != nil,
+                isChoosing: partyIsChoosing, onCreate: onCreateParty,
+                onChooseSource: onChoosePartySource, onCancelSelection: onCancelPartySelection)
+        } else {
+            Text("Sign in and choose a profile to use Watch Party.")
         }
     }
 
@@ -3428,6 +3611,7 @@ private struct TVMainTabView: View {
                 libraryTabContent
             }
             Tab(value: TVTab.settings) { settingsTabContent } label: { settingsTabLabel }
+            Tab("Watch Party", systemImage: "person.2.fill", value: TVTab.party) { partyTabContent }
             if !directCollectionDestinations.isEmpty {
                 TabSection {
                     ForEach(directCollectionDestinations) { destination in
