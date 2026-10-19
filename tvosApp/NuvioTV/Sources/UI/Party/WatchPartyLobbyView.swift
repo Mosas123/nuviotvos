@@ -20,6 +20,10 @@ struct WatchPartyLobbyView: View {
     @State private var previewRequestID = UUID()
     @State private var reviewRoomID: String?
     @State private var reviewMediaKey: String?
+    // Preserve the user's confirmed invitation until the server accepts the
+    // membership; compare immediately when the room first becomes visible.
+    @State private var pendingJoinMediaKey: String?
+    @State private var pendingJoinCode: String?
     @State private var operation: Task<Void, Never>?
     @State private var endingRoom = false
     @State private var showingInvitation = false
@@ -88,12 +92,24 @@ struct WatchPartyLobbyView: View {
         .onChange(of: service.session?.party?.id) { _, newID in
             showingInvitation = false
             // After join/leave/room replacement, a preview is no longer fresh.
-            // Otherwise leaving a room can resurrect its old host/title preview.
             invalidateInvitationPreview()
             if reviewRoomID != newID {
                 reviewRoomID = nil
                 reviewMediaKey = nil
             }
+            if let party = service.session?.party, let expected = pendingJoinMediaKey {
+                // Check as soon as membership is published, not only after the
+                // join RPC and realtime connection both finish.
+                if WatchPartyMediaReviewPolicy.needsConfirmation(
+                    previewKey: expected, joinedKey: party.media.key
+                ) || WatchPartyCode.normalize(party.code) != pendingJoinCode {
+                    reviewRoomID = party.id
+                    reviewMediaKey = party.media.key
+                    owner.message = "Room content changed since preview. Confirm the current title before choosing a source."
+                }
+            }
+            pendingJoinMediaKey = nil
+            pendingJoinCode = nil
             if canUseAccount { focusedAction = preferredRoomFocus }
         }
         .onChange(of: service.session?.party?.media.key) { oldKey, newKey in
@@ -115,6 +131,8 @@ struct WatchPartyLobbyView: View {
                 invalidateInvitationPreview()
                 reviewRoomID = nil
                 reviewMediaKey = nil
+                pendingJoinMediaKey = nil
+                pendingJoinCode = nil
             }
             focusedAction = allowed ? preferredRoomFocus : nil
         }
@@ -125,6 +143,8 @@ struct WatchPartyLobbyView: View {
             invalidateInvitationPreview()
             reviewRoomID = nil
             reviewMediaKey = nil
+            pendingJoinMediaKey = nil
+            pendingJoinCode = nil
             showingInvitation = false
             focusedAction = nil
         }
@@ -422,9 +442,19 @@ struct WatchPartyLobbyView: View {
             Button {
                 let expectedCode = WatchPartyCode.normalize(code)
                 let expectedKey = media.key
+                guard previewCode == expectedCode,
+                      roomPreview?.media?.key == expectedKey else { return }
+                pendingJoinMediaKey = expectedKey
+                pendingJoinCode = expectedCode
                 onCancelSelection()
                 run {
-                    try await service.join(code: expectedCode)
+                    do {
+                        try await service.join(code: expectedCode)
+                    } catch {
+                        pendingJoinMediaKey = nil
+                        pendingJoinCode = nil
+                        throw error
+                    }
                     if let joined = service.session?.party,
                        WatchPartyMediaReviewPolicy.needsConfirmation(
                            previewKey: expectedKey, joinedKey: joined.media.key
