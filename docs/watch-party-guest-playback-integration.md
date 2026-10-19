@@ -29,11 +29,11 @@ Separate RFC: `docs/watch-party-room-source-lifecycle-rfc.md`. Current realtime 
 
 ## Current delivery status
 
-**Not ready for PR/merge**. No Xcode build, XCTest, Apple TV/Fire TV QA or backend integration was run. No confirmed bug/severity is assigned to the unverified host-identity or header concerns.
+Incremental review is authorized by the project contributor's reported maintainer guidance. The sidebar is under review in upstream PR #303; CP-325 return work is isolated on a follow-up WIP branch. No Xcode build, XCTest, Apple TV/Fire TV QA or backend integration was run. This is not a merge-readiness claim. No confirmed bug/severity is assigned to the unverified host-identity or header concerns.
 
 ## Return-to-player audit (CP-321)
 
-Status: static review completed; return UI is not implemented.
+Historical CP-321 audit. The follow-up CP-325 implementation and remaining validation are described below.
 
 - Normal Back in ContentView.dismissPlayer calls WatchPartyAppOwner.finishPlayback unless the exact owned coordinator is actively in PiP or restoring. finishPlayback invalidates the lease/runtime and clears the presentation. Keeping room membership does not retain the player.
 - WatchPartyPlaybackRuntime.detachFullscreen invalidates the resource when keepingPictureInPicture is false. A stale lease cannot be restored merely by retaining its URL or room ID.
@@ -50,3 +50,24 @@ Status: static review completed; return UI is not implemented.
 WatchPartyAPI uses authenticated PostgREST RPCs watch_party_create/join/heartbeat/update and related functions. Searching the app repositories for realtime.messages policies and accessible NuvioMedia server/sync repositories did not identify the authoritative backend implementation. An empty search is not proof that no backend exists.
 
 Before guest shared-source playback or room-lifetime persistence, obtain the server repository/migrations for these RPCs and the private watch-party channel authorization policies. The member_id claimed inside a peer message alone does not establish its authenticated sender. No server writes, Android writes, source forwarding, migrations or new playback button were added by this audit.
+
+
+## Explicit PiP return implementation (CP-325)
+
+The room sidebar's live-player action now requests Return to player through the root owner. It checks the feature gate, ready room, membership, exact playback context, current mount and owned coordinator. It does not issue a Play, seek, catch-up request or source load. When no mount remains, Choose my source stays available.
+
+PictureInPictureManager.restoreFullscreen(for:completion:) accepts only the exact registered coordinator with confirmed active PiP and no app restoration already in progress. It shares the UI restoration path with the real AVKit delegate; the lobby neither calls onRestoreUI nor synthesizes delegate callbacks. PiP stops only after root UI acknowledgement and a fullscreen-surface rebind from the exact active Aether controller.
+
+PlayerPiPRestoreRequest coalesces AVKit expansion during app restoration, waits for both acknowledgements in either order, and rejects stale UI results after cancellation. Controller disposal drains pending callbacks after invalidating identity. A normal PiP close still tears down playback; ordinary Back and initial-load ownership rules are unchanged. No restoration after app termination or MPV PiP support is introduced.
+
+Seven added XCTest cases cover both acknowledgement orders, duplicate/system joining, UI failure and retry, stale results across cancellation, draining joined callbacks once, and reentrant replacement after cancellation. They are written only, not executed. Existing runtime/context tests are retained.
+
+Required maintainer validation before merge:
+- Compile and run the PiP start/restore, runtime, coordination and existing PictureInPicture suites.
+- On eligible Aether software PiP, open the sidebar and return: verify the same coordinator and playback position, no new source request, and one fullscreen surface.
+- Race sidebar return against system expand; verify no duplicate UI, black surface or lost completion.
+- Close PiP, fail PiP start, end/leave the room, replace media/source, or switch profile during restoration: verify no stale playback and no successor session teardown.
+- Verify unavailable/MPV paths and normal Back still release playback and offer source selection.
+- Validate UI focus and device behavior separately from the Realtime fix in PR #302.
+
+This follow-up does not alter upstream PR #303, include PR #302's fix, implement host-stream playback or modify backend authorization/persistence. Runtime status remains QA; no defect closure or severity promotion is claimed.
