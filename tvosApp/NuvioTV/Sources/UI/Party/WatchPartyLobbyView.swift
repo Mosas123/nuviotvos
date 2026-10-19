@@ -337,7 +337,7 @@ struct WatchPartyLobbyView: View {
             }
             .buttonStyle(PosterCardButtonStyle())
             .focused($focusedAction, equals: "invite")
-            .disabled(operation != nil || !WatchPartyCode.isValid(party.code))
+            .disabled(service.busy || operation != nil || room.connection != .ready || room.membershipExit != nil || !WatchPartyCode.isValid(party.code))
 
             HStack(spacing: 14) {
                 if room.connection != .ready, room.membershipExit == nil {
