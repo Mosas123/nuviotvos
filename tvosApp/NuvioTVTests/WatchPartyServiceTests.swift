@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import NuvioTV
 
 @MainActor
@@ -165,6 +166,73 @@ final class WatchPartyServiceTests: XCTestCase {
         XCTAssertEqual(service.session?.membershipExit, .removed)
         XCTAssertFalse(remote.calls.contains("join"))
         XCTAssertEqual(remote.calls.filter { $0 == "create" }.count, 1)
+    }
+
+    func testInvalidationRevokesEpochBeforeConsumerCleanupAndStopsRoomAfterward() async throws {
+        let env = environment(), remote = Remote()
+        let service = service(remote, environment: { env })
+        try await service.create(media: remote.media)
+        let room = try XCTUnwrap(service.session)
+        let context = try XCTUnwrap(room.playbackContext)
+        var callbacks = 0
+        let observer = service.contextDidInvalidate.sink { _ in
+            callbacks += 1
+            XCTAssertFalse(service.isCurrent(context.request))
+            XCTAssertTrue(service.session === room)
+            XCTAssertEqual(room.connection, .ready)
+            service.invalidateContext() // Reentrant teardown must not recursively notify.
+        }
+        service.invalidateContext()
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(room.connection, .stopped)
+        XCTAssertNil(service.session)
+        observer.cancel()
+    }
+
+    func testRootAttachmentIsInertAndBoundaryStopsRoomWithoutImplicitLeaveOrJoin() async throws {
+        let env = environment(), remote = Remote()
+        let service = service(remote, environment: { env })
+        let boundary = PassthroughSubject<Void, Never>()
+        let owner = WatchPartyAppOwner(service: service, contextChanges: boundary.eraseToAnyPublisher())
+        defer { owner.stop() }
+        XCTAssertTrue(remote.calls.isEmpty)
+        XCTAssertEqual(owner.runtime?.phase, .idle)
+        try await service.create(media: remote.media)
+        let room = try XCTUnwrap(service.session)
+        boundary.send(())
+        XCTAssertEqual(room.connection, .stopped)
+        XCTAssertNil(service.session)
+        XCTAssertFalse(remote.calls.contains("leave"))
+        XCTAssertFalse(remote.calls.contains("join"))
+        XCTAssertEqual(remote.calls.filter { $0 == "create" }.count, 1)
+    }
+
+    func testRootBoundaryRejectsLateCreateEvenWhenEnvironmentReturnsToSameValue() async {
+        let env = environment(), remote = Remote()
+        let service = service(remote, environment: { env })
+        let boundary = PassthroughSubject<Void, Never>()
+        let owner = WatchPartyAppOwner(service: service, contextChanges: boundary.eraseToAnyPublisher())
+        defer { remote.onCreate = nil; owner.stop() }
+        remote.onCreate = { boundary.send(()); boundary.send(()) }
+        do { try await service.create(media: remote.media); XCTFail("Expected revoked root epoch") }
+        catch { XCTAssertEqual(error as? WatchPartyAPIError, .staleContext) }
+        XCTAssertNil(service.session)
+        XCTAssertEqual(remote.calls.filter { $0 == "create" }.count, 1)
+    }
+
+    func testRootStopRemovesBoundarySubscriptionAndDoesNotAffectSuccessor() async throws {
+        let env = environment(), remote = Remote()
+        let service = service(remote, environment: { env })
+        let boundary = PassthroughSubject<Void, Never>()
+        let owner = WatchPartyAppOwner(service: service, contextChanges: boundary.eraseToAnyPublisher())
+        owner.stop()
+        owner.stop()
+        XCTAssertNil(owner.service)
+        XCTAssertNil(owner.runtime)
+        _ = try await service.checkAvailability()
+        boundary.send(())
+        XCTAssertEqual(service.available, true)
+        service.invalidateContext()
     }
 
     @MainActor

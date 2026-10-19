@@ -395,6 +395,7 @@ struct ContentView: View {
     /// tvOS can accept it, instead of guessing with delayed timers.
     @State private var detailsDidDisappearGeneration: UInt = 0
     @StateObject private var authManager = AuthManager()
+    @StateObject private var watchPartyOwner = WatchPartyAppOwner()
     @StateObject private var profileViewModel = ProfileViewModel()
     @StateObject private var syncManager = NuvioSyncManager()
     // Both search screens are backed by their own view model. Only the one
@@ -548,6 +549,7 @@ struct ContentView: View {
         .onExitCommand(perform: isOverlayPresented ? dismissOverlay : nil)
         .onOpenURL(perform: handleDeepLink)
         .onAppear {
+            watchPartyOwner.attach(authManager: authManager, profiles: profileViewModel)
             syncManager.attach(authManager: authManager, profileViewModel: profileViewModel)
             ICloudSettingsSyncManager.shared.start()
             setupPictureInPicture()
@@ -676,6 +678,9 @@ struct ContentView: View {
             }
         }
         guard shouldRequireSelection else { return }
+
+        // Revoke transient Party work before a privacy gate, even if the selected ID stays equal.
+        watchPartyOwner.invalidateContext()
 
         continueWatchingPlaybackTask?.cancel()
         continueWatchingPlaybackTask = nil

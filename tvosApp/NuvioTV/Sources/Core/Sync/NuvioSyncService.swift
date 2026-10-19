@@ -2198,7 +2198,8 @@ private enum ProfileSyncIndexStore {
 
 /// Stable per-install identity required by current Nuvio mutation RPCs. It lets
 /// delta/event sync distinguish this Apple TV's writes from another client.
-private enum SyncClientIdentity {
+/// Shared installation identity for sync registration and Watch Party membership.
+enum SyncClientIdentity {
     private static let defaultsKey = "client_instance_id"
     private static let prefix = "nuvio-tv-"
 

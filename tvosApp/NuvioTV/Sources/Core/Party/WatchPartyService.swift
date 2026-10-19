@@ -39,6 +39,10 @@ final class WatchPartyService: ObservableObject {
     @Published private(set) var failure: WatchPartyFailure?
     @Published private(set) var membershipOutcomeUncertain = false
 
+    /// The request epoch is already revoked, but room/account storage is still intact.
+    /// Root cancels playback consumers synchronously here, before session.stop notifies them.
+    let contextDidInvalidate = PassthroughSubject<Void, Never>()
+
     private let environment: EnvironmentProvider
     private let makeRemote: RemoteFactory
     private let makeSession: SessionFactory
@@ -48,6 +52,7 @@ final class WatchPartyService: ObservableObject {
     private var revision = UUID()
     private var operation: UUID?
     private var connectionTask: Task<Void, Error>?
+    private var invalidatingContext = false
     // Owned subscriptions are cancelled on destruction; their closures retain the service weakly.
     var authObservation: AnyCancellable?
 
@@ -61,9 +66,13 @@ final class WatchPartyService: ObservableObject {
     /// Root must call synchronously for profile/backend transitions, even A→B→A.
     /// Account transitions are also observed by the Auth composition below.
     func invalidateContext() {
+        guard !invalidatingContext else { return }
+        invalidatingContext = true
+        defer { invalidatingContext = false }
         revision = UUID()
         operation = nil
         connectionTask?.cancel(); connectionTask = nil
+        contextDidInvalidate.send(())
         session?.onChange = nil
         session?.stop()
         session = nil
@@ -197,6 +206,7 @@ final class WatchPartyService: ObservableObject {
 
     private func begin() throws -> Setup {
         try Task.checkCancellation()
+        guard !invalidatingContext else { throw WatchPartyAPIError.staleContext }
         let current = environment()
         if captured != current { invalidateContext() }
         guard let current else { throw WatchPartyAPIError.signInRequired }
@@ -214,8 +224,8 @@ final class WatchPartyService: ObservableObject {
         return Setup(environment: current, context: context, remote: remote, operation: token)
     }
 
-    private func isCurrent(_ value: WatchPartyRequestContext) -> Bool {
-        context == value && value.epoch == revision && captured == environment()
+    func isCurrent(_ value: WatchPartyRequestContext) -> Bool {
+        !invalidatingContext && context == value && value.epoch == revision && captured == environment()
     }
 
     private func check(_ value: WatchPartyRequestContext, operation: UUID) throws {

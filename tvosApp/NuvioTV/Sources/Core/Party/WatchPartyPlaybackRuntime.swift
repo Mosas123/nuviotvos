@@ -37,6 +37,8 @@ final class WatchPartyPlaybackRuntime<Resource: AnyObject> {
 
     enum Phase: Equatable { case idle, prepared, fullscreen, pictureInPicture }
     private(set) var phase: Phase = .idle
+    /// Root uses identity only to close a resource when its accepted room/media disappears.
+    var currentContext: WatchPartyPlaybackContext? { active?.context }
     private let ownerID = UUID()
     private var revision = UUID()
     private var creating = false
