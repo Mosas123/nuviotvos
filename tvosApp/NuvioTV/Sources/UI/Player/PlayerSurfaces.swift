@@ -18,13 +18,13 @@ struct AetherPlayerSurface: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AetherPlaybackController {
         controller.rebindSurface()
-        PictureInPictureManager.shared.fullscreenSurfaceDidRebind()
+        PictureInPictureManager.shared.fullscreenSurfaceDidRebind(for: controller)
         return controller
     }
 
     func updateUIViewController(_ uiViewController: AetherPlaybackController, context: Context) {
         uiViewController.rebindSurface()
-        PictureInPictureManager.shared.fullscreenSurfaceDidRebind()
+        PictureInPictureManager.shared.fullscreenSurfaceDidRebind(for: uiViewController)
     }
 }
 
