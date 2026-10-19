@@ -1736,14 +1736,12 @@ struct ContentView: View {
         let createsRoom = creatingParty
         let roomMedia = service.session?.party?.media
         let episode = meta.isSeries ? playbackCurrentEpisode : nil
-        let media: WatchPartyMedia
-        do {
-            media = try WatchPartyLaunchPolicy.mediaForPlayback(
+        // Keep validation inside the launch task so its existing catch path
+        // releases startup timing and any resolved torrent on failure.
+        let mediaResult = Result {
+            try WatchPartyLaunchPolicy.mediaForPlayback(
                 meta, episode: episode, room: roomMedia
             )
-        } catch {
-            watchPartyOwner.message = "Choose a valid title and episode for this room."
-            return
         }
         partyLaunchTask?.cancel()
         let mark = UUID()
@@ -1751,6 +1749,7 @@ struct ContentView: View {
         partyLaunchTask = Task { @MainActor in
             defer { if partyLaunchID == mark { partyLaunchTask = nil } }
             do {
+                let media = try mediaResult.get()
                 try WatchPartyLaunchPolicy.validate(media)
                 if createsRoom { try await service.create(media: media) }
                 try Task.checkCancellation()
