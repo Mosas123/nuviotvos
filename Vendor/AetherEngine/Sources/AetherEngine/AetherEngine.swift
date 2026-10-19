@@ -620,6 +620,9 @@ public final class AetherEngine: ObservableObject {
             "HDRCRIT  \(displayCriteria.debugSummary())",
             "HDRHLS   route=\(videoRoute.rawValue) \(session)",
         ]
+        if sourceDVProfile == 5 {
+            lines.append("DV5SRC   \(DolbyVisionColorDiagnostics.sourceFormatFields(sourceVideoStreamFormat))")
+        }
         if let nativeHost {
             lines.append(nativeHost.videoFrameCaptureDebugSummary)
         }
@@ -941,7 +944,12 @@ public final class AetherEngine: ObservableObject {
     ///
     /// For "has this seek reached the screen", the per-seek answer is `SeekEvent.landed`, not this
     /// flag: a seek keeps the previous frame up, so the layer never stops being ready for display.
-    @Published public internal(set) var hasFirstFrameReadyForDisplay = false
+    @Published public internal(set) var hasFirstFrameReadyForDisplay = false {
+        didSet {
+            guard !oldValue, hasFirstFrameReadyForDisplay else { return }
+            emitDolbyVisionFirstFrameDiagnosticIfNeeded()
+        }
+    }
 
     /// True while the running session has a host video-display signal to fold (#315). Set with the
     /// host sinks, cleared with the session, and what keeps the external-playback latch from arming

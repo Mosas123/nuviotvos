@@ -1664,23 +1664,42 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // color_trc/primaries/space all unspecified, so AVPlayer's DV decoder won't engage on the dvh1
         // sample entry (MKV reads Colour element directly into codecpar; MP4 demuxer has no fallback).
         // Forcing the canonical IPT-PQ-c2 tuple writes `colr nclx` so AVPlayer sees the PQ signal.
-        // Primaries and transfer are BT.2020 and PQ for P5. Crucially, matrix coefficients (space)
-        // must remain unspecified (AVCOL_SPC_UNSPECIFIED = 2); forcing AVCOL_SPC_BT2020_NCL (matrix 9)
-        // explicitly signals a YCbCr matrix, causing AVPlayer/CoreMedia to decode IPT chroma as YCbCr
-        // and produce a severe purple/green tint. Range is preserved if already signaled; unspecified defaults to limited.
+        // Keep upstream's BT.2020 / PQ / BT.2020-NCL signaling.
+        // Range is preserved if already signaled; unspecified defaults to limited.
         let p5ColorOverride: MP4SegmentMuxer.ColorOverride?
         if codecTagOverride == "dvh1" {
             let sourceRange = codecpar.pointee.color_range
             p5ColorOverride = MP4SegmentMuxer.ColorOverride(
                 primaries: AVCOL_PRI_BT2020,
                 trc: AVCOL_TRC_SMPTE2084,
-                space: AVCOL_SPC_UNSPECIFIED,
+                space: AVCOL_SPC_BT2020_NCL,
                 range: sourceRange == AVCOL_RANGE_UNSPECIFIED
                     ? AVCOL_RANGE_MPEG
                     : sourceRange
             )
         } else {
             p5ColorOverride = nil
+        }
+        if case .profile5 = dvVariant {
+            let sourceFormat = VideoStreamFormat(codecpar: UnsafePointer(codecpar))
+            let overrideFields: String
+            if let override = p5ColorOverride {
+                overrideFields = "colorOverridePrimaries=\(Int32(override.primaries.rawValue)) "
+                    + "colorOverrideTransfer=\(Int32(override.trc.rawValue)) "
+                    + "colorOverrideMatrix=\(Int32(override.space.rawValue)) "
+                    + "colorOverrideRange=\(Int32(override.range.rawValue))"
+            } else {
+                overrideFields = "colorOverridePrimaries=unknown colorOverrideTransfer=unknown "
+                    + "colorOverrideMatrix=unknown colorOverrideRange=unknown"
+            }
+            let rangeWasDefaulted = codecpar.pointee.color_range == AVCOL_RANGE_UNSPECIFIED
+            EngineLog.emit(
+                "[DVBlack] stage=route dvVariant=profile5 codecTag=\(codecTagOverride ?? "unknown") "
+                    + "doviConfig=\(String(describing: doviConfig)) videoRange=\(videoRange.rawValue) "
+                    + "\(DolbyVisionColorDiagnostics.sourceColorFields(sourceFormat)) "
+                    + "\(overrideFields) rangeWasDefaulted=\(rangeWasDefaulted)",
+                category: .session
+            )
         }
         // Deep-copy codecpar so configs outlive the demuxer (live reopen closes it; see OwnedCodecParameters).
         guard let ownedVideoParams = OwnedCodecParameters(copying: codecpar) else {

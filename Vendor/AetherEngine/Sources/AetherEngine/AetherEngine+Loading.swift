@@ -579,6 +579,11 @@ extension AetherEngine {
         let inPlaceHandover = pendingInPlaceItemHandover
         pendingInPlaceItemHandover = false
         if loadGeneration == bypassGeneration { recordStartupCheckpoint(.sessionConstructed) }   // #361
+#if os(tvOS)
+        let allowsVideoFrameCapture = false
+#else
+        let allowsVideoFrameCapture = true
+#endif
         host.load(url: playbackURL,
                   startPosition: startPosition,
                   perFrameHDR: true,
@@ -604,7 +609,8 @@ extension AetherEngine {
                       // AVFoundation builds no track, where nothing terminal is ever published.
                       readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds,
                       // No probe lists this route's audio, so the item's own tracks are the list.
-                      readsBackAudioTracks: true))
+                      readsBackAudioTracks: true,
+                      allowsVideoFrameCapture: allowsVideoFrameCapture))
 
         attachRemoteHLSCueClock(host: host, expectedGeneration: bypassGeneration)
 
@@ -1885,24 +1891,11 @@ extension AetherEngine {
         // and recovery reloads keep their own contracts.
         let inPlaceHandover = pendingInPlaceItemHandover
         pendingInPlaceItemHandover = false
-        // Issue #144: an 8-bit BGRA output washes out native DV on first-generation Apple TV.
-        // Keep the capture output in 10-bit YUV; thumbnail rendering maps it to SDR afterward.
 #if os(tvOS)
-        // HDR10 experiments are opt-in; the verified DV policy stays active in every variant.
-#if NUVIO_HDR10_CAPTURE_DISABLED || NUVIO_HDR10_CAPTURE_X420
-        let isHDR10Source = sourceVideoFormat == .hdr10 || sourceVideoFormat == .hdr10Plus
-#endif
-#if NUVIO_HDR10_CAPTURE_DISABLED
-        let allowsVideoFrameCapture = !isHDR10Source
-#else
-        let allowsVideoFrameCapture = true
-#endif
-#if NUVIO_HDR10_CAPTURE_X420
-        let usesTenBitCapture = sourceVideoFormat == .dolbyVision || isHDR10Source
-#else
-        let usesTenBitCapture = sourceVideoFormat == .dolbyVision
-#endif
-        let videoFrameCapturePixelFormat = usesTenBitCapture
+        // Attaching the thumbnail output can alter native HDR rendering, including DV5 -> HDR10
+        // with x420 on the tested setup. Seek previews use the separate cache/extractor paths.
+        let allowsVideoFrameCapture = false
+        let videoFrameCapturePixelFormat = sourceVideoFormat == .dolbyVision
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_32BGRA
 #else
