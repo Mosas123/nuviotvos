@@ -75,10 +75,26 @@ struct WatchPartyLobbyView: View {
             focusedAction = preferredRoomFocus
         }
         .onChange(of: owner.presentation?.id) { _, _ in
-            focusedAction = preferredRoomFocus
+            if canUseAccount { focusedAction = preferredRoomFocus }
+        }
+        .onChange(of: service.busy) { _, isBusy in
+            // Recover focus after a room RPC, but don't interrupt a valid
+            // selection the user has already made.
+            if canUseAccount && !isBusy && focusedAction == nil {
+                focusedAction = preferredRoomFocus
+            }
+        }
+        .onChange(of: canUseAccount) { _, allowed in
+            accountGateFocused = !allowed
+            focusedAction = allowed ? preferredRoomFocus : nil
         }
         .onAppear {
-            focusedAction = preferredRoomFocus
+            if canUseAccount {
+                focusedAction = preferredRoomFocus
+            } else {
+                focusedAction = nil
+                accountGateFocused = true
+            }
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
