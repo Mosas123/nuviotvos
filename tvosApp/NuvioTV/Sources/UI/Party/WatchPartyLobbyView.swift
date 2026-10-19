@@ -663,7 +663,41 @@ struct WatchPartyLobbyView: View {
 
     private func roomActions(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            primaryRoomAction(room, party: party)
+            let hostName = room.members.first(where: { $0.id == party.hostMemberID })?.displayName
+            if let notice = WatchPartySharedSourceNotice.text(
+                hostName: hostName, stream: room.sharedStream,
+                mediaKey: party.media.key, isGuest: room.memberID != party.hostMemberID,
+                connected: room.connection == .ready
+            ) {
+                statusRow(symbol: "antenna.radiowaves.left.and.right",
+                          title: notice, tint: .white)
+            }
+            if needsMediaReview {
+                statusRow(symbol: "exclamationmark.triangle.fill",
+                          title: "The room changed to \(party.media.title)\(episodeDescription(party.media).map { " · " + $0 } ?? ""). Confirm before choosing a source.",
+                          tint: .orange)
+                Button {
+                    guard room.party?.id == reviewRoomID,
+                          room.party?.media.key == reviewMediaKey,
+                          room.connection == .ready, room.membershipExit == nil else { return }
+                    reviewRoomID = nil
+                    reviewMediaKey = nil
+                    owner.message = nil
+                    focusedAction = preferredRoomFocus
+                } label: {
+                    primaryActionLabel(symbol: "checkmark.shield",
+                                       title: "Confirm current movie or episode",
+                                       subtitle: "Verify this title before selecting a source",
+                                       isFocused: focusedAction == "review-room")
+                }
+                .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
+                .focused($focusedAction, equals: "review-room")
+                .disabled(service.busy || operation != nil || room.connection != .ready
+                    || room.membershipExit != nil)
+            } else {
+                primaryRoomAction(room, party: party)
+            }
 
             Button {
                 showingInvitation = true
@@ -734,7 +768,7 @@ struct WatchPartyLobbyView: View {
 
     @ViewBuilder
     private func primaryRoomAction(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
-        if owner.presentation != nil {
+        if owner.presentation?.mount.isCurrent == true {
             Button {
                 guard let presentation = owner.presentation, presentation.mount.isCurrent else { return }
                 presentation.mount.viewModel.catchUpWithWatchParty()
