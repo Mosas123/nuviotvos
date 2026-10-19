@@ -87,6 +87,9 @@ struct WatchPartyLobbyView: View {
         }
         .onChange(of: service.session?.party?.id) { _, newID in
             showingInvitation = false
+            // After join/leave/room replacement, a preview is no longer fresh.
+            // Otherwise leaving a room can resurrect its old host/title preview.
+            invalidateInvitationPreview()
             if reviewRoomID != newID {
                 reviewRoomID = nil
                 reviewMediaKey = nil
