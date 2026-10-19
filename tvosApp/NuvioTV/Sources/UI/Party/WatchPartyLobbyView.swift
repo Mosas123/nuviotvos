@@ -17,6 +17,7 @@ struct WatchPartyLobbyView: View {
     @State private var roomCodeIsEditing = false
     @State private var operation: Task<Void, Never>?
     @State private var endingRoom = false
+    @State private var showingInvitation = false
     @FocusState private var focusedAction: String?
     @FocusState private var accountGateFocused: Bool
     @AppStorage(SettingsKey.amoled) private var amoled = false
@@ -36,7 +37,7 @@ struct WatchPartyLobbyView: View {
                 } else if let room = service.session, let party = room.party {
                     roomContent(room, party: party)
                 } else {
-                    createAndJoinCards
+                    guestEntryContent
                 }
 
                 statusBlocks
@@ -67,6 +68,15 @@ struct WatchPartyLobbyView: View {
             guard oldCode == nil, newCode != nil else { return }
             focusedAction = owner.presentation == nil ? "choose-source" : "catch-up"
         }
+        .sheet(isPresented: $showingInvitation) {
+            if let party = service.session?.party, WatchPartyCode.isValid(party.code) {
+                WatchPartyLobbyInvitation(code: WatchPartyCode.normalize(party.code))
+            }
+        }
+        .onChange(of: service.session?.party?.id) { _, _ in
+            // Never keep an invitation visible after leaving or replacing a room.
+            showingInvitation = false
+        }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
                 onCancelSelection()
@@ -90,7 +100,9 @@ struct WatchPartyLobbyView: View {
                     .font(.system(size: 46, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
 
-                Text("Watch together in a private room. Everyone chooses their own source.")
+                Text(service.session?.party != nil
+                    ? "Watch together in a private room. Everyone chooses their own source."
+                    : "Have a room code? Join your friends here. Everyone chooses their own source.")
                     .font(.system(size: 22, weight: .regular))
                     .foregroundStyle(.white.opacity(0.72))
                     .fixedSize(horizontal: false, vertical: true)
@@ -152,53 +164,13 @@ struct WatchPartyLobbyView: View {
         .ignoresSafeArea()
     }
 
-    private var createAndJoinCards: some View {
-        HStack(alignment: .top, spacing: 24) {
-            joinRoomCard
-            createRoomCard
-        }
-    }
-
-    private var createRoomCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            cardHeading(
-                symbol: "plus.circle.fill",
-                title: "Create a room",
-                subtitle: "Choose a movie or episode, then invite everyone with your room code."
-            )
-
-            Spacer(minLength: 30)
-
-            Text("Rooms start paused. Press Play when your source is ready.")
-                .font(.system(size: 17))
-                .foregroundStyle(.white.opacity(0.62))
-                .padding(.bottom, 18)
-
-            Button {
-                owner.message = nil
-                onCreate()
-            } label: {
-                primaryActionLabel(
-                    symbol: "plus",
-                    title: "Choose a title",
-                    subtitle: "Start a new private room",
-                    isFocused: focusedAction == "create",
-                    emphasized: true
-                )
-            }
-            .buttonStyle(PosterCardButtonStyle())
-            .focusEffectDisabledIfAvailable()
-            .focused($focusedAction, equals: "create")
-            .onMoveCommand { direction in
-                if direction == .left {
-                    focusedAction = WatchPartyCode.isValid(code) ? "join" : "room-code"
-                }
-            }
-            .disabled(service.busy || operation != nil || service.membershipOutcomeUncertain)
-        }
-        .padding(32)
-        .frame(maxWidth: .infinity, minHeight: 400, alignment: .topLeading)
-        .modifier(LiquidGlassSurface(cornerRadius: 30, prominent: true))
+    /// Room creation now belongs to Details. The sidebar remains the single
+    /// entry and recovery point for invited guests and existing members.
+    /// Merge only after feat-watchparty-host-from-details is available.
+    private var guestEntryContent: some View {
+        joinRoomCard
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
     }
 
     private var joinRoomCard: some View {
@@ -284,7 +256,7 @@ struct WatchPartyLobbyView: View {
                     Text("Choose a profile to continue")
                         .font(.system(size: 28, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("Sign in and choose a profile to create or join a Watch Party.")
+                    Text("Sign in and choose a profile to join or return to a Watch Party.")
                         .font(.system(size: 20))
                         .foregroundStyle(.white.opacity(0.7))
                 }
@@ -512,6 +484,19 @@ struct WatchPartyLobbyView: View {
     private func roomActions(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             primaryRoomAction(room, party: party)
+
+            Button {
+                showingInvitation = true
+            } label: {
+                secondaryActionLabel(
+                    symbol: "qrcode",
+                    title: "Invite a friend",
+                    isFocused: focusedAction == "invite"
+                )
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focused($focusedAction, equals: "invite")
+            .disabled(service.busy || operation != nil || room.connection != .ready || room.membershipExit != nil || !WatchPartyCode.isValid(party.code))
 
             HStack(spacing: 14) {
                 if room.connection != .ready, room.membershipExit == nil {
@@ -891,5 +876,57 @@ struct WatchPartyLobbyView: View {
                 }
             }
         }
+    }
+}
+
+@MainActor
+private struct WatchPartyLobbyInvitation: View {
+    let code: String
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var doneFocused: Bool
+
+    // Android ActiveParty.inviteLink uses the same URL scheme and room code.
+    private var inviteLink: String { "nuvio://party/\(code)" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("Invite a friend")
+                .font(.system(size: 38, weight: .bold, design: .rounded))
+            HStack(alignment: .center, spacing: 32) {
+                if let qr = QRCode.image(from: inviteLink, scale: 12) {
+                    Image(uiImage: qr)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 260, height: 260)
+                        .padding(12)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                        .accessibilityLabel("QR invitation for Watch Party room \(code)")
+                }
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Scan with a compatible Nuvio app")
+                        .font(.system(size: 22, weight: .semibold))
+                    Text(WatchPartyCode.formatted(code))
+                        .font(.system(size: 37, weight: .bold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Text("Or enter this code in Watch Party. Each guest chooses their own source.")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .focused($doneFocused)
+            }
+        }
+        .padding(44)
+        .frame(width: 760)
+        .background(Color.black.ignoresSafeArea())
+        .onAppear { doneFocused = true }
+        .onExitCommand { dismiss() }
     }
 }
