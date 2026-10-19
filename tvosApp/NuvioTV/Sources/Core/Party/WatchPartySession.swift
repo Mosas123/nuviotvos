@@ -93,6 +93,9 @@ final class WatchPartySession {
     private var changeObservers: [UUID: @MainActor () -> Void] = [:]
     private var streamConsentNonce: UUID?
     private var sharedStreamRevision = UUID()
+    // Manual refresh is an existing Android-compatible state_request, not a new
+    // protocol or a durable server-side source lookup.
+    private var lastManualSourceRequestAt: Date?
     private var playbackMembershipID = UUID()
 
     /// Stable during reconnects, replaced on a true membership reset; contains no access token.
@@ -260,6 +263,7 @@ final class WatchPartySession {
         membershipExit = nil
         waitingCoordinator.reset()
         clearSharedStream()
+        lastManualSourceRequestAt = nil
         clock.reset()
     }
 
@@ -348,6 +352,28 @@ final class WatchPartySession {
         let epoch = generation, attempt = connectionID
         do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: nil), epoch: epoch) }
         catch { lost(epoch: epoch, attempt: attempt); throw error }
+    }
+
+    /// Request a fresh state broadcast from an online host using the existing
+    /// Android state_request wire contract. Android only resends the source if
+    /// the host explicitly enabled sharing and still has it in memory.
+    /// This does NOT persist the link, guarantee delivery or authorize playback.
+    /// Return false for a local cooldown; never queue or automatically retry.
+    func requestHostStreamRefresh() async throws -> Bool {
+        let epoch = generation
+        try requireReady(epoch)
+        guard let party, let memberID, let hostID = party.hostMemberID,
+              memberID != hostID, sharedStream == nil else {
+            throw WatchPartyStreamError.unavailable
+        }
+        let now = Date()
+        if let last = lastManualSourceRequestAt, now.timeIntervalSince(last) < 10 {
+            return false
+        }
+        // Record before awaiting; repeated remote presses cannot fan out sends.
+        lastManualSourceRequestAt = now
+        try await send("state_request", MemberPayload(memberID: memberID), epoch: epoch)
+        return true
     }
 
     /// Explicit guest selection returns all metadata, including response headers missing in NuvioStream.
