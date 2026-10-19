@@ -23,6 +23,27 @@ enum WatchPartyLaunchPolicy {
         }
     }
 
+    /// Room creation needs a canonical title/episode identity, not a stream URL.
+    /// A series must select an explicit episode before contacting the server.
+    static func mediaForDetails(_ meta: NuvioMeta, episode: NuvioVideo?) throws -> WatchPartyMedia {
+        let series = meta.isSeries
+        guard !series || episode != nil, series || episode == nil else {
+            throw WatchPartyLaunchError.unsupportedMedia
+        }
+        let media = WatchPartyMedia(
+            type: series ? "series" : "movie",
+            metaID: meta.streamId,
+            metaType: series ? "series" : "movie",
+            videoID: episode?.id,
+            season: episode?.season,
+            episode: episode?.episode,
+            title: meta.name,
+            episodeTitle: episode?.title
+        )
+        try validate(media)
+        return media
+    }
+
     static func validateSelection(_ selection: WatchPartyMedia, room: WatchPartyMedia) throws {
         try validate(selection)
         try validate(room)
