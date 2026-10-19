@@ -39,9 +39,8 @@ struct PlayerWatchPartyPanel: View {
             }
         }
         .onAppear {
-            focusedControlID = service.session?.party != nil
-                ? (owner.presentation?.mount.isCurrent == true ? "party.catchUp" : "party.invite")
-                : "party.lobby"
+            // Start at the visible invitation row, not an off-screen action.
+            focusedControlID = service.session?.party != nil ? "party.invite" : "party.lobby"
         }
         .alert("Invite a friend", isPresented: $showingInviteCode) {
             Button("Done", role: .cancel) {}
