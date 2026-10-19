@@ -73,7 +73,12 @@ final class WatchPartyRealtimeChannel: WatchPartyChannel {
             observers.append(Task { [weak self] in
                 for await object in stream {
                     guard let self, self.generation == attempt, self.isCurrent(context), !Task.isCancelled else { return }
-                    guard let payload = try? JSONEncoder().encode(object) else { continue }
+                    // The SDK object contains type/event/payload; domain decoders need
+                    // only the inner object. Never pass an unvalidated envelope through.
+                    guard let envelope = try? JSONEncoder().encode(object),
+                          let payload = try? WatchPartyChannelContract.broadcastPayload(
+                            from: envelope, expectedEvent: event
+                          ) else { continue }
                     receive(.message(name: event, payload: payload))
                 }
             })
