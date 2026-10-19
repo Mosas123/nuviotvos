@@ -2212,6 +2212,15 @@ struct ContentView: View {
                 selectedTab = .search
             },
             onChoosePartySource: { media in
+                // Recheck authoritative room identity before detaching the player or
+                // opening Details. A stale sidebar selection must not search the wrong title.
+                guard let room = watchPartyOwner.service?.session,
+                      room.connection == .ready, room.membershipExit == nil,
+                      let currentMedia = room.party?.media,
+                      (try? WatchPartyLaunchPolicy.validateSelection(media, room: currentMedia)) != nil else {
+                    watchPartyOwner.message = "The room or episode changed. Review the current room before choosing a source."
+                    return
+                }
                 creatingParty = false; choosingPartySource = true
                 watchPartyOwner.finishPlayback()
                 reopenStreamPickerOnDetails = true
