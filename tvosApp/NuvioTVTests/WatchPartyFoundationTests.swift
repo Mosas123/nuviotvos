@@ -69,6 +69,36 @@ final class WatchPartyFoundationTests: XCTestCase {
         ))
     }
 
+    func testWatchPartySharedSourceWireRoundTripPreservesSeparateHeaders() throws {
+        let source = WatchPartyStream(
+            mediaKey: "movie|tt1||",
+            url: "https://stream.example.test/play?token=EXAMPLE",
+            headers: ["User-Agent": "NuvioTV"],
+            responseHeaders: ["Content-Type": "video/mp4"],
+            name: "Host's source"
+        )
+        let message = WatchPartyStreamMessage(memberID: "host-id", stream: source)
+        let encoded = try JSONEncoder().encode(message)
+        let decoded = try JSONDecoder().decode(WatchPartyStreamMessage.self, from: encoded)
+        XCTAssertEqual(decoded.memberID, "host-id")
+        XCTAssertEqual(decoded.stream, source)
+        XCTAssertEqual(decoded.stream?.headers["User-Agent"], "NuvioTV")
+        XCTAssertEqual(decoded.stream?.responseHeaders["Content-Type"], "video/mp4")
+        XCTAssertNoThrow(try WatchPartyStreamPolicy.validate(source))
+
+        // Android uses an explicit null stream as the revocation signal.
+        let revoke = WatchPartyStreamMessage(memberID: "host-id", stream: nil)
+        let revokeData = try JSONEncoder().encode(revoke)
+        XCTAssertEqual(try JSONDecoder().decode(WatchPartyStreamMessage.self, from: revokeData).stream, nil)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: revokeData) as? [String: Any])
+        XCTAssertTrue(json["stream"] is NSNull)
+    }
+
+    func testWatchPartySharedSourceRejectsMissingRevocationField() {
+        let malformed = Data(#"{"member_id":"host-id"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(WatchPartyStreamMessage.self, from: malformed))
+    }
+
     func testTimelineRatePauseDurationAndClockSkewMatchAndroid() {
         XCTAssertEqual(WatchPartyPolicy.expectedPosition(playback(rate: 1.5), nowMs: 1_002_000), 13_000)
         XCTAssertEqual(WatchPartyPolicy.expectedPosition(playback(paused: true), nowMs: 1_500_000), 10_000)
