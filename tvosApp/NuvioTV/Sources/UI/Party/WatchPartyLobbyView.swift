@@ -307,28 +307,120 @@ struct WatchPartyLobbyView: View {
 
             Spacer(minLength: 20)
 
-            Button {
-                onCancelSelection()
-                run { try await service.join(code: code) }
-            } label: {
-                primaryActionLabel(
-                    symbol: "arrow.right",
-                    title: "Join room",
-                    subtitle: "Connect to a private room",
-                    isFocused: focusedAction == "join"
-                )
+            if let preview = roomPreview, previewCode == WatchPartyCode.normalize(code),
+               let media = preview.media {
+                roomPreviewCard(preview, media: media)
+            } else {
+                Button {
+                    let requestedCode = WatchPartyCode.normalize(code)
+                    let requestID = UUID()
+                    previewRequestID = requestID
+                    run {
+                        let result = try await service.preview(code: requestedCode)
+                        guard previewRequestID == requestID,
+                              WatchPartyCode.normalize(code) == requestedCode else { return }
+                        guard result.error == nil, let media = result.media else {
+                            owner.message = "Room preview unavailable. Check the invitation code."
+                            return
+                        }
+                        try WatchPartyLaunchPolicy.validate(media)
+                        roomPreview = result
+                        previewCode = requestedCode
+                        focusedAction = "join"
+                    }
+                } label: {
+                    primaryActionLabel(
+                        symbol: "eye",
+                        title: "Preview room",
+                        subtitle: "Check the host and exact movie or episode before joining",
+                        isFocused: focusedAction == "preview"
+                    )
+                }
+                .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
+                .focused($focusedAction, equals: "preview")
+                .onMoveCommand { direction in
+                    if direction == .right { focusedAction = "create" }
+                }
+                .disabled(service.busy || operation != nil || !WatchPartyCode.isValid(code)
+                    || service.membershipOutcomeUncertain)
             }
-            .buttonStyle(PosterCardButtonStyle())
-            .focusEffectDisabledIfAvailable()
-            .focused($focusedAction, equals: "join")
-            .onMoveCommand { direction in
-                if direction == .right { focusedAction = "create" }
-            }
-            .disabled(service.busy || operation != nil || !WatchPartyCode.isValid(code) || service.membershipOutcomeUncertain)
         }
         .padding(32)
         .frame(maxWidth: .infinity, minHeight: 400, alignment: .topLeading)
         .modifier(LiquidGlassSurface(cornerRadius: 30, prominent: true))
+    }
+
+    private func roomPreviewCard(_ preview: WatchPartyPreview, media: WatchPartyMedia) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("INVITATION PREVIEW")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.65))
+            HStack(alignment: .top, spacing: 14) {
+                if let raw = media.poster, let url = URL(string: raw),
+                   url.scheme?.lowercased() == "https" {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Color.white.opacity(0.08)
+                        }
+                    }
+                    .frame(width: 82, height: 122)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(media.title.isEmpty ? "Untitled room" : media.title)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    if let episode = episodeDescription(media) {
+                        Text(episode).font(.system(size: 17))
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                    Text("Hosted by \(preview.host.flatMap { $0.displayName.isEmpty ? nil : $0.displayName } ?? "Host")")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+            }
+            Text("\(preview.members) of \(preview.maxMembers) participants")
+                .font(.system(size: 15))
+                .foregroundStyle(.white.opacity(0.7))
+            Button {
+                let expectedCode = WatchPartyCode.normalize(code)
+                let expectedKey = media.key
+                onCancelSelection()
+                run {
+                    try await service.join(code: expectedCode)
+                    if let joined = service.session?.party,
+                       WatchPartyMediaReviewPolicy.needsConfirmation(
+                           previewKey: expectedKey, joinedKey: joined.media.key
+                       ) {
+                        reviewRoomID = joined.id
+                        reviewMediaKey = joined.media.key
+                        owner.message = "Room content changed since preview. Confirm the current title before choosing a source."
+                        focusedAction = "review-room"
+                    }
+                }
+            } label: {
+                primaryActionLabel(symbol: "checkmark.circle", title: "Join this room",
+                                   subtitle: "Confirm this movie or episode",
+                                   isFocused: focusedAction == "join")
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
+            .focused($focusedAction, equals: "join")
+            .disabled(service.busy || operation != nil || preview.isFull || service.membershipOutcomeUncertain)
+            Button("Change room code") {
+                previewRequestID = UUID()
+                roomPreview = nil
+                previewCode = nil
+                focusedAction = "room-code"
+            }
+            .buttonStyle(PosterCardButtonStyle())
+        }
+        .padding(18)
+        .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var accountGateCard: some View {
