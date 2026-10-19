@@ -56,6 +56,7 @@ struct DetailsScreen: View {
     @StateObject private var viewModel: DetailsViewModel
     @State private var isStreamPickerPresented = false
     @State private var isWatchPartyEpisodePickerPresented = false
+    @State private var pendingWatchPartySelection: (NuvioMeta, NuvioVideo)?
     @State private var isSmartPlaybackPending = false
     @State private var isPreparingPlayback = false
     @State private var isPreparingInitialPlayback = false
@@ -319,15 +320,23 @@ struct DetailsScreen: View {
             }
         }
         #if os(tvOS)
-        .fullScreenCover(isPresented: $isWatchPartyEpisodePickerPresented) {
+        .fullScreenCover(isPresented: $isWatchPartyEpisodePickerPresented, onDismiss: {
+            // Wait for the native focus hierarchy to dismiss before navigating.
+            guard let selection = pendingWatchPartySelection else { return }
+            pendingWatchPartySelection = nil
+            onCreateWatchParty?(selection.0, selection.1)
+        }) {
             if let meta = viewModel.uiState.meta {
                 WatchPartyDetailsEpisodePicker(
                     episodes: (meta.videos ?? []).filter { $0.episode > 0 && $0.season >= 0 },
                     onSelect: { episode in
+                        pendingWatchPartySelection = (meta, episode)
                         isWatchPartyEpisodePickerPresented = false
-                        onCreateWatchParty?(meta, episode)
                     },
-                    onCancel: { isWatchPartyEpisodePickerPresented = false }
+                    onCancel: {
+                        pendingWatchPartySelection = nil
+                        isWatchPartyEpisodePickerPresented = false
+                    }
                 )
             }
         }
