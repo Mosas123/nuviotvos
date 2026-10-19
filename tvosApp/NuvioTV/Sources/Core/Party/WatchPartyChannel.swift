@@ -26,6 +26,21 @@ enum WatchPartyChannelContract {
     static let events = ["state", "state_request", "status", "control", "member_joined",
                          "member_left", "ended", "media", "stream"]
 
+
+    /// Supabase broadcastStream yields the broadcast envelope, not its domain payload.
+    /// Keep envelope validation at the transport boundary; the session still validates
+    /// playback ordering, membership, host permissions and media identity.
+    static func broadcastPayload(from data: Data, expectedEvent: String) throws -> Data {
+        guard events.contains(expectedEvent),
+              let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              envelope["type"] as? String == "broadcast",
+              envelope["event"] as? String == expectedEvent,
+              let payload = envelope["payload"] as? [String: Any] else {
+            throw WatchPartyChannelError.invalidPayload
+        }
+        return try JSONSerialization.data(withJSONObject: payload)
+    }
+
     static func realtimeURL(configuration: ServerConfiguration) throws -> URL {
         guard !configuration.publishableKey.isEmpty,
               var c = URLComponents(string: configuration.normalizedBackendURL),
