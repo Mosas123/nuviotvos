@@ -1677,6 +1677,12 @@ struct ContentView: View {
     /// generation; membership and uncertain outcomes stay in WatchPartyService.
     private func createWatchPartyFromDetails(meta: NuvioMeta, episode: NuvioVideo?) {
         guard let service = watchPartyOwner.service, partyLaunchTask == nil else { return }
+        guard authManager.isAuthenticated, !authManager.sessionNeedsReauthentication,
+              profileViewModel.activeProfile != nil else {
+            selectedTab = .party
+            activeScreen = .main
+            return
+        }
         if service.session?.party != nil {
             selectedTab = .party
             activeScreen = .main
@@ -1695,6 +1701,7 @@ struct ContentView: View {
             watchPartyOwner.message = "Choose a valid movie or a specific episode to host a room."
             return
         }
+        watchPartyOwner.message = nil
         let mark = UUID()
         partyLaunchID = mark
         partyLaunchTask = Task { @MainActor in
