@@ -1673,6 +1673,52 @@ struct ContentView: View {
         )
     }
 
+    /// Host from Details without starting a stream. The server owns room-code
+    /// generation; membership and uncertain outcomes stay in WatchPartyService.
+    private func createWatchPartyFromDetails(meta: NuvioMeta, episode: NuvioVideo?) {
+        guard let service = watchPartyOwner.service, partyLaunchTask == nil else { return }
+        if service.session?.party != nil {
+            selectedTab = .party
+            activeScreen = .main
+            return
+        }
+        guard !service.busy, !service.membershipOutcomeUncertain else {
+            watchPartyOwner.message = "Check your previous room request before creating another."
+            selectedTab = .party
+            activeScreen = .main
+            return
+        }
+        let media: WatchPartyMedia
+        do {
+            media = try WatchPartyLaunchPolicy.mediaForDetails(meta, episode: episode)
+        } catch {
+            watchPartyOwner.message = "Choose a valid movie or a specific episode to host a room."
+            return
+        }
+        let mark = UUID()
+        partyLaunchID = mark
+        partyLaunchTask = Task { @MainActor in
+            defer { if partyLaunchID == mark { partyLaunchTask = nil } }
+            do {
+                try await service.create(media: media, playback: nil)
+                guard !Task.isCancelled, partyLaunchID == mark,
+                      watchPartyOwner.service === service else { return }
+                creatingParty = false
+                choosingPartySource = false
+                partyLaunchTask = nil
+                selectedTab = .party
+                activeScreen = .main
+            } catch {
+                guard !Task.isCancelled, partyLaunchID == mark,
+                      watchPartyOwner.service === service else { return }
+                watchPartyOwner.message = "Watch Party could not create the room. Check the room status before retrying."
+                partyLaunchTask = nil
+                selectedTab = .party
+                activeScreen = .main
+            }
+        }
+    }
+
     private func launchPartyPlayback(
         url: URL, meta: NuvioMeta, subtitle: String, httpHeaders: [String: String],
         externalSubtitles: [NuvioSubtitle], cacheFileIdentity: PlaybackCacheFileIdentity?,
@@ -2297,6 +2343,9 @@ struct ContentView: View {
                 }
             },
             onBack: { leaveDetails() },
+            onCreateWatchParty: { meta, episode in
+                createWatchPartyFromDetails(meta: meta, episode: episode)
+            },
             onOpenTitle: { nextId, nextType in
                 detailsBackStack.append((id: contentId, type: contentType))
                 withAnimation(.easeInOut(duration: 0.28)) {
