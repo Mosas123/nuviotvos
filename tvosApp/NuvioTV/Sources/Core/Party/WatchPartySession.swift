@@ -124,6 +124,19 @@ final class WatchPartySession {
         return !party.hostOnly || party.hostMemberID == memberID
     }
 
+    /// Apply a host permission change only from a matching, server-confirmed
+    /// snapshot. Reuses normal room notifications so the active player binding
+    /// immediately sees the updated hostOnly permission.
+    func acceptHostOnlySnapshot(_ snapshot: WatchPartySnapshot, enabled: Bool) throws {
+        try checkContext()
+        guard connection == .ready, let party, let memberID,
+              party.hostMemberID == memberID else { throw WatchPartySessionError.forbidden }
+        guard snapshot.error == nil, let updated = snapshot.party,
+              updated.id == party.id, updated.hostMemberID == party.hostMemberID,
+              updated.hostOnly == enabled else { throw WatchPartySessionError.invalidSnapshot }
+        try apply(snapshot)
+    }
+
     func nowMs() -> Int64 { clock.nowMs() }
 
     /// Does not repeat a create/join whose remote outcome may be ambiguous.
