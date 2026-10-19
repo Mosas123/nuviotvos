@@ -42,11 +42,9 @@ struct PlayerWatchPartyPanel: View {
             // Start at the visible invitation row, not an off-screen action.
             focusedControlID = service.session?.party != nil ? "party.invite" : "party.lobby"
         }
-        .alert("Invite a friend", isPresented: $showingInviteCode) {
-            Button("Done", role: .cancel) {}
-        } message: {
-            if let party = service.session?.party {
-                Text("Share this room code: \(WatchPartyCode.formatted(party.code)). Friends can enter it in Watch Party on any Nuvio app.")
+        .sheet(isPresented: $showingInviteCode) {
+            if let party = service.session?.party, WatchPartyCode.isValid(party.code) {
+                WatchPartyInviteSheet(code: WatchPartyCode.normalize(party.code))
             }
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
@@ -227,5 +225,55 @@ struct PlayerWatchPartyPanel: View {
         case .unavailable: return "Watch Party is unavailable on this server."
         case .network: return "The room request failed. Check your connection and room status."
         }
+    }
+}
+
+@MainActor
+private struct WatchPartyInviteSheet: View {
+    let code: String
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var dismissFocused: Bool
+
+    private var inviteLink: String { "nuvio://party/\(code)" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("Invite a friend")
+                .font(.system(size: 38, weight: .bold, design: .rounded))
+            HStack(alignment: .center, spacing: 32) {
+                if let image = QRCode.image(from: inviteLink, scale: 12) {
+                    Image(uiImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 260, height: 260)
+                        .padding(12)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                        .accessibilityLabel("QR code for joining Watch Party room \(code)")
+                }
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Scan with a compatible Nuvio app")
+                        .font(.system(size: 22, weight: .semibold))
+                    Text(WatchPartyCode.formatted(code))
+                        .font(.system(size: 37, weight: .bold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Text("Or enter this code in Watch Party. Each guest can choose their own source.")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .focused($dismissFocused)
+            }
+        }
+        .padding(44)
+        .frame(width: 760)
+        .onAppear { dismissFocused = true }
+        .onExitCommand { dismiss() }
     }
 }
