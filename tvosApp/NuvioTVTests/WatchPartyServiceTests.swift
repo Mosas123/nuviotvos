@@ -66,6 +66,21 @@ final class WatchPartyServiceTests: XCTestCase {
         XCTAssertFalse(remote.calls.contains("setHostOnly"))
     }
 
+    func testRejectedHostOnlyRequestKeepsPreviousPermission() async throws {
+        let env = environment(), remote = Remote()
+        let service = service(remote, environment: { env })
+        defer { service.invalidateContext() }
+        try await service.create(media: remote.media)
+        remote.rejectHostOnly = true
+        do {
+            try await service.setHostOnly(true)
+            XCTFail("Rejected host-only mutation must not be applied")
+        } catch {
+            XCTAssertEqual(error as? WatchPartyServiceError, .rejected(.unavailable))
+        }
+        XCTAssertFalse(try XCTUnwrap(service.session?.party).hostOnly)
+    }
+
     func testInvalidHostOnlyResponseDoesNotOptimisticallyChangePermission() async throws {
         let env = environment(), remote = Remote()
         let service = service(remote, environment: { env })
@@ -296,6 +311,7 @@ final class WatchPartyServiceTests: XCTestCase {
         var hostID = "me"
         var hostOnly = false
         var returnStaleHostOnlySnapshot = false
+        var rejectHostOnly = false
         var snapshot: WatchPartySnapshot {
             WatchPartySnapshot(party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: hostID,
                                                      hostOnly: hostOnly, media: media),
@@ -318,6 +334,7 @@ final class WatchPartyServiceTests: XCTestCase {
         func update(partyID: String, deviceID: String, media: WatchPartyMedia?, playback: WatchPartyPlayback?) async throws -> WatchPartySnapshot { calls.append("update"); return snapshot }
         func setHostOnly(partyID: String, deviceID: String, enabled: Bool) async throws -> WatchPartySnapshot {
             calls.append("setHostOnly")
+            if rejectHostOnly { return WatchPartySnapshot(error: "unavailable") }
             if returnStaleHostOnlySnapshot { return snapshot }
             hostOnly = enabled
             return snapshot
