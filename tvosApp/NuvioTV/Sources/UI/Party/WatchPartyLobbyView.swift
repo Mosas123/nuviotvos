@@ -201,10 +201,24 @@ struct WatchPartyLobbyView: View {
             Text("YOU'RE INVITED TO WATCH")
                 .font(.system(size: 15, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.65))
-            Text(media.title.isEmpty ? "Untitled room" : media.title)
-                .font(.system(size: 28, weight: .bold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
+            HStack(alignment: .top, spacing: 18) {
+                if let raw = media.poster, let url = URL(string: raw),
+                   url.scheme?.lowercased() == "https" {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Color.white.opacity(0.08)
+                        }
+                    }
+                    .frame(width: 96, height: 142)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                Text(media.title.isEmpty ? "Untitled room" : media.title)
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+            }
             if let episode = episodeDescription(media) {
                 Text(episode).font(.system(size: 18)).foregroundStyle(.white.opacity(0.85))
             }
@@ -339,6 +353,16 @@ struct WatchPartyLobbyView: View {
                         .font(.system(size: 19, weight: .medium))
                         .foregroundStyle(.white.opacity(0.7))
                 }
+                if let host = room.members.first(where: { $0.id == party.hostMemberID }) {
+                    Text("Hosted by \(host.displayName.isEmpty ? "Host" : host.displayName)")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                Text(owner.presentation?.mount.isCurrent == true
+                     ? "Playback is attached to this room."
+                     : "You're still in this room. Choose a source to watch again.")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.white.opacity(0.7))
             }
         }
         .padding(30)
