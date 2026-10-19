@@ -15,6 +15,9 @@ struct PlayerWatchPartyPanel: View {
     @State private var operation: Task<Void, Never>?
     @State private var message: String?
     @State private var endingRoom = false
+    @State private var showingStreamWarning = false
+    @State private var pendingStreamShare: WatchPartyStream?
+    @State private var hasSharedStream = false
     @State private var showingMemberRemovalConfirmation = false
     @State private var memberToRemove: WatchPartyMember?
     @State private var roomCodeQR: UIImage?
@@ -36,11 +39,30 @@ struct PlayerWatchPartyPanel: View {
             .padding(.bottom, 24)
         }
         .scrollClipDisabled()
-        .onDisappear { tabFocusRequestID = UUID() }
+        .onDisappear {
+            tabFocusRequestID = UUID()
+            pendingStreamShare = nil
+            showingStreamWarning = false
+        }
+        .sheet(isPresented: $showingStreamWarning, onDismiss: {
+            pendingStreamShare = nil
+        }) {
+            WatchPartyStreamRiskSheet { skipFutureWarning in
+                guard let pending = pendingStreamShare else { return }
+                showingStreamWarning = false
+                if skipFutureWarning {
+                    ProfileSettings.current.set(true, forKey: "nuvio.tv.party.hideStreamSharingWarning")
+                }
+                sendApprovedStream(pending)
+            }
+        }
         .onAppear {
             if let code = service.session?.party?.code { roomCodeQR = QRCode.image(from: code) }
         }
         .onChange(of: service.session?.party?.id) { oldID, newID in
+            pendingStreamShare = nil
+            showingStreamWarning = false
+            hasSharedStream = false
             if oldID == nil, newID != nil {
                 focusWatchPartyTabAfterRoomCreation()
             } else if oldID != nil, newID == nil {
@@ -265,19 +287,53 @@ struct PlayerWatchPartyPanel: View {
                     .onMoveCommand(perform: handleFocusMove)
                     .disabled(service.busy || operation != nil || room.connection != .ready)
 
-                    Button {} label: {
+                    let shareFocused = focusedControlID == "party.shareStream"
+                    Button {
+                        do {
+                            let source = try viewModel.watchPartyShareableStream(for: party.media)
+                            pendingStreamShare = source
+                            if ProfileSettings.current.bool(forKey: "nuvio.tv.party.hideStreamSharingWarning") {
+                                sendApprovedStream(source)
+                                pendingStreamShare = nil
+                            } else {
+                                showingStreamWarning = true
+                            }
+                        } catch {
+                            message = "This source can't be shared. Use a compatible HTTP source or let guests choose their own."
+                        }
+                    } label: {
                         actionLabel(
-                            title: "Share my stream",
-                            subtitle: "Unavailable in this player",
+                            title: "Share my stream · BETA",
+                            subtitle: "Share this playback link with guests (may expose Debrid tokens)",
                             symbol: "antenna.radiowaves.left.and.right",
-                            value: "Unavailable",
-                            isFocused: false,
-                            isEnabled: false
+                            value: hasSharedStream ? "Sent" : "Off",
+                            isFocused: shareFocused
                         )
                     }
                     .buttonStyle(PosterCardButtonStyle())
-                    .disabled(true)
+                    .focusEffectDisabledIfAvailable()
+                    .focused($focusedControlID, equals: "party.shareStream")
+                    .disabled(service.busy || operation != nil || room.connection != .ready
+                        || owner.presentation?.mount.isCurrent != true)
+                    if hasSharedStream {
+                        Button {
+                            run {
+                                try await room.stopSharingStream()
+                                hasSharedStream = false
+                            }
+                        } label: {
+                            actionLabel(title: "Stop sharing", subtitle: "Does not revoke links already received",
+                                        symbol: "xmark.shield", isFocused: focusedControlID == "party.stopSharing")
+                        }
+                        .buttonStyle(PosterCardButtonStyle())
+                        .focused($focusedControlID, equals: "party.stopSharing")
+                        .disabled(service.busy || operation != nil || room.connection != .ready)
+                    }
                 } else {
+                    if room.sharedStream != nil {
+                        PlayerPanelRow(title: "Host stream available · BETA",
+                                       subtitle: "Return to Watch Party to choose the shared source.")
+                    }
                     Text(party.hostOnly ? "Playback control is limited to the host." : "Playback control is shared with the room.")
                         .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(.white.opacity(0.72))
@@ -502,6 +558,26 @@ struct PlayerWatchPartyPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func sendApprovedStream(_ candidate: WatchPartyStream) {
+        guard let room = service.session, let party = room.party,
+              party.hostMemberID == room.memberID,
+              owner.presentation?.mount.isCurrent == true else { return }
+        // A source switch between warning and confirmation must not share the old URL.
+        do {
+            guard try viewModel.watchPartyShareableStream(for: party.media) == candidate else {
+                message = "The source changed. Review the new source before sharing."
+                return
+            }
+            let consent = try room.approveStreamSharing(candidate, origin: .directHTTP)
+            run {
+                try await room.shareStream(candidate, consent: consent)
+                hasSharedStream = true
+            }
+        } catch {
+            message = "This playback source is no longer shareable. Choose a compatible source."
+        }
+    }
+
     private func run(_ action: @escaping @MainActor () async throws -> Void) {
         guard !service.busy, operation == nil else { return }
         message = nil
@@ -564,5 +640,39 @@ struct PlayerWatchPartyPanel: View {
         case .unavailable: return "Watch Party is unavailable on this server."
         case .network: return "The room request failed. Check your connection and room status."
         }
+    }
+}
+
+@MainActor
+private struct WatchPartyStreamRiskSheet: View {
+    let onApprove: (Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var focusedCancel: Bool
+    @State private var hideWarningNextTime = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Label("Share your stream? · EXPERIMENTAL BETA", systemImage: "exclamationmark.shield.fill")
+                .font(.system(size: 30, weight: .bold))
+            Text("This shares your current playback URL and required HTTP headers with room members. The URL may contain Debrid tokens or other private access information. Guests may copy or reuse it. Stopping sharing cannot revoke a link already received, and your provider may restrict simultaneous use.")
+                .font(.system(size: 21))
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Only share with people you trust. The link is not end-to-end encrypted by this feature. Some sources may fail on another device.")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(.secondary)
+            Toggle("Don't show this warning again", isOn: $hideWarningNextTime)
+            HStack(spacing: 20) {
+                Button("Cancel") { dismiss() }
+                    .focused($focusedCancel)
+                Button("I understand, share this source") {
+                    onApprove(hideWarningNextTime)
+                    dismiss()
+                }
+            }
+        }
+        .padding(48)
+        .frame(width: 850)
+        .onAppear { focusedCancel = true }
+        .onExitCommand { dismiss() }
     }
 }
