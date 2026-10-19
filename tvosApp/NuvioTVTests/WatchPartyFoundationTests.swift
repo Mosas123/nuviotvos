@@ -59,9 +59,21 @@ final class WatchPartyFoundationTests: XCTestCase {
         for secret in ["SECRET_URL_TOKEN", "SECRET_HEADER_TOKEN", "SECRET_SOURCE_NAME"] {
             XCTAssertFalse(notice?.contains(secret) == true)
         }
-        XCTAssertNil(WatchPartySharedSourceNotice.text(
+        // A different episode must never be presented as a usable shared source.
+        let mismatch = WatchPartySharedSourceNotice.text(
             hostName: "Alex", stream: stream, mediaKey: "movie|different||",
             isGuest: true, connected: true
+        )
+        XCTAssertTrue(mismatch?.contains("No shared source available") == true)
+        let lateJoin = WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: nil, mediaKey: "movie|tt1||",
+            isGuest: true, connected: true
+        )
+        XCTAssertTrue(lateJoin?.contains("ask them to share it again") == true)
+        XCTAssertTrue(lateJoin?.contains("choose your own source") == true)
+        XCTAssertNil(WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: nil, mediaKey: "movie|tt1||",
+            isGuest: true, connected: false
         ))
         XCTAssertNil(WatchPartySharedSourceNotice.text(
             hostName: "Alex", stream: stream, mediaKey: "movie|tt1||",
