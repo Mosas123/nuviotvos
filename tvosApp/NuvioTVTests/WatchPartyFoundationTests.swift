@@ -9,6 +9,24 @@ final class WatchPartyFoundationTests: XCTestCase {
                            rate: rate, at: at, mediaKey: mediaKey, waiting: waiting)
     }
 
+    func testRoomSelectionRejectsWrongMovieAndWrongEpisode() throws {
+        let roomMovie = WatchPartyMedia(type: "movie", metaID: "tt001", metaType: "movie", title: "A")
+        let sameMovie = WatchPartyMedia(type: "movie", metaID: "tt001", metaType: "movie", title: "Different display title")
+        let wrongMovie = WatchPartyMedia(type: "movie", metaID: "tt002", metaType: "movie", title: "A")
+        XCTAssertNoThrow(try WatchPartyLaunchPolicy.validateSelection(sameMovie, room: roomMovie))
+        XCTAssertThrowsError(try WatchPartyLaunchPolicy.validateSelection(wrongMovie, room: roomMovie))
+
+        let roomEpisode = WatchPartyMedia(type: "series", metaID: "ttSeries", metaType: "series",
+                                          season: 2, episode: 3, title: "Series")
+        let correctEpisode = WatchPartyMedia(type: "series", metaID: "ttSeries", metaType: "series",
+                                             season: 2, episode: 3, title: "Renamed")
+        let wrongEpisode = WatchPartyMedia(type: "series", metaID: "ttSeries", metaType: "series",
+                                           season: 2, episode: 4, title: "Series")
+        XCTAssertNoThrow(try WatchPartyLaunchPolicy.validateSelection(correctEpisode, room: roomEpisode))
+        XCTAssertThrowsError(try WatchPartyLaunchPolicy.validateSelection(wrongEpisode, room: roomEpisode))
+        XCTAssertThrowsError(try WatchPartyLaunchPolicy.validateSelection(roomMovie, room: roomEpisode))
+    }
+
     func testTimelineRatePauseDurationAndClockSkewMatchAndroid() {
         XCTAssertEqual(WatchPartyPolicy.expectedPosition(playback(rate: 1.5), nowMs: 1_002_000), 13_000)
         XCTAssertEqual(WatchPartyPolicy.expectedPosition(playback(paused: true), nowMs: 1_500_000), 10_000)
