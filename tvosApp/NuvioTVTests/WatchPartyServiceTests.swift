@@ -34,6 +34,54 @@ final class WatchPartyServiceTests: XCTestCase {
         XCTAssertEqual(remote.calls.filter { $0 == "create" }.count, 1)
     }
 
+    func testHostOnlyControlUsesServerSnapshotAndUpdatesActiveRoom() async throws {
+        let env = environment(), remote = Remote()
+        let service = service(remote, environment: { env })
+        defer { service.invalidateContext() }
+        try await service.create(media: remote.media)
+        let room = try XCTUnwrap(service.session)
+        XCTAssertFalse(try XCTUnwrap(room.party).hostOnly)
+        try await service.setHostOnly(true)
+        XCTAssertTrue(try XCTUnwrap(room.party).hostOnly)
+        XCTAssertEqual(remote.calls.filter { $0 == "setHostOnly" }.count, 1)
+        try await service.setHostOnly(true)
+        XCTAssertEqual(remote.calls.filter { $0 == "setHostOnly" }.count, 1)
+        try await service.setHostOnly(false)
+        XCTAssertFalse(try XCTUnwrap(room.party).hostOnly)
+        XCTAssertEqual(remote.calls.filter { $0 == "setHostOnly" }.count, 2)
+    }
+
+    func testGuestCannotChangeHostOnlyPermission() async throws {
+        let env = environment(), remote = Remote()
+        remote.hostID = "someone-else"
+        let service = service(remote, environment: { env })
+        defer { service.invalidateContext() }
+        try await service.join(code: "ABC234")
+        do {
+            try await service.setHostOnly(true)
+            XCTFail("Guest must not mutate room permissions")
+        } catch {
+            XCTAssertEqual(error as? WatchPartySessionError, .forbidden)
+        }
+        XCTAssertFalse(remote.calls.contains("setHostOnly"))
+    }
+
+    func testInvalidHostOnlyResponseDoesNotOptimisticallyChangePermission() async throws {
+        let env = environment(), remote = Remote()
+        let service = service(remote, environment: { env })
+        defer { service.invalidateContext() }
+        try await service.create(media: remote.media)
+        remote.returnStaleHostOnlySnapshot = true
+        do {
+            try await service.setHostOnly(true)
+            XCTFail("Stale permission response must be rejected")
+        } catch {
+            XCTAssertEqual(error as? WatchPartySessionError, .invalidSnapshot)
+        }
+        XCTAssertFalse(try XCTUnwrap(service.session?.party).hostOnly)
+        XCTAssertEqual(remote.calls.filter { $0 == "setHostOnly" }.count, 1)
+    }
+
     func testRealtimeFailureKeepsMembershipWithoutRepeatingCreate() async throws {
         let env = environment(), remote = Remote(), channel = Channel()
         channel.openFails = true
@@ -245,8 +293,12 @@ final class WatchPartyServiceTests: XCTestCase {
         var createResult: WatchPartySnapshot?
         var onCreate: (@MainActor () async -> Void)?
         var joinedCode: String?
+        var hostID = "me"
+        var hostOnly = false
+        var returnStaleHostOnlySnapshot = false
         var snapshot: WatchPartySnapshot {
-            WatchPartySnapshot(party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: "me", media: media),
+            WatchPartySnapshot(party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: hostID,
+                                                     hostOnly: hostOnly, media: media),
                                members: [WatchPartyMember(id: "me", displayName: "Viewer")], memberID: "me", serverTimeMs: 100)
         }
         func enabled() async throws -> Bool { calls.append("enabled"); return isEnabled }
@@ -264,6 +316,12 @@ final class WatchPartyServiceTests: XCTestCase {
         func leave(partyID: String, deviceID: String) async throws -> WatchPartySnapshot { calls.append("leave"); return WatchPartySnapshot(ok: true) }
         func end(partyID: String, deviceID: String) async throws -> WatchPartySnapshot { calls.append("end"); return WatchPartySnapshot(ok: true) }
         func update(partyID: String, deviceID: String, media: WatchPartyMedia?, playback: WatchPartyPlayback?) async throws -> WatchPartySnapshot { calls.append("update"); return snapshot }
+        func setHostOnly(partyID: String, deviceID: String, enabled: Bool) async throws -> WatchPartySnapshot {
+            calls.append("setHostOnly")
+            if returnStaleHostOnlySnapshot { return snapshot }
+            hostOnly = enabled
+            return snapshot
+        }
     }
 
     @MainActor
