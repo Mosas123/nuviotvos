@@ -76,8 +76,8 @@ struct WatchPartyLobbyView: View {
             focusedAction = canUseAccount ? preferredRoomFocus : nil
         }
         .onChange(of: service.session?.party?.media.key) { oldKey, newKey in
-            guard let oldKey, let newKey, oldKey != newKey,
-                  let party = service.session?.party else { return }
+            guard WatchPartyMediaReviewPolicy.changed(from: oldKey, to: newKey),
+                  let party = service.session?.party, let newKey else { return }
             // A room can switch episodes while the user is browsing the sidebar.
             // Do not let a stale focused source button launch the new title silently.
             reviewRoomID = party.id
@@ -297,7 +297,10 @@ struct WatchPartyLobbyView: View {
                 onCancelSelection()
                 run {
                     try await service.join(code: expectedCode)
-                    if let joined = service.session?.party, joined.media.key != expectedMedia {
+                    if let joined = service.session?.party,
+                       WatchPartyMediaReviewPolicy.needsConfirmation(
+                           previewKey: expectedMedia, joinedKey: joined.media.key
+                       ) {
                         reviewRoomID = joined.id
                         reviewMediaKey = joined.media.key
                         owner.message = "The room changed its title or episode after preview. Confirm the current content before choosing a source."
@@ -523,7 +526,7 @@ struct WatchPartyLobbyView: View {
                     reviewRoomID = nil
                     reviewMediaKey = nil
                     owner.message = nil
-                    focusedAction = "choose-source"
+                    focusedAction = preferredRoomFocus
                 } label: {
                     primaryActionLabel(
                         symbol: "checkmark.shield",
