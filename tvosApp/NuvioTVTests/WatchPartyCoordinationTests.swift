@@ -60,6 +60,26 @@ final class WatchPartyCoordinationTests: XCTestCase {
         XCTAssertEqual(channel.stateRequestMemberIDs.count, 2)
     }
 
+    func testFailedManualSourceRefreshInvalidatesConnectionWithoutAutomaticReplay() async throws {
+        let remote = Remote(), channel = Channel()
+        remote.hostMemberID = "other"
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        XCTAssertEqual(channel.stateRequestMemberIDs.count, 1)
+        channel.failStateRequest = true
+        do {
+            _ = try await session.requestHostStreamRefresh()
+            XCTFail("Expected simulated transport failure")
+        } catch {
+            XCTAssertEqual(session.connection, .recovering)
+        }
+        XCTAssertEqual(channel.stateRequestMemberIDs.count, 1,
+                       "A failed send must not be replayed or sent twice")
+        XCTAssertNil(session.sharedStream)
+    }
+
     func testHostCannotRequestGuestSourceRefresh() async throws {
         let remote = Remote(), channel = Channel()
         let session = makeSession(remote, channel: channel, uptime: { 0 },
@@ -456,11 +476,13 @@ final class WatchPartyCoordinationTests: XCTestCase {
         var onState: ((WatchPartyPlayback) -> Void)?
         var states: [WatchPartyPlayback] = []
         var stateRequestMemberIDs: [String] = []
+        var failStateRequest = false
         func open(partyID: String, memberID: String, receive: @escaping @MainActor (WatchPartyChannelEvent) -> Void) async throws {
             isConnected = true; self.receive = receive
         }
         func send(event: String, payload: Data) async throws {
             if event == "state_request" {
+                if failStateRequest { throw WatchPartyChannelError.disconnected }
                 let value = try JSONSerialization.jsonObject(with: payload) as? [String: String]
                 stateRequestMemberIDs.append(value?["member_id"] ?? "")
             }
