@@ -110,6 +110,14 @@ struct WatchPartyLobbyView: View {
             accountGateFocused = !allowed
             focusedAction = allowed ? preferredRoomFocus : nil
         }
+        .onChange(of: service.busy) { _, busy in
+            if !busy && canUseAccount && focusedAction == nil && operation == nil {
+                focusedAction = preferredRoomFocus
+            }
+        }
+        .onChange(of: owner.presentation?.id) { _, _ in
+            if canUseAccount { focusedAction = preferredRoomFocus }
+        }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
                 onCancelSelection()
@@ -1082,7 +1090,13 @@ struct WatchPartyLobbyView: View {
         guard !service.busy, operation == nil else { return }
         owner.message = nil
         operation = Task { @MainActor in
-            defer { operation = nil }
+            defer {
+                operation = nil
+                // The service can become idle before this local operation releases.
+                if canUseAccount && focusedAction == nil {
+                    focusedAction = preferredRoomFocus
+                }
+            }
             do { try await action() }
             catch {
                 if !Task.isCancelled {
