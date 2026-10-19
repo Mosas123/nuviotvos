@@ -2225,6 +2225,16 @@ struct ContentView: View {
                 selectedTab = .search
             },
             onChoosePartySource: { media in
+                // Honor upstream beta gating. Never detach the current player
+                // for a stale or unauthorized Watch Party selection.
+                guard WatchPartyConfiguration.isEnabled,
+                      let room = watchPartyOwner.service?.session,
+                      room.connection == .ready, room.membershipExit == nil,
+                      let currentMedia = room.party?.media,
+                      (try? WatchPartyLaunchPolicy.validateSelection(media, room: currentMedia)) != nil else {
+                    watchPartyOwner.message = "The room or episode changed. Review the current room before choosing a source."
+                    return
+                }
                 creatingParty = false; choosingPartySource = true
                 watchPartyOwner.finishPlayback()
                 reopenStreamPickerOnDetails = true
