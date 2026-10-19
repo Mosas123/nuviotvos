@@ -93,6 +93,8 @@ final class WatchPartySession {
     private var changeObservers: [UUID: @MainActor () -> Void] = [:]
     private var streamConsentNonce: UUID?
     private var sharedStreamRevision = UUID()
+    // Android-compatible manual state_request; not durable room storage.
+    private var lastManualSourceRequestAt: Date?
     private var playbackMembershipID = UUID()
 
     /// Stable during reconnects, replaced on a true membership reset; contains no access token.
@@ -260,6 +262,7 @@ final class WatchPartySession {
         membershipExit = nil
         waitingCoordinator.reset()
         clearSharedStream()
+        lastManualSourceRequestAt = nil
         clock.reset()
     }
 
@@ -348,6 +351,31 @@ final class WatchPartySession {
         let epoch = generation, attempt = connectionID
         do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: nil), epoch: epoch) }
         catch { lost(epoch: epoch, attempt: attempt); throw error }
+    }
+
+    /// Requests an Android-compatible host resend only when a guest explicitly asks.
+    /// No server persistence, automatic retry, or implied playback authorization.
+    func requestHostStreamRefresh() async throws -> Bool {
+        let epoch = generation
+        try requireReady(epoch)
+        guard let party, let memberID, let hostID = party.hostMemberID,
+              memberID != hostID, sharedStream == nil else {
+            throw WatchPartyStreamError.unavailable
+        }
+        let now = Date()
+        if let last = lastManualSourceRequestAt, now.timeIntervalSince(last) < 10 {
+            return false
+        }
+        lastManualSourceRequestAt = now
+        let attempt = connectionID
+        do {
+            try await send("state_request", MemberPayload(memberID: memberID), epoch: epoch)
+            return true
+        } catch {
+            // Ambiguous delivery: never replay automatically; reconcile first.
+            lost(epoch: epoch, attempt: attempt)
+            throw error
+        }
     }
 
     /// Explicit guest selection returns all metadata, including response headers missing in NuvioStream.
