@@ -31,7 +31,7 @@ struct WatchPartyLobbyView: View {
                 } else if let room = service.session, let party = room.party {
                     roomContent(room, party: party)
                 } else {
-                    createAndJoinCards
+                    guestEntryContent
                 }
 
                 statusBlocks
@@ -70,7 +70,9 @@ struct WatchPartyLobbyView: View {
                     .font(.system(size: 46, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
 
-                Text("Watch together in a private room. Everyone chooses their own source.")
+                Text(service.session?.party != nil
+                    ? "Watch together in a private room. Everyone chooses their own source."
+                    : "Have a room code? Join your friends here. Everyone chooses their own source.")
                     .font(.system(size: 22, weight: .regular))
                     .foregroundStyle(.white.opacity(0.72))
                     .fixedSize(horizontal: false, vertical: true)
@@ -79,46 +81,44 @@ struct WatchPartyLobbyView: View {
         .padding(.bottom, 4)
     }
 
-    private var createAndJoinCards: some View {
-        HStack(alignment: .top, spacing: 24) {
+    /// Guests can join immediately without choosing a title. Until hosting is
+    /// available from Details, keep the existing creation flow reachable here.
+    private var guestEntryContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
             joinRoomCard
-            createRoomCard
+            hostEntryFallback
         }
+        .frame(maxWidth: 760, alignment: .leading)
+        .frame(maxWidth: .infinity)
     }
 
-    private var createRoomCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            cardHeading(
-                symbol: "plus.circle.fill",
-                title: "Create a room",
-                subtitle: "Choose a movie or episode, then invite everyone with your room code."
-            )
-
-            Spacer(minLength: 30)
-
+    private var hostEntryFallback: some View {
+        HStack(spacing: 24) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Hosting instead?")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("Choose a movie or episode to create your room.")
+                    .font(.system(size: 17))
+                    .foregroundStyle(.white.opacity(0.68))
+            }
+            Spacer(minLength: 12)
             Button {
                 owner.message = nil
                 onCreate()
             } label: {
-                primaryActionLabel(
-                    symbol: "plus",
+                secondaryActionLabel(
+                    symbol: "plus.circle",
                     title: "Choose a title",
-                    subtitle: "Start a new private room",
                     isFocused: focusedAction == "create"
                 )
             }
             .buttonStyle(PosterCardButtonStyle())
             .focused($focusedAction, equals: "create")
             .disabled(service.busy || operation != nil || service.membershipOutcomeUncertain)
-
-            Text("Rooms start paused. Press Play when your source is ready.")
-                .font(.system(size: 17))
-                .foregroundStyle(.white.opacity(0.62))
-                .padding(.top, 18)
         }
-        .padding(32)
-        .frame(maxWidth: .infinity, minHeight: 400, alignment: .topLeading)
-        .modifier(LiquidGlassSurface(cornerRadius: 30, prominent: true))
+        .padding(24)
+        .modifier(LiquidGlassSurface(cornerRadius: 22))
     }
 
     private var joinRoomCard: some View {
