@@ -125,16 +125,13 @@ struct WatchPartyLobbyView: View {
 
     private var preferredRoomFocus: String? {
         let room = service.session
-        if requiresMediaReview, !service.busy && operation == nil,
-           room?.connection == .ready && room?.membershipExit == nil {
-            return "review-room"
-        }
         return WatchPartyRoomFocusPolicy.initialAction(
             hasRoom: room?.party != nil,
             membershipEnded: room?.membershipExit != nil,
             connectionReady: room?.connection == .ready,
             playerAttached: owner.presentation?.mount.isCurrent == true,
-            busy: service.busy || operation != nil
+            busy: service.busy || operation != nil,
+            needsMediaReview: requiresMediaReview
         )
     }
 
