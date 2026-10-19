@@ -37,7 +37,7 @@ struct WatchPartyLobbyView: View {
                 } else if let room = service.session, let party = room.party {
                     roomContent(room, party: party)
                 } else {
-                    guestEntryContent
+                    createAndJoinCards
                 }
 
                 statusBlocks
@@ -100,9 +100,7 @@ struct WatchPartyLobbyView: View {
                     .font(.system(size: 46, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
 
-                Text(service.session?.party != nil
-                    ? "Watch together in a private room. Everyone chooses their own source."
-                    : "Have a room code? Join your friends here. Everyone chooses their own source.")
+                Text("Watch together in a private room. Everyone chooses their own source.")
                     .font(.system(size: 22, weight: .regular))
                     .foregroundStyle(.white.opacity(0.72))
                     .fixedSize(horizontal: false, vertical: true)
@@ -164,13 +162,53 @@ struct WatchPartyLobbyView: View {
         .ignoresSafeArea()
     }
 
-    /// Room creation now belongs to Details. The sidebar remains the single
-    /// entry and recovery point for invited guests and existing members.
-    /// Merge only after feat-watchparty-host-from-details is available.
-    private var guestEntryContent: some View {
-        joinRoomCard
-            .frame(maxWidth: 760)
-            .frame(maxWidth: .infinity)
+    private var createAndJoinCards: some View {
+        HStack(alignment: .top, spacing: 24) {
+            joinRoomCard
+            createRoomCard
+        }
+    }
+
+    private var createRoomCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            cardHeading(
+                symbol: "plus.circle.fill",
+                title: "Create a room",
+                subtitle: "Choose a movie or episode, then invite everyone with your room code."
+            )
+
+            Spacer(minLength: 30)
+
+            Text("Rooms start paused. Press Play when your source is ready.")
+                .font(.system(size: 17))
+                .foregroundStyle(.white.opacity(0.62))
+                .padding(.bottom, 18)
+
+            Button {
+                owner.message = nil
+                onCreate()
+            } label: {
+                primaryActionLabel(
+                    symbol: "plus",
+                    title: "Choose a title",
+                    subtitle: "Start a new private room",
+                    isFocused: focusedAction == "create",
+                    emphasized: true
+                )
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
+            .focused($focusedAction, equals: "create")
+            .onMoveCommand { direction in
+                if direction == .left {
+                    focusedAction = WatchPartyCode.isValid(code) ? "join" : "room-code"
+                }
+            }
+            .disabled(service.busy || operation != nil || service.membershipOutcomeUncertain)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, minHeight: 400, alignment: .topLeading)
+        .modifier(LiquidGlassSurface(cornerRadius: 30, prominent: true))
     }
 
     private var joinRoomCard: some View {
@@ -256,7 +294,7 @@ struct WatchPartyLobbyView: View {
                     Text("Choose a profile to continue")
                         .font(.system(size: 28, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("Sign in and choose a profile to join or return to a Watch Party.")
+                    Text("Sign in and choose a profile to create or join a Watch Party.")
                         .font(.system(size: 20))
                         .foregroundStyle(.white.opacity(0.7))
                 }
