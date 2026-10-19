@@ -75,6 +75,57 @@ final class WatchPartyCoordinationTests: XCTestCase {
         XCTAssertEqual(channel.stateRequestMemberIDs, ["me"])
     }
 
+    func testGuestAcceptsOnlyCurrentHostStreamAndRevocationInvalidatesSelection() async throws {
+        let remote = Remote(), channel = Channel()
+        remote.hostMemberID = "other"
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        let source = WatchPartyStream(
+            mediaKey: "movie|tt1||", url: "https://example.test/video?token=private",
+            headers: ["User-Agent": "NuvioTV"],
+            responseHeaders: ["Content-Type": "video/mp4"]
+        )
+        func deliver(_ member: String, _ source: WatchPartyStream?) throws {
+            let payload = try JSONEncoder().encode(WatchPartyStreamMessage(memberID: member, stream: source))
+            channel.receive?(.message(name: "stream", payload: payload))
+        }
+        try deliver("not-the-host", source)
+        XCTAssertNil(session.sharedStream, "An unrelated participant cannot inject a source")
+        var wrong = source
+        wrong.mediaKey = "movie|tt2||"
+        try deliver("other", wrong)
+        XCTAssertNil(session.sharedStream, "The exact room movie or episode must match")
+        try deliver("other", source)
+        XCTAssertEqual(session.sharedStream, source)
+        let selected = try session.selectSharedStream(source)
+        XCTAssertEqual(selected.candidate.responseHeaders["Content-Type"], "video/mp4")
+        XCTAssertTrue(session.isCurrentSharedStreamSelection(selected))
+        try deliver("other", nil)
+        XCTAssertNil(session.sharedStream)
+        XCTAssertFalse(session.isCurrentSharedStreamSelection(selected),
+                       "A revoked source must not remain playable through an old selection")
+        XCTAssertThrowsError(try session.selectSharedStream(source))
+    }
+
+    func testGuestSourceSelectionInvalidatedOnConnectionLoss() async throws {
+        let remote = Remote(), channel = Channel()
+        remote.hostMemberID = "other"
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        let source = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://example.test/video")
+        let payload = try JSONEncoder().encode(WatchPartyStreamMessage(memberID: "other", stream: source))
+        channel.receive?(.message(name: "stream", payload: payload))
+        let selected = try session.selectSharedStream(source)
+        XCTAssertTrue(session.isCurrentSharedStreamSelection(selected))
+        channel.receive?(.disconnected)
+        XCTAssertNil(session.sharedStream)
+        XCTAssertFalse(session.isCurrentSharedStreamSelection(selected))
+    }
+
     func testFourClockSamplesKeepConnectionReadyWhenOneRefinementFails() async throws {
         let remote = Remote(), channel = Channel()
         let refined = expectation(description: "Four total clock RPC samples attempted")
