@@ -150,10 +150,27 @@ final class WatchPartyPlaybackBinding {
             return
         }
         guard next != state else { return } // Presence updates must not revoke playback effects.
+        let remoteTransition: Bool
+        if let playback = next.playback, playback.memberID != next.memberID,
+           playback.paused != state.playback?.paused {
+            remoteTransition = true
+            PlaybackTimelineRecorder.record(playback.paused ? .partyPauseBindingObserved : .partyPlayBindingObserved)
+        } else {
+            remoteTransition = false
+        }
         revision = UUID()
         state = next
         blocked = nil
         worker?.cancel() // Keep its slot until the cancelled effect actually returns.
+        if remoteTransition {
+            if isBehind {
+                PlaybackTimelineRecorder.record(.partyBindingDeferredBehind)
+            } else if localBusy || worker != nil {
+                PlaybackTimelineRecorder.record(.partyBindingDeferredBusy)
+            } else if usableSample() == nil {
+                PlaybackTimelineRecorder.record(.partyBindingDeferredSample)
+            }
+        }
         if next.canControl { isBehind = false; behindMs = nil }
         if !next.connected {
             lastApplied = nil
@@ -250,8 +267,12 @@ final class WatchPartyPlaybackBinding {
 
     private func startRemote(_ playback: WatchPartyPlayback, sample initial: WatchPartyPlayerSample, needsSeek: Bool) {
         let mark = revision
+        let traceTransport = playback.memberID != memberID && playback.paused != initial.paused
         worker = Task { [weak self] in
             guard let self else { return }
+            if traceTransport {
+                PlaybackTimelineRecorder.record(playback.paused ? .partyRemotePauseStarted : .partyRemotePlayStarted)
+            }
             defer {
                 self.worker = nil
                 if !self.stopped, self.revision != mark { self.reconcile() }
@@ -289,8 +310,10 @@ final class WatchPartyPlaybackBinding {
                                                 origin: origin, isAdmitted: permit)
                 guard permit() else { throw WatchPartyPlaybackBindingError.staleOperation }
                 self.lastApplied = (playback, initial.stamp)
+                if traceTransport { PlaybackTimelineRecorder.record(.partyRemoteTransportIssued) }
             } catch {
                 if self.active, self.revision == mark, !(error is CancellationError) {
+                    if traceTransport { PlaybackTimelineRecorder.record(.partyRemoteEffectFailed) }
                     self.blocked = (mark, initial.stamp)
                     self.onError?(error)
                 }
