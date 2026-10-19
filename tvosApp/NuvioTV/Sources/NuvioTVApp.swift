@@ -2250,6 +2250,29 @@ struct ContentView: View {
                 }
                 openDetailsRoot(id: media.metaID, type: media.metaType)
             },
+            onReturnPartyPlayback: {
+                let pip = PictureInPictureManager.shared
+                guard WatchPartyConfiguration.isEnabled,
+                      let service = watchPartyOwner.service, let room = service.session,
+                      room.connection == .ready, room.membershipExit == nil,
+                      let presentation = watchPartyOwner.presentation,
+                      presentation.mount.isCurrent,
+                      let context = room.playbackContext, context == presentation.context,
+                      service.isCurrent(context.request),
+                      let coordinator = pip.activeCoordinator,
+                      watchPartyOwner.owns(coordinator) else {
+                    watchPartyOwner.message = "Playback is no longer available. Review the room and choose your source again."
+                    return
+                }
+                watchPartyOwner.message = nil
+                let started = pip.restoreFullscreen(for: coordinator) { success in
+                    guard !success, watchPartyOwner.presentation?.id == presentation.id else { return }
+                    watchPartyOwner.message = "Could not return to the player. Try expanding the Picture in Picture window."
+                }
+                if !started {
+                    watchPartyOwner.message = "The player is not available to restore right now."
+                }
+            },
             partyIsChoosing: creatingParty || choosingPartySource,
             onCancelPartySelection: {
                 creatingParty = false; choosingPartySource = false
@@ -3542,6 +3565,7 @@ private struct TVMainTabView: View {
     @ObservedObject var watchPartyOwner: WatchPartyAppOwner
     let onCreateParty: () -> Void
     let onChoosePartySource: (WatchPartyMedia) -> Void
+    let onReturnPartyPlayback: () -> Void
     let partyIsChoosing: Bool
     let onCancelPartySelection: () -> Void
     let onSwitchProfile: () -> Void
@@ -3804,7 +3828,8 @@ private struct TVMainTabView: View {
             WatchPartyLobbyView(owner: watchPartyOwner, service: service,
                 canUseAccount: isAuthenticated && !sessionNeedsReauthentication && activeProfile != nil,
                 isChoosing: partyIsChoosing, onCreate: onCreateParty,
-                onChooseSource: onChoosePartySource, onCancelSelection: onCancelPartySelection,
+                onChooseSource: onChoosePartySource, onReturnPlayer: onReturnPartyPlayback,
+                onCancelSelection: onCancelPartySelection,
                 onOpenProfile: onSwitchProfile)
         } else {
             Text("Sign in and choose a profile to use Watch Party.")
