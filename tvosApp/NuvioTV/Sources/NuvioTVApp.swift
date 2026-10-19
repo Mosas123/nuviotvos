@@ -3555,41 +3555,44 @@ private struct TVSidebarProfileHeader: View {
             headerContent
         }
         .buttonStyle(PosterCardButtonStyle())
+        .scaleEffect(isFocused ? 1.05 : 1.0, anchor: .leading)
+        .animation(.spring(response: 0.28, dampingFraction: 0.78), value: isFocused)
         .focused($isFocused)
         .focusEffectDisabled()
-        .animation(.easeInOut(duration: 0.2), value: isFocused)
     }
 
     private var headerContent: some View {
         HStack(spacing: 12) {
             TVSidebarAvatar(profile: profile, isFocused: isFocused)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(displayName)
-                    .font(.system(size: 26, weight: .semibold))
+                    .font(.system(size: 21, weight: .semibold))
                     .foregroundColor(.white)
                     .lineLimit(1)
-                    .layoutPriority(1)
+                    .minimumScaleFactor(0.85)
 
                 if isFocused {
                     Text(L10n.string("profile_change", fallback: "Change Profile"))
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundColor(.white.opacity(0.72))
                         .lineLimit(1)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
-            .layoutPriority(1)
 
             Spacer(minLength: 8)
 
             TVSidebarClock()
-                .font(.system(size: 23, weight: .medium))
+                .font(.system(size: 20, weight: .medium))
                 .foregroundColor(.white.opacity(0.68))
-                .frame(width: 140, alignment: .trailing)
+                .fixedSize(horizontal: true, vertical: false)
+                .opacity(isFocused ? 0 : 1)
+                .animation(isFocused ? .easeOut(duration: 0.12) : .easeInOut(duration: 0.25), value: isFocused)
+                .accessibilityHidden(isFocused)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
         .contentShape(Rectangle())
     }
 
@@ -3605,13 +3608,14 @@ private struct TVSidebarAvatar: View {
     var body: some View {
         ProfileAvatarView(
             avatarId: profile?.avatarId ?? ProfileAvatarCatalog.defaultId,
-            size: 44,
-            isFocused: isFocused
+            size: 54,
+            isFocused: isFocused,
+            showsFocusOutline: false
         )
-        .scaleEffect(isFocused ? 1.12 : 1)
-        .offset(y: isFocused ? -3 : 0)
-        .shadow(color: .black.opacity(isFocused ? 0.32 : 0), radius: 12, x: 0, y: 8)
-        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isFocused)
+        .scaleEffect(isFocused ? 1.15 : 1)
+        .offset(y: isFocused ? -2 : 0)
+        .shadow(color: .black.opacity(isFocused ? 0.42 : 0), radius: isFocused ? 16 : 0, x: 0, y: isFocused ? 8 : 0)
+        .animation(.spring(response: 0.28, dampingFraction: 0.78), value: isFocused)
     }
 }
 
@@ -3940,6 +3944,7 @@ struct TVHomeView: View {
     /// context (episode line, time left) for cards focused in that row.
     @State private var focusedSectionId: String?
     @State private var landscapeFocusedId: String?
+    @State private var lastAccountRefreshRequestedAt: Date?
     @State private var focusWork = TVHomeFocusWork()
     @State private var rowScrollStore = TVHomeRowScrollStore()
     @State private var homeReloadTask: Task<Void, Never>?
@@ -4152,19 +4157,12 @@ struct TVHomeView: View {
                     // focus swaps poster meta for emoji + folder title (browse-style).
                     if heroEnabled && homeLayout != "Grid View" {
                         if let folder = focusedCollectionFolder {
-                            TVCollectionFolderHeroView(
-                                folder: folder,
-                                sectionTitle: heroCollectionSection?.title
-                            )
-                            .equatable()
+                            TVCollectionFolderHeroView(folder: folder)
+                                .equatable()
                         } else if let heroMeta = visibleFocusedMeta ?? visibleHero {
-                            let catalogSection = heroCatalogSection
                             TVHeroView(
                                 meta: heroMeta,
-                                continueItem: heroContinueItem(for: heroMeta),
-                                catalogTitle: catalogSection?.title,
-                                catalogAddonName: catalogSection?.addonName,
-                                showsCatalogAddonName: catalogAddonNames
+                                continueItem: heroContinueItem(for: heroMeta)
                             ) {
                                 navigateToDetailsFromHome(id: heroMeta.id, type: heroMeta.type)
                             }
@@ -4193,10 +4191,8 @@ struct TVHomeView: View {
                                 heroBleed: horizontalEdgeInset
                             )
                         } else {
-                            // Native lazy vertical scrolling for the rows. The
-                            // focused row ±2 window controls real card/artwork
-                            // materialization; lazy mounting limits row work
-                            // outside the viewport without changing row geometry.
+                            // Keep row shells mounted for native tvOS Up/Down focus.
+                            // The focused row ±2 window limits real card/artwork work.
                             ScrollViewReader { verticalScrollProxy in
                                 ScrollView(.vertical, showsIndicators: false) {
                                     VStack(alignment: .leading, spacing: TVHomeLayout.sectionSpacing) {
@@ -4277,28 +4273,28 @@ struct TVHomeView: View {
                                             }
                                         }
                                     }
-                                    .onChange(of: overlayRestoreCardID) { oldTarget, newTarget in
-                                        guard let target = oldTarget,
-                                              newTarget == nil,
+                                    .onChange(of: overlayRestoreGeneration) { _, generation in
+                                        guard let target = overlayRestoreCardID,
                                               isActive,
                                               !isFullScreenOverlayPresented,
-                                              focusedCardID == target,
                                               let sectionID = visibleSections
                                                 .filter({ target.hasPrefix("\($0.id)\u{1}") })
                                                 .max(by: { $0.id.count < $1.id.count })?.id
                                         else { return }
-                                        let generation = overlayRestoreGeneration
+                                        var transaction = Transaction(animation: nil)
+                                        transaction.disablesAnimations = true
+                                        withTransaction(transaction) {
+                                            verticalScrollProxy.scrollTo(sectionID, anchor: .top)
+                                        }
                                         DispatchQueue.main.async {
                                             guard overlayRestoreGeneration == generation,
                                                   isActive,
                                                   !isFullScreenOverlayPresented,
-                                                  overlayRestoreCardID == nil,
-                                                  focusedCardID == target,
                                                   visibleSections.contains(where: { $0.id == sectionID })
                                             else { return }
-                                            var transaction = Transaction(animation: nil)
-                                            transaction.disablesAnimations = true
-                                            withTransaction(transaction) {
+                                            var asyncTransaction = Transaction(animation: nil)
+                                            asyncTransaction.disablesAnimations = true
+                                            withTransaction(asyncTransaction) {
                                                 verticalScrollProxy.scrollTo(sectionID, anchor: .top)
                                             }
                                         }
@@ -4378,10 +4374,12 @@ struct TVHomeView: View {
             if isActive {
                 if let lastFocused = store.lastFocusedCardID {
                     armReturnFocusAnimationSuppression()
-                    if focusedCardID == nil {
-                        pendingInitialFocusCardKey = lastFocused
-                        didRequestInitialCardFocus = false
-                        didPrepareInitialFocusViewport = false
+                    pendingInitialFocusCardKey = lastFocused
+                    didRequestInitialCardFocus = false
+                    didPrepareInitialFocusViewport = false
+                    restoreFocusState(for: lastFocused)
+                    if focusedCardID != lastFocused {
+                        focusedCardID = lastFocused
                     }
                 } else if focusedCardID == nil, let defaultFocus = initialDefaultFocusCardID {
                     focusedCardID = defaultFocus
@@ -4464,10 +4462,14 @@ struct TVHomeView: View {
                 if !suppressReturnFocusAnimations {
                     armReturnFocusAnimationSuppression()
                 }
-                if let lastFocused = store.lastFocusedCardID, focusedCardID == nil {
+                if let lastFocused = store.lastFocusedCardID {
                     pendingInitialFocusCardKey = lastFocused
                     didRequestInitialCardFocus = false
                     didPrepareInitialFocusViewport = false
+                    restoreFocusState(for: lastFocused)
+                    if focusedCardID != lastFocused {
+                        focusedCardID = lastFocused
+                    }
                 }
                 if focusedCardID != nil {
                     releaseReturnFocusAnimationSuppression()
@@ -4767,8 +4769,9 @@ struct TVHomeView: View {
                     if isActive {
                         releaseReturnFocusAnimationSuppression()
                     }
-                    if isEnabled, overlayRestoreCardID != nil {
-                        completeOverlayFocusRestore(for: newValue)
+                    if isEnabled, let target = overlayRestoreCardID, newValue == target {
+                        focusWork.acknowledgedNativeOverlayFocusCardID = target
+                        completeOverlayFocusRestore(for: target)
                     }
                 }
             }
@@ -4812,10 +4815,7 @@ struct TVHomeView: View {
             TVHomeDebugTrace.log(
                 "home.details.disappeared generation=\(generation) restoring target=\(target)"
             )
-            if let rowIndex = visibleSections.firstIndex(where: { target.hasPrefix("\($0.id)\u{1}") }) {
-                focusedRowIndex = rowIndex
-                focusedSectionId = visibleSections[rowIndex].id
-            }
+            restoreFocusState(for: target)
             // Re-acquire the one-card lock instead of assigning focus directly.
             // On the first frames after Details fades out, the row has not
             // re-rendered with its restriction yet, so a bare assignment lets
@@ -5274,6 +5274,7 @@ struct TVHomeView: View {
             // Build the restriction only on return. Details may still be
             // finishing its opacity transition, so use the short retry window
             // instead of relying on a single onDisappear callback ordering.
+            restoreFocusState(for: target)
             armReturnFocusAnimationSuppression()
             overlayRestoreGeneration &+= 1
             TVHomeDebugTrace.log("home.overlay.dismissal restoring to target=\(target) gen=\(overlayRestoreGeneration)")
@@ -5289,9 +5290,52 @@ struct TVHomeView: View {
                 focusWork.acknowledgedNativeOverlayFocusCardID = nil
                 return
             }
+            restoreFocusState(for: target)
             overlayRestoreCardID = target
             TVHomeDebugTrace.log("home.overlay.dismissal fallback restoring to target=\(target) gen=\(overlayRestoreGeneration)")
             restoreOverlayFocus(to: target, generation: overlayRestoreGeneration)
+        }
+    }
+
+    private func restoreFocusState(for rawTarget: String) {
+        guard let target = validRestoreTarget(rawTarget) ?? (rawTarget.isEmpty ? nil : rawTarget) else { return }
+        for (sectionIndex, section) in visibleSections.enumerated() {
+            let prefix = "\(section.id)\u{1}"
+            guard target.hasPrefix(prefix) else { continue }
+
+            focusedRowIndex = sectionIndex
+            focusedSectionId = section.id
+
+            if !section.collectionFolders.isEmpty {
+                if let folderIndex = section.collectionFolders.firstIndex(where: {
+                    TVHomeCardIdentity.folderKey(rowID: section.id, folder: $0) == target
+                }) {
+                    let folder = section.collectionFolders[folderIndex]
+                    focusedCollectionFolder = folder
+                    focusedMeta = nil
+                    focusWork.pendingFocusedFolder = folder
+                    focusWork.pendingFocusedMeta = nil
+                    rowScrollStore.setIndex(folderIndex, for: section.id)
+                    return
+                }
+            } else if !section.items.isEmpty {
+                if let itemIndex = section.items.firstIndex(where: {
+                    TVHomeCardIdentity.key(rowID: section.id, item: $0) == target
+                }) {
+                    let item = section.items[itemIndex]
+                    let settledMeta = collectionHome?.preparedHero(for: item) ?? item
+                    focusedMeta = settledMeta
+                    focusedCollectionFolder = nil
+                    focusWork.pendingFocusedMeta = settledMeta
+                    focusWork.pendingFocusedFolder = nil
+                    rowScrollStore.setIndex(itemIndex, for: section.id)
+                    if settledMeta.needsHeroMetadataEnrichment {
+                        enrichSettledCatalogMeta(settledMeta, in: section.id)
+                    }
+                    scheduleLandscapeFocus(cardKey: target)
+                    return
+                }
+            }
         }
     }
 
@@ -5300,10 +5344,7 @@ struct TVHomeView: View {
         generation: Int
     ) {
         TVHomeDebugTrace.log("home.restoreOverlayFocus begin target=\(target) gen=\(generation)")
-        if let rowIndex = visibleSections.firstIndex(where: { target.hasPrefix("\($0.id)\u{1}") }) {
-            focusedRowIndex = rowIndex
-            focusedSectionId = visibleSections[rowIndex].id
-        }
+        restoreFocusState(for: target)
         focusWork.restoringOverlayCardID = target
         focusWork.acknowledgedNativeOverlayFocusCardID = nil
 
@@ -5932,7 +5973,7 @@ struct TVHomeView: View {
             TVCollectionFolderRow(
                 id: section.id,
                 title: section.title,
-                showsSectionTitle: false,
+                showsSectionTitle: true,
                 horizontalEdgeInset: horizontalEdgeInset,
                 folders: section.collectionFolders,
                 initialScrollIndex: rowScrollStore.index(for: section.id),
@@ -6017,7 +6058,7 @@ struct TVHomeView: View {
                 title: section.title,
                 addonName: section.addonName,
                 showAddonName: catalogAddonNames,
-                showsSectionTitle: false,
+                showsSectionTitle: true,
                 horizontalEdgeInset: horizontalEdgeInset,
                 items: section.items,
                 progressByItemId: (section.id == TVHomeSection.continueWatchingId || section.id == TVHomeSection.upcomingId)
@@ -6274,9 +6315,13 @@ struct TVHomeView: View {
         }
 
         didPrepareInitialFocusViewport = true
-        focusedRowIndex = location.sectionIndex
-        focusedSectionId = location.sectionID
-        rowScrollStore.setIndex(location.cardIndex, for: location.sectionID)
+        if let key = initialFocusCardKey {
+            restoreFocusState(for: key)
+        } else {
+            focusedRowIndex = location.sectionIndex
+            focusedSectionId = location.sectionID
+            rowScrollStore.setIndex(location.cardIndex, for: location.sectionID)
+        }
         let targetSection = sections[location.sectionIndex]
         let isGridCatalogSection = homeLayout == "Grid View"
             && targetSection.collectionFolders.isEmpty
@@ -6309,7 +6354,7 @@ struct TVHomeView: View {
             proxy.scrollTo(location.sectionID, anchor: scrollAnchor)
         }
         DispatchQueue.main.async {
-            guard !self.didRequestInitialCardFocus else { return }
+            guard self.isActive, !self.isFullScreenOverlayPresented else { return }
             var transaction = Transaction()
             transaction.animation = nil
             withTransaction(transaction) {
@@ -6318,19 +6363,12 @@ struct TVHomeView: View {
         }
     }
 
-    /// Normal Modern Home catalog rows contain only the poster strip. Their
-    /// title block is part of the fixed hero now, so the row can be clipped at
-    /// the poster boundary during vertical focus transitions.
+    /// Catalog poster row estimate (title + strip + labels padding).
     private var estimatedCatalogRowHeight: CGFloat {
         let imageHeight: CGFloat = homeLayout == "Compact" ? 255 : 315
         let stripHeight = imageHeight + (posterLabels ? 48 : 0) + TVHomeLayout.stripVerticalPadding * 2
-        return stripHeight
-    }
-
-    /// Loading rows still show their known catalog title while cards are being
-    /// fetched, so preserve their original title-bearing geometry.
-    private var estimatedLoadingCatalogRowHeight: CGFloat {
-        estimatedCatalogRowHeight + TVHomeLayout.rowTitleBlock
+        // One 30pt Inter title line plus the row's 10pt internal spacing.
+        return stripHeight + TVHomeLayout.rowTitleBlock
     }
 
     /// Collection folder row estimate. Curated templates may hide every folder
@@ -6339,13 +6377,10 @@ struct TVHomeView: View {
         let imageHeight: CGFloat = homeLayout == "Compact" ? 255 : 315
         let showsLabels = posterLabels && section.collectionFolders.contains { !$0.hideTitle }
         let stripHeight = imageHeight + (showsLabels ? 48 : 0) + TVHomeLayout.stripVerticalPadding * 2
-        return stripHeight
+        return stripHeight + TVHomeLayout.rowTitleBlock
     }
 
     private func estimatedHeight(for section: TVHomeSection) -> CGFloat {
-        if section.isLoadingPlaceholder {
-            return estimatedLoadingCatalogRowHeight
-        }
         return section.collectionFolders.isEmpty
             ? estimatedCatalogRowHeight
             : estimatedCollectionRowHeight(for: section)
@@ -6505,47 +6540,6 @@ struct TVHomeView: View {
         return hero
     }
 
-    /// The section label paired with the settled hero title. Keep this tied to
-    /// the same settled section state as the hero metadata so the label does
-    /// not race ahead of the poster transition while focus is moving rapidly.
-    private var heroCatalogSection: TVHomeSection? {
-        if let focusedSectionId,
-           let section = visibleSections.first(where: { $0.id == focusedSectionId }),
-           section.collectionFolders.isEmpty,
-           !section.items.isEmpty {
-            return section
-        }
-
-        let heroMeta = visibleFocusedMeta ?? visibleHero
-        if let heroMeta {
-            let heroId = heroMeta.id
-            let identity = heroMeta.homeTitleIdentity
-            if let section = visibleSections.first(where: { section in
-                guard section.collectionFolders.isEmpty else { return false }
-                return section.items.contains(where: { $0.id == heroId || $0.homeTitleIdentity == identity })
-            }) {
-                return section
-            }
-        }
-
-        return visibleSections.first(where: {
-            !$0.isLoadingPlaceholder
-                && $0.collectionFolders.isEmpty
-                && !$0.items.isEmpty
-        })
-    }
-
-    private var heroCollectionSection: TVHomeSection? {
-        if let folder = focusedCollectionFolder {
-            return visibleSections.first(where: { section in
-                section.collectionFolders.contains(where: { $0.id == folder.id })
-            })
-        }
-        guard let focusedSectionId else { return nil }
-        return visibleSections.first(where: {
-            $0.id == focusedSectionId && !$0.collectionFolders.isEmpty
-        })
-    }
 
     private var visibleFocusedMeta: NuvioMeta? {
         guard let focusedMeta, isVisible(focusedMeta) else { return nil }
@@ -7918,6 +7912,11 @@ struct TVHomeView: View {
             // The ledger this just read is only as fresh as the last account
             // pull. Ask for a new one; it lands via the store's change
             // notification, which already refreshes the row.
+            let now = Date()
+            if let last = lastAccountRefreshRequestedAt, now.timeIntervalSince(last) < 30 {
+                return
+            }
+            lastAccountRefreshRequestedAt = now
             print("[ContinueWatching][Home] refreshContinueWatchingFromSelectedSource: triggering account refresh for local ledger")
             onRequestAccountRefresh(false)
             return
@@ -9456,27 +9455,22 @@ let TVHomeRowPrefetchThreshold = 18
 
 /// Hero header while a collection folder card is focused.
 /// Full-screen backdrop is driven by `homeBackdropURL` (folder hero backdrop).
-/// This view draws the title area: optional title logo, else emoji + name,
-/// followed by the current Home collection-row label when one is available.
+/// This view only draws the title area: optional title logo, else emoji + name.
 ///
 /// Unlike `TVHeroView` (title + meta + multi-line description that fills the
-/// block), folder heroes use a compact logo/title block followed by the row
-/// label. Both sit at the bottom of the hero frame, matching Android Modern
-/// Home. A large top padding (copied from poster heroes) was making this area
-/// sit too high.
+/// block), folder heroes are a single short line. They must sit at the bottom
+/// of the hero frame — where a poster description's last line ends — matching
+/// Android Modern Home. A large top padding (copied from poster heroes) was
+/// making this line sit too high.
 private struct TVCollectionFolderHeroView: View, Equatable {
     let folder: TVCollectionFolderItem
-    /// The Home collection-row label. Collections do not provide a movie
-    /// description, so this is placed directly below the folder logo/title.
-    let sectionTitle: String?
     @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
 
     static func == (lhs: TVCollectionFolderHeroView, rhs: TVCollectionFolderHeroView) -> Bool {
         lhs.folder.id == rhs.folder.id &&
         lhs.folder.title == rhs.folder.title &&
         lhs.folder.coverEmoji == rhs.folder.coverEmoji &&
-        lhs.folder.preferredTitleLogoURLString == rhs.folder.preferredTitleLogoURLString &&
-        lhs.sectionTitle == rhs.sectionTitle
+        lhs.folder.preferredTitleLogoURLString == rhs.folder.preferredTitleLogoURLString
     }
 
     private var emoji: String? {
@@ -9488,14 +9482,8 @@ private struct TVCollectionFolderHeroView: View, Equatable {
         folder.title.isEmpty ? "Folder" : folder.title
     }
 
-    private var hasSectionTitle: Bool {
-        guard let sectionTitle else { return false }
-        return !sectionTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     private var heroHeight: CGFloat {
-        let baseHeight: CGFloat = homeLayout == "Compact" ? 390 : 500
-        return baseHeight + TVHomeLayout.heroSectionTitleBlock
+        homeLayout == "Compact" ? 390 : 500
     }
 
     var body: some View {
@@ -9503,81 +9491,36 @@ private struct TVCollectionFolderHeroView: View, Equatable {
             // Push the title line to the bottom of the fixed hero frame.
             Spacer(minLength: 0)
 
-            VStack(alignment: .leading, spacing: 18) {
-                Group {
-                    if let logoURL = folder.preferredTitleLogoURLString {
-                        CachedHeroLogo(url: logoURL, title: displayTitle)
-                    } else {
-                        HStack(alignment: .center, spacing: 18) {
-                            if let emoji {
-                                Text(emoji)
-                                    .font(.system(size: 52))
-                            } else {
-                                Image(systemName: "movieclapper")
-                                    .font(.system(size: 44, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.92))
-                            }
-
-                            Text(displayTitle)
-                                .font(.custom("Inter-Bold", size: 48))
-                                .foregroundColor(.white)
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.7)
+            Group {
+                if let logoURL = folder.preferredTitleLogoURLString {
+                    CachedHeroLogo(url: logoURL, title: displayTitle)
+                } else {
+                    HStack(alignment: .center, spacing: 18) {
+                        if let emoji {
+                            Text(emoji)
+                                .font(.system(size: 52))
+                        } else {
+                            Image(systemName: "movieclapper")
+                                .font(.system(size: 44, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.92))
                         }
+
+                        Text(displayTitle)
+                            .font(.custom("Inter-Bold", size: 48))
+                            .foregroundColor(.white)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.7)
                     }
                 }
-                if hasSectionTitle, let sectionTitle {
-                    TVHeroCatalogTitleView(
-                        title: sectionTitle,
-                        addonName: nil,
-                        showAddonName: false
-                    )
-                    .equatable()
-                }
             }
+            .padding(.leading, TVLayout.rowLeading)
             // Match the gap under poster-hero descriptions so the first catalog
             // title sits the same distance below (Android-style).
-            .padding(.leading, TVLayout.rowLeading)
             .padding(.bottom, TVHomeLayout.heroBottomPadding)
         }
         .foregroundColor(.white)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: heroHeight, alignment: .bottomLeading)
-    }
-}
-
-private struct TVHeroCatalogTitleView: View, Equatable {
-    let title: String
-    let addonName: String?
-    let showAddonName: Bool
-    @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
-
-    static func == (lhs: TVHeroCatalogTitleView, rhs: TVHeroCatalogTitleView) -> Bool {
-        lhs.title == rhs.title &&
-        lhs.addonName == rhs.addonName &&
-        lhs.showAddonName == rhs.showAddonName
-    }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            Text(title)
-                .font(.custom("Inter-Bold", size: 30))
-                .foregroundColor(.white)
-
-            if showAddonName, let addonName, !addonName.isEmpty {
-                Text(addonName)
-                    .font(.custom("Inter-SemiBold", size: 16))
-                    .foregroundColor(SettingsAccent.color(for: theme))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(SettingsAccent.color(for: theme).opacity(0.18), in: Capsule())
-                    .overlay(
-                        Capsule()
-                            .strokeBorder(SettingsAccent.color(for: theme).opacity(0.35), lineWidth: 1)
-                    )
-            }
-        }
-        .frame(maxWidth: 900, alignment: .leading)
     }
 }
 
@@ -9587,22 +9530,11 @@ private struct TVHeroView: View {
     /// say which episode is in progress, how much is left, and show the
     /// episode's own overview instead of the series blurb.
     var continueItem: ContinueWatchingItem? = nil
-    /// The currently focused Home catalog label. It is rendered inside the
-    /// fixed hero so the poster strip below can start at the clipping boundary.
-    var catalogTitle: String? = nil
-    var catalogAddonName: String? = nil
-    var showsCatalogAddonName: Bool = true
     let onSelect: () -> Void
     @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
 
     private var heroHeight: CGFloat {
-        let baseHeight: CGFloat = homeLayout == "Compact" ? 390 : 500
-        return baseHeight + TVHomeLayout.heroSectionTitleBlock
-    }
-
-    private var hasCatalogTitle: Bool {
-        guard let catalogTitle else { return false }
-        return !catalogTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        homeLayout == "Compact" ? 390 : 500
     }
 
     var body: some View {
@@ -9632,14 +9564,6 @@ private struct TVHeroView: View {
                     .lineLimit(4)
                     .frame(maxWidth: 900, alignment: .leading)
                     .padding(.top, 4)
-            }
-
-            if hasCatalogTitle, let catalogTitle {
-                TVHeroCatalogTitleView(
-                    title: catalogTitle,
-                    addonName: catalogAddonName,
-                    showAddonName: showsCatalogAddonName
-                )
             }
         }
         .foregroundColor(.white)
@@ -9678,9 +9602,6 @@ extension TVHeroView: Equatable {
             && lhs.continueItem?.meta.id == rhs.continueItem?.meta.id
             && lhs.continueItem?.episodeLabel == rhs.continueItem?.episodeLabel
             && lhs.continueItem?.remainingText == rhs.continueItem?.remainingText
-            && lhs.catalogTitle == rhs.catalogTitle
-            && lhs.catalogAddonName == rhs.catalogAddonName
-            && lhs.showsCatalogAddonName == rhs.showsCatalogAddonName
     }
 }
 

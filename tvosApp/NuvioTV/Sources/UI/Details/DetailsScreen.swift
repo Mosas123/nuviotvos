@@ -6903,6 +6903,7 @@ private struct TvDetailsEpisodes: View {
                     let epRating = episodeRatings[meta.canonicalEpisodeStreamId(for: video)] ?? []
                     TvEpisodeCard(
                         video: video,
+                        fallbackArtworkURL: meta.backdropUrl,
                         fallbackRating: seriesRating,
                         continueProgress: continueProgress(for: video),
                         isWatched: watchedEpisodeKeys.contains(watchKey),
@@ -7107,6 +7108,7 @@ private struct TvEpisodeRatingItem: Identifiable {
 
 private struct TvEpisodeCard: View {
     let video: NuvioVideo
+    let fallbackArtworkURL: String?
     let fallbackRating: Double?
     let continueProgress: Double?
     let isWatched: Bool
@@ -7370,6 +7372,7 @@ private struct TvEpisodeCard: View {
     private var episodeArtwork: some View {
         CachedPosterArtwork(
             urlString: video.thumbnail,
+            fallbackURLString: fallbackArtworkURL,
             width: cardWidth,
             height: cardHeight,
             placeholder: { placeholderThumb }
