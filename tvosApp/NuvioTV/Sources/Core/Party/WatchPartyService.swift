@@ -8,6 +8,7 @@ protocol WatchPartyServiceRemote: WatchPartySessionRemote {
     func join(code: String, identity: WatchPartyIdentity) async throws -> WatchPartySnapshot
     func preview(code: String) async throws -> WatchPartyPreview
     func enabled() async throws -> Bool
+    func setHostOnly(partyID: String, deviceID: String, enabled: Bool) async throws -> WatchPartySnapshot
 }
 
 extension WatchPartyAPI: WatchPartyServiceRemote {}
@@ -132,6 +133,27 @@ final class WatchPartyService: ObservableObject {
             }
             throw report(error, context: setup.context, operation: setup.operation)
         }
+    }
+
+    /// Explicit host-only room control. Never optimistically change permission state:
+    /// the server snapshot must confirm the mutation before updating the active binding.
+    func setHostOnly(_ enabled: Bool) async throws {
+        let setup = try begin()
+        defer { finish(setup.operation) }
+        do {
+            guard let current = session, let party = current.party,
+                  let memberID = current.memberID, party.hostMemberID == memberID else {
+                throw WatchPartySessionError.forbidden
+            }
+            guard current.connection == .ready else { throw WatchPartySessionError.notReady }
+            guard party.hostOnly != enabled else { return }
+            let snapshot = try await setup.remote.setHostOnly(
+                partyID: party.id, deviceID: setup.environment.identity.deviceID, enabled: enabled
+            )
+            try check(setup.context, operation: setup.operation)
+            guard session === current else { throw WatchPartyAPIError.staleContext }
+            try current.acceptHostOnlySnapshot(snapshot, enabled: enabled)
+        } catch { throw report(error, context: setup.context, operation: setup.operation) }
     }
 
     func resume() async throws {
