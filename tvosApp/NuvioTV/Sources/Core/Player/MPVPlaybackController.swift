@@ -830,6 +830,24 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var mpv: OpaquePointer?
     private lazy var eventQueue = DispatchQueue(label: "mpv-events", qos: .userInitiated)
     private var recentPlaybackLogs: [String] = []
+    private enum DesiredTrackSelection {
+        case trackID(Int)
+        case externalURL(String)
+    }
+    private struct PendingTrackCommand {
+        let loadGeneration: UInt64
+        let command: String
+        let url: String
+        let selectionGeneration: UInt64
+        let selectsWhenReady: Bool
+    }
+    private let pendingTrackCommandsLock = NSLock()
+    private var pendingTrackCommands: [UInt64: PendingTrackCommand] = [:]
+    private var nextTrackCommandReplyID: UInt64 = 1
+    private var subtitleSelectionGeneration: UInt64 = 0
+    private var desiredSubtitleSelection: DesiredTrackSelection?
+    private var audioSelectionGeneration: UInt64 = 0
+    private var desiredAudioSelection: DesiredTrackSelection?
     let subtitleTranslationState = MPVSubtitleTranslationState()
     private var isMPVSubtitleRendererHiddenForTranslation = false
 
@@ -1864,11 +1882,25 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     func selectAudio(_ trackId: Int) {
         guard mpv != nil else { return }
+        audioSelectionGeneration &+= 1
+        desiredAudioSelection = .trackID(trackId)
+        applyAudioSelection(trackId)
+    }
+
+    private func applyAudioSelection(_ trackId: Int) {
+        guard mpv != nil else { return }
         var id = Int64(trackId)
         mpv_set_property(mpv, "aid", MPV_FORMAT_INT64, &id)
     }
 
     func selectSubtitle(_ trackId: Int) {
+        guard mpv != nil else { return }
+        subtitleSelectionGeneration &+= 1
+        desiredSubtitleSelection = .trackID(trackId)
+        applySubtitleSelection(trackId)
+    }
+
+    private func applySubtitleSelection(_ trackId: Int) {
         guard mpv != nil else { return }
         if trackId < 0 {
             setStringProperty("sid", "no")
@@ -1880,12 +1912,16 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     func addSubtitle(_ subtitle: NuvioSubtitle, select: Bool) {
         guard mpv != nil else { return }
-        command("sub-add", args: [
+        if select {
+            subtitleSelectionGeneration &+= 1
+            desiredSubtitleSelection = .externalURL(subtitle.url)
+        }
+        commandAsyncTrack("sub-add", args: [
             subtitle.url,
-            select ? "select" : "auto",
+            "auto",
             subtitle.label ?? "",
             subtitle.language
-        ])
+        ], url: subtitle.url, selectionGeneration: subtitleSelectionGeneration, selectsWhenReady: select)
     }
 
     func addAudioUrl(_ url: String) {
@@ -1897,7 +1933,12 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private func attachPendingAudioIfNeeded() {
         guard let url = pendingAudioURL else { return }
         pendingAudioURL = nil
-        command("audio-add", args: [url, "select"])
+        audioSelectionGeneration &+= 1
+        desiredAudioSelection = .externalURL(url)
+        commandAsyncTrack(
+            "audio-add", args: [url, "auto"], url: url,
+            selectionGeneration: audioSelectionGeneration, selectsWhenReady: true
+        )
     }
 
     private func applyPendingLoadConfiguration() {
@@ -1980,6 +2021,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         #endif
         guard let ctx = mpv else { return }
         mpv = nil  // nil first so the event loop stops reading
+        clearPendingTrackCommands()
         mpv_set_wakeup_callback(ctx, nil, nil)
 
         // libmpv's avfoundation audio output tears down AVAudioSession from
@@ -2763,6 +2805,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 #endif
                         }
                     }
+                case MPV_EVENT_COMMAND_REPLY:
+                    self.handleTrackCommandReply(eventPtr)
                 case MPV_EVENT_SHUTDOWN:
                     return
                 case MPV_EVENT_LOG_MESSAGE:
@@ -2802,6 +2846,119 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     // MARK: - MPV Helpers
 
+    /// Adding a remote subtitle/audio track can wait for its URL to open. Queue it
+    /// asynchronously so a slow server cannot block the main thread during FILE_LOADED.
+    private func commandAsyncTrack(
+        _ command: String,
+        args: [String?],
+        url: String,
+        selectionGeneration: UInt64,
+        selectsWhenReady: Bool
+    ) {
+        guard let mpv else { return }
+
+        pendingTrackCommandsLock.lock()
+        let replyID = nextTrackCommandReplyID
+        nextTrackCommandReplyID &+= 1
+        pendingTrackCommands[replyID] = PendingTrackCommand(
+            loadGeneration: loadGeneration,
+            command: command,
+            url: url,
+            selectionGeneration: selectionGeneration,
+            selectsWhenReady: selectsWhenReady
+        )
+        pendingTrackCommandsLock.unlock()
+
+        var cargs = makeCArgs(command, args).map { $0.flatMap { UnsafePointer<CChar>(strdup($0)) } }
+        defer { for ptr in cargs where ptr != nil { free(UnsafeMutablePointer(mutating: ptr!)) } }
+        let status = mpv_command_async(mpv, replyID, &cargs)
+        if status < 0 {
+            pendingTrackCommandsLock.lock()
+            pendingTrackCommands.removeValue(forKey: replyID)
+            pendingTrackCommandsLock.unlock()
+            checkError(status, context: command)
+        }
+    }
+
+    private func handleTrackCommandReply(_ event: UnsafeMutablePointer<mpv_event>) {
+        let replyID = event.pointee.reply_userdata
+        pendingTrackCommandsLock.lock()
+        let pending = pendingTrackCommands.removeValue(forKey: replyID)
+        pendingTrackCommandsLock.unlock()
+        guard let pending else { return }
+        let status = event.pointee.error
+        let message = status < 0 ? String(cString: mpv_error_string(status)) : nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  self.mpv != nil,
+                  self.loadGeneration == pending.loadGeneration else { return }
+            if let message {
+                self.appendPlaybackLog(prefix: pending.command, level: "error", text: message)
+            } else {
+                self.completeTrackCommand(pending)
+            }
+        }
+    }
+
+    private func completeTrackCommand(_ pending: PendingTrackCommand) {
+        switch pending.command {
+        case "sub-add":
+            guard subtitleSelectionGeneration == pending.selectionGeneration else {
+                reapplyDesiredSubtitleSelection()
+                return
+            }
+            guard pending.selectsWhenReady else {
+                reapplyDesiredSubtitleSelection()
+                return
+            }
+            refreshTracks()
+            guard let track = subtitleTracks.last(where: { $0.externalFilename == pending.url }) else {
+                appendPlaybackLog(prefix: pending.command, level: "error", text: "Loaded subtitle track was not found")
+                return
+            }
+            desiredSubtitleSelection = .trackID(track.id)
+            applySubtitleSelection(track.id)
+            subtitleSelectionGeneration &+= 1
+        case "audio-add":
+            guard audioSelectionGeneration == pending.selectionGeneration else {
+                reapplyDesiredAudioSelection()
+                return
+            }
+            guard pending.selectsWhenReady else {
+                reapplyDesiredAudioSelection()
+                return
+            }
+            refreshTracks()
+            guard let track = audioTracks.last(where: { $0.externalFilename == pending.url }) else {
+                appendPlaybackLog(prefix: pending.command, level: "error", text: "Loaded audio track was not found")
+                return
+            }
+            desiredAudioSelection = .trackID(track.id)
+            applyAudioSelection(track.id)
+            audioSelectionGeneration &+= 1
+        default:
+            break
+        }
+    }
+
+    private func reapplyDesiredSubtitleSelection() {
+        guard let desiredSubtitleSelection,
+              case .trackID(let trackID) = desiredSubtitleSelection else { return }
+        applySubtitleSelection(trackID)
+    }
+
+    private func reapplyDesiredAudioSelection() {
+        guard let desiredAudioSelection,
+              case .trackID(let trackID) = desiredAudioSelection else { return }
+        applyAudioSelection(trackID)
+    }
+
+    private func clearPendingTrackCommands() {
+        pendingTrackCommandsLock.lock()
+        pendingTrackCommands.removeAll()
+        pendingTrackCommandsLock.unlock()
+    }
+
     private func command(_ command: String, args: [String?] = [], checkForErrors: Bool = true) {
         guard mpv != nil else { return }
         var cargs = makeCArgs(command, args).map { $0.flatMap { UnsafePointer<CChar>(strdup($0)) } }
@@ -2823,6 +2980,13 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let result = mpv_get_property(mpv, name, MPV_FORMAT_DOUBLE, &data)
         guard result >= 0, data.isFinite else { return nil }
         return data
+    }
+
+    private func readOptionalInt64Property(_ name: String) -> Int64? {
+        guard mpv != nil else { return nil }
+        var value = Int64()
+        guard mpv_get_property(mpv, name, MPV_FORMAT_INT64, &value) >= 0 else { return nil }
+        return value
     }
 
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
@@ -2855,13 +3019,6 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             demuxerMaxBackBytes: readOptionalStringProperty("demuxer-max-back-bytes"),
             localOrDiskCache: isLocalOrDiskCacheStream
         ))
-    }
-
-    private func readOptionalInt64Property(_ name: String) -> Int64? {
-        guard mpv != nil else { return nil }
-        var value = Int64()
-        guard mpv_get_property(mpv, name, MPV_FORMAT_INT64, &value) >= 0 else { return nil }
-        return value
     }
 
     private func readOptionalFlagProperty(_ name: String) -> Bool? {
