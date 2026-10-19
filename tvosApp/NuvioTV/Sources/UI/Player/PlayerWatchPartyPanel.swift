@@ -79,10 +79,28 @@ struct PlayerWatchPartyPanel: View {
         .buttonStyle(PosterCardButtonStyle())
         .focusEffectDisabledIfAvailable()
         .focused($focusedControlID, equals: "party.invite")
-        PlayerPanelRow(
-            title: "Playback controls",
-            subtitle: party.hostOnly ? "Only the host can control playback." : "Participants can control playback."
-        )
+        if party.hostMemberID == room.memberID {
+            Button {
+                run { try await service.setHostOnly(!party.hostOnly) }
+            } label: {
+                PlayerPanelRow(
+                    title: "Only host can control playback",
+                    subtitle: "Guests can still pause or rewind locally.",
+                    trailing: party.hostOnly ? "On" : "Off"
+                )
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focusEffectDisabledIfAvailable()
+            .focused($focusedControlID, equals: "party.hostOnly")
+            .disabled(service.busy || operation != nil || room.connection != .ready || room.membershipExit != nil)
+        } else {
+            PlayerPanelRow(
+                title: "Playback controls",
+                subtitle: party.hostOnly
+                    ? "The host controls shared playback. You can pause or rewind locally."
+                    : "Participants can control shared playback."
+            )
+        }
 
         if owner.presentation?.mount.isCurrent == true {
             Button { viewModel.catchUpWithWatchParty() } label: {
