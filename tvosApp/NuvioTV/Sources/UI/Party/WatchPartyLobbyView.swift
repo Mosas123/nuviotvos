@@ -16,6 +16,7 @@ struct WatchPartyLobbyView: View {
     @State private var code = ""
     @State private var operation: Task<Void, Never>?
     @State private var endingRoom = false
+    @State private var showingInvitation = false
     @FocusState private var focusedAction: String?
     @FocusState private var accountGateFocused: Bool
     @AppStorage(SettingsKey.amoled) private var amoled = false
@@ -46,6 +47,15 @@ struct WatchPartyLobbyView: View {
         .onChange(of: code) { _, newValue in
             let normalized = String(WatchPartyCode.normalize(newValue).prefix(WatchPartyCode.length))
             if normalized != newValue { code = normalized }
+        }
+        .sheet(isPresented: $showingInvitation) {
+            if let party = service.session?.party, WatchPartyCode.isValid(party.code) {
+                WatchPartyLobbyInvitation(code: WatchPartyCode.normalize(party.code))
+            }
+        }
+        .onChange(of: service.session?.party?.id) { _, _ in
+            // Never keep an invitation visible after leaving or replacing a room.
+            showingInvitation = false
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
@@ -315,6 +325,19 @@ struct WatchPartyLobbyView: View {
     private func roomActions(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             primaryRoomAction(room, party: party)
+
+            Button {
+                showingInvitation = true
+            } label: {
+                secondaryActionLabel(
+                    symbol: "qrcode",
+                    title: "Invite a friend",
+                    isFocused: focusedAction == "invite"
+                )
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focused($focusedAction, equals: "invite")
+            .disabled(operation != nil || !WatchPartyCode.isValid(party.code))
 
             HStack(spacing: 14) {
                 if room.connection != .ready, room.membershipExit == nil {
@@ -653,5 +676,57 @@ struct WatchPartyLobbyView: View {
                 }
             }
         }
+    }
+}
+
+@MainActor
+private struct WatchPartyLobbyInvitation: View {
+    let code: String
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var doneFocused: Bool
+
+    // Android ActiveParty.inviteLink uses the same URL scheme and room code.
+    private var inviteLink: String { "nuvio://party/\(code)" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("Invite a friend")
+                .font(.system(size: 38, weight: .bold, design: .rounded))
+            HStack(alignment: .center, spacing: 32) {
+                if let qr = QRCode.image(from: inviteLink, scale: 12) {
+                    Image(uiImage: qr)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 260, height: 260)
+                        .padding(12)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                        .accessibilityLabel("QR invitation for Watch Party room \(code)")
+                }
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Scan with a compatible Nuvio app")
+                        .font(.system(size: 22, weight: .semibold))
+                    Text(WatchPartyCode.formatted(code))
+                        .font(.system(size: 37, weight: .bold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Text("Or enter this code in Watch Party. Each guest chooses their own source.")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .focused($doneFocused)
+            }
+        }
+        .padding(44)
+        .frame(width: 760)
+        .background(Color.black.ignoresSafeArea())
+        .onAppear { doneFocused = true }
+        .onExitCommand { dismiss() }
     }
 }
