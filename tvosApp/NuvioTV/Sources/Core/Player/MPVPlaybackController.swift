@@ -374,6 +374,11 @@ struct MPVLoadConfiguration: Equatable {
 // status-bar, screen-edge gestures — none exist on tvOS) removed.
 
 final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling, ScrubThumbnailProviding {
+    /// Synchronously revoke Party control admission before parking the engine.
+    var onWillSuspendPlayback: (() -> Void)?
+    /// Lifecycle reattachment has been requested; visual readiness still
+    /// requires a fresh MPV playback restart and a coherent state sample.
+    var onDidRestorePlayback: (() -> Void)?
     /// Called after a coherent position is captured but before tvOS suspends
     /// the player. PlayerViewModel uses it for a durable lifecycle save.
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
@@ -382,6 +387,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private let hybridThumbnailIndex = HybridSeekThumbnailIndex()
     private var externalTrickplayProvider: (any TrickplayProviding)?
     private var loadGeneration: UInt64 = 0
+    private let firstFrameReadiness = MPVFirstFrameReadiness()
+    // Accessed only on eventQueue; copy the ID before hopping to the UI queue.
+    private var eventPlaylistEntryID: Int64?
     private var contentCanonicalKey: String?
     private var currentStreamKey: String = ""
 
@@ -529,7 +537,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private(set) var isAtEndOfFile: Bool = false
     private(set) var hasCoherentTimeSample: Bool = false
     var hasFirstFrameReadyForDisplay: Bool {
-        (videoFrameSize != .zero || durationMs > 0) && isPlayerPlaying && !isPlayerLoading
+        firstFrameReadiness.isReady && !isPlayerLoading
     }
     var durationMs: Int64 = 0
     var positionMs: Int64 = 0
@@ -797,6 +805,11 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard mpv != nil else { return }
         guard !isApplicationBackgrounded else { return }
 
+        onWillSuspendPlayback?()
+        // A callback may synchronously retire this player.
+        guard mpv != nil, !isApplicationBackgrounded else { return }
+        firstFrameReadiness.reset(keepingPlaylistEntry: true)
+
         let sampledDurationMs = milliseconds(from: readDoubleProperty("duration")) ?? durationMs
         let sampledPositionMs = milliseconds(from: readDoubleProperty("time-pos")) ?? positionMs
         let verifiedPositionMs = lastVerifiedPositionMs ?? positionMs
@@ -847,14 +860,15 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             foregroundRestoreDeadline = Date().addingTimeInterval(4)
             let rawPositionMs = milliseconds(from: readDoubleProperty("time-pos"))
             screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback restoring pos: target=\(target)ms, rawPos=\(String(describing: rawPositionMs))ms")
-            if rawPositionMs == nil
+            if watchPartyRemoteIntent != nil
+                || rawPositionMs == nil
                 || abs((rawPositionMs ?? target) - target) > 1_500
                 || getFlag("eof-reached") {
                 seekToMs(target)
             }
         }
 
-        if shouldResume {
+        if shouldResume && watchPartyRemoteIntent == nil {
             screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback resuming playback")
             playPlayback()
         } else {
@@ -862,6 +876,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback preserving pause")
             pausePlayback()
         }
+        onDidRestorePlayback?()
     }
 
     @objc private func appWillResignActive() {
@@ -908,6 +923,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     // MARK: - Playback API
 
     func loadFile(_ urlString: String) {
+        firstFrameReadiness.reset()
         if didConfigureMPVRemoteCommands { teardownMPVRemoteCommands(); setupMPVRemoteCommandsIfNeeded() }
         pendingLoadConfiguration = nil
         pendingHTTPHeaders = [:]
@@ -922,6 +938,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func load(_ request: PlaybackLoadRequest) {
+        firstFrameReadiness.reset()
         teardownMPVRemoteCommands()
         pendingLoadConfiguration = MPVLoadConfiguration(request: request)
         pendingAudioURL = request.audioURL?.absoluteString
@@ -1066,6 +1083,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         }
         setFlag("pause", true)
         command("loadfile", args: [url, "replace"])
+        // loadfile replace creates its playlist entry synchronously. Unlike
+        // path/duration, the entry ID distinguishes reloading the same URL.
+        firstFrameReadiness.arm(playlistEntryID: readOptionalInt64Property("playlist/0/id"))
         setAspectMode(currentAspectMode)
     }
 
@@ -1578,6 +1598,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func destroyPlayer() {
+        firstFrameReadiness.reset()
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryWatchdog.stop(event: "destroy")
 #endif
@@ -2297,12 +2318,20 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                 case MPV_EVENT_PROPERTY_CHANGE:
                     DispatchQueue.main.async { self.updateState() }
                 case MPV_EVENT_START_FILE:
+                    self.eventPlaylistEntryID = eventPtr.pointee.data.map {
+                        UnsafePointer<mpv_event_start_file>(OpaquePointer($0)).pointee.playlist_entry_id
+                    }
                     self.clearPlaybackError()
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
                     self.memoryWatchdog.record(event: "start_file")
 #endif
                 case MPV_EVENT_FILE_LOADED:
+                    let frameToken = self.firstFrameReadiness.token
+                    let entryID = self.eventPlaylistEntryID
                     DispatchQueue.main.async {
+                        guard self.mpv == mpv,
+                              self.watchPartyRemoteIntent == nil
+                                || self.firstFrameReadiness.matches(token: frameToken, playlistEntryID: entryID) else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
                         self.memoryWatchdog.record(event: "file_loaded")
 #endif
@@ -2316,6 +2345,25 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                         self.updateState()
                         self.resetDisplayCriteriaProbe()
                         self.scheduleDisplayCriteriaProbe()
+                    }
+                case MPV_EVENT_PLAYBACK_RESTART:
+                    // MPV completes a restart after queuing the initial video
+                    // frame even when pause=yes. FILE_LOADED / VIDEO_RECONFIG
+                    // alone only prove loading/configuration, not this stage.
+                    let frameToken = self.firstFrameReadiness.token
+                    let entryID = self.eventPlaylistEntryID
+                    DispatchQueue.main.async {
+                        guard self.mpv == mpv, !self.isApplicationBackgrounded,
+                              self.firstFrameReadiness.matches(token: frameToken, playlistEntryID: entryID) else { return }
+                        self.updateState()
+                        let size = self.videoFrameSize
+                        let videoPTS = self.readDoubleProperty("video-pts")
+                        if self.firstFrameReadiness.receiveRestart(
+                            token: frameToken, playlistEntryID: entryID,
+                            hasVideoFrame: size.width > 0 && size.height > 0 && videoPTS?.isFinite == true
+                        ) {
+                            self.onFirstFrameReady?()
+                        }
                     }
                 case MPV_EVENT_VIDEO_RECONFIG:
                     // Fires once decode starts and whenever the video params

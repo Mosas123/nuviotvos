@@ -2416,6 +2416,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
+    var onWillSuspendPlayback: (() -> Void)?
+    var onDidRestorePlayback: (() -> Void)?
     /// Terminal load/runtime failures the coordinator may use for MPV fallback.
     var onTerminalError: ((String) -> Void)?
 
@@ -3154,6 +3156,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     @objc private func appWillResignActive() {
+        if !engine.pictureInPictureActive {
+            let mark = lifecycleReloadToken
+            onWillSuspendPlayback?()
+            guard lifecycleReloadToken == mark else { return }
+        }
         screensaverDebugLog("[ScreensaverDebug][AetherController] appWillResignActive: state=\(engine.state), isPlayerPlaying=\(isPlayerPlaying), lastKnownPos=\(lastKnownPositionMs)ms, clock=\(engine.clock.currentTime)")
         if !engine.pictureInPictureActive {
             foregroundReloadTask?.cancel()
@@ -3177,6 +3184,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     @objc private func appDidEnterBackground() {
+        if !engine.pictureInPictureActive {
+            let mark = lifecycleReloadToken
+            onWillSuspendPlayback?()
+            guard lifecycleReloadToken == mark else { return }
+        }
         let pos = lastKnownPositionMs
         let dur = lastKnownDurationMs
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidEnterBackground: state=\(engine.state), isPlayerPlaying=\(isPlayerPlaying), pos=\(pos)ms, dur=\(dur)ms, clock=\(engine.clock.currentTime)")
@@ -3199,8 +3211,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     @objc private func appDidBecomeActive() {
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidBecomeActive: appState=\(UIApplication.shared.applicationState.rawValue), needsReload=\(needsForegroundReload), hasTask=\(foregroundReloadTask != nil), wasPlaying=\(playbackWasPlayingBeforeBackground), pip=\(engine.pictureInPictureActive)")
         guard UIApplication.shared.applicationState == .active else { return }
-        guard needsForegroundReload,
-              foregroundReloadTask == nil else { return }
+        if !needsForegroundReload, foregroundReloadTask == nil {
+            onDidRestorePlayback?()
+            return
+        }
+        guard needsForegroundReload, foregroundReloadTask == nil else { return }
 
         // PiP keeps Aether's video pipeline alive across backgrounding. If PiP
         // is still active at foreground return, there is no torn down session
@@ -3208,6 +3223,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         guard !engine.pictureInPictureActive else {
             needsForegroundReload = false
             playbackWasPlayingBeforeBackground = false
+            onDidRestorePlayback?()
             return
         }
 
@@ -3249,11 +3265,13 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             self.rebindSurface()
             let resumeAfterReload = shouldResume || self.playbackWasPlayingBeforeBackground
             screensaverDebugLog("[ScreensaverDebug][AetherController] reload completed, asserting post-reload state: resumeAfterReload=\(resumeAfterReload)")
-            if resumeAfterReload {
+            if resumeAfterReload && !self.isWatchPartyControlled {
                 self.engine.play()
             } else {
                 self.engine.pause()
             }
+            guard self.lifecycleReloadToken == token else { return }
+            self.onDidRestorePlayback?()
         }
     }
 

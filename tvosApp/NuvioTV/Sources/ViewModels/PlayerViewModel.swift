@@ -329,6 +329,7 @@ class PlayerViewModel: ObservableObject {
     private var didShutdown = false
     private(set) var watchPartyPlayerBridge: WatchPartyPlayerBridge?
     private var watchPartyAdmittedMedia: WatchPartyMedia?
+    private var watchPartyLifecycle = PlayerLifecycleAdmission()
     private var watchPartyControls: WatchPartyControlRouter?
     private let adoptsPictureInPictureSession: Bool
     private var isTrailerPlaybackSession = false
@@ -586,6 +587,29 @@ class PlayerViewModel: ObservableObject {
 
         let coordinator = sessionCoordinator
         let generation = coordinator.loadGeneration
+        let mpv = playerController
+        mpv.onWillSuspendPlayback = { [weak self, weak coordinator, weak mpv] in
+            guard let self, let coordinator, let mpv, !self.didShutdown,
+                  self.sessionCoordinator === coordinator, self.engine === mpv else { return }
+            self.suspendWatchPartyForLifecycle(engineWillPark: true)
+        }
+        mpv.onDidRestorePlayback = { [weak self, weak coordinator, weak mpv] in
+            guard let self, let coordinator, let mpv, !self.didShutdown,
+                  self.sessionCoordinator === coordinator, self.engine === mpv else { return }
+            self.watchPartyEngineDidRestore()
+        }
+        if let aether = aetherController {
+            aether.onWillSuspendPlayback = { [weak self, weak coordinator, weak aether] in
+                guard let self, let coordinator, let aether, !self.didShutdown,
+                      self.sessionCoordinator === coordinator, self.engine === aether else { return }
+                self.suspendWatchPartyForLifecycle(engineWillPark: true)
+            }
+            aether.onDidRestorePlayback = { [weak self, weak coordinator, weak aether] in
+                guard let self, let coordinator, let aether, !self.didShutdown,
+                      self.sessionCoordinator === coordinator, self.engine === aether else { return }
+                self.watchPartyEngineDidRestore()
+            }
+        }
         let suspend: (Int64, Int64) -> Void = { [weak self, weak coordinator] positionMs, durationMs in
             Task { @MainActor [weak self, weak coordinator] in
                 guard let self, let coordinator,
@@ -607,7 +631,7 @@ class PlayerViewModel: ObservableObject {
                       self.currentLoadPresentationIsConfirmed(
                         engineKind: self.activeEngineKind,
                         generation: generation
-                      ) else { return }
+                      ), self.engine.hasFirstFrameReadyForDisplay else { return }
                 if !self.hasRenderedFirstFrame {
                     self.hasRenderedFirstFrame = true
                     if let meta = self.activeMeta {
@@ -746,6 +770,10 @@ class PlayerViewModel: ObservableObject {
 
     func retryPlaybackStartup() {
         guard !didShutdown else { return }
+        if watchPartyPlayerBridge != nil, UIApplication.shared.applicationState == .active {
+            watchPartyLifecycle.engineDidRestore()
+            resumeWatchPartyAfterForeground()
+        }
         cancelPendingAdvanceResolution()
         cancelPauseOverlaySchedule()
         showPauseOverlay = false
@@ -3169,6 +3197,7 @@ class PlayerViewModel: ObservableObject {
     func pause(forBackground: Bool = false) {
         if forBackground {
             // Revoke room effects first; lifecycle parking must not broadcast a user's pause.
+            watchPartyLifecycle.suspend(engineWillPark: false)
             watchPartyControls?.setSuspended(true)
         } else if routeWatchPartyControl(.pause) { return }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] pause(forBackground=\(forBackground)) called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
@@ -3297,6 +3326,7 @@ class PlayerViewModel: ObservableObject {
         watchPartyPlayerBridge?.stop()
         watchPartyPlayerBridge = nil
         watchPartyAdmittedMedia = nil
+        watchPartyLifecycle = PlayerLifecycleAdmission()
         PictureInPictureManager.shared.refreshController(for: sessionCoordinator)
     }
 
@@ -3351,7 +3381,26 @@ class PlayerViewModel: ObservableObject {
     }
 
     /// Explicit root foreground hook; never called merely because a user presses Play.
-    func resumeWatchPartyAfterForeground() { watchPartyControls?.setSuspended(false) }
+    func resumeWatchPartyAfterForeground() {
+        watchPartyLifecycle.enterForeground()
+        if watchPartyLifecycle.canResume { watchPartyControls?.setSuspended(false) }
+    }
+
+    func suspendWatchPartyForLifecycle(engineWillPark: Bool = false) {
+        guard watchPartyPlayerBridge != nil, !didShutdown else { return }
+        let pip = PictureInPictureManager.shared
+        if pip.activeCoordinator === sessionCoordinator,
+           pip.isPictureInPictureActive || pip.isPictureInPictureStarting || pip.isRestoringUIInProgress { return }
+        watchPartyLifecycle.suspend(engineWillPark: engineWillPark)
+        watchPartyControls?.setSuspended(true) // Revokes permits before any raw engine pause/vid parking.
+        if engineWillPark { hasRenderedFirstFrame = false }
+    }
+
+    private func watchPartyEngineDidRestore() {
+        guard watchPartyPlayerBridge != nil else { return }
+        watchPartyLifecycle.engineDidRestore()
+        if watchPartyLifecycle.canResume { watchPartyControls?.setSuspended(false) }
+    }
     func catchUpWithWatchParty() { _ = routeWatchPartyControl(.catchUp) }
 
     /// A mounted bridge without controls must fail closed rather than bypass room permissions.

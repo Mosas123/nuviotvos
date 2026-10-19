@@ -91,6 +91,11 @@ final class WatchPartyAppOwner: ObservableObject {
         presentation.mount.viewModel.resumeWatchPartyAfterForeground()
     }
 
+    func suspendForInactivity() {
+        guard let presentation, presentation.mount.isCurrent else { return }
+        presentation.mount.viewModel.suspendWatchPartyForLifecycle()
+    }
+
     func finishPlayback(reportBrowsing: Bool = true) {
         let context = lease?.context
         let oldRuntime = runtime

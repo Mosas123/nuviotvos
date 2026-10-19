@@ -85,8 +85,9 @@ final class WatchPartyPlaybackBinding {
         blocked = nil
         lastApplied = nil
         bridge.clearTemporaryRate()
-        if let sample { updatePresence(sample) }
-        if !value { reconcile() }
+        let previousSample = sample
+        sample = nil // Neither pre-park nor inactive samples may drive the first resumed effect.
+        if value, let previousSample { updatePresence(previousSample) }
     }
 
     init(room: any WatchPartyPlaybackRoom, bridge: WatchPartyPlayerBridge,

@@ -90,8 +90,12 @@ final class PictureInPictureManager: NSObject, ObservableObject {
     private let softwareSkipRequests = PlayerPiPRequests()
     private var sessionGeneration = UUID()
     private var lastSoftwarePaused: Bool?
+    private var pipStartState = PlayerPiPStartState()
 
     var isRestoringUIInProgress: Bool { isRestoringUI }
+    /// Startup retains the fullscreen surface; lifecycle owners may keep this exact
+    /// coordinator alive until AVKit confirms or rejects the transition.
+    var isPictureInPictureStarting: Bool { pipStartState.isStarting }
 
     /// Invoked when PiP begins so the active full-screen PlayerView can dismiss to the background.
     var onDidStartPiP: (() -> Void)?
@@ -159,12 +163,14 @@ final class PictureInPictureManager: NSObject, ObservableObject {
     /// become eligible later. Clear identity/state before any completion can re-enter.
     private func discardPipController(clearingSource: Bool = false) {
         let oldController = pipController
+        let hadPendingOrActivePiP = pipStartState.isInProgress
+        _ = pipStartState.stop()
         let completion = pendingRestoreCompletion
         pipController = nil
         oldController?.delegate = nil
         possibleObservation?.invalidate()
         possibleObservation = nil
-        if isPictureInPictureActive { oldController?.stopPictureInPicture() }
+        if hadPendingOrActivePiP { oldController?.stopPictureInPicture() }
         activeAetherController?.engine.pictureInPictureActive = false
         if clearingSource {
             cancellables.removeAll()
@@ -231,7 +237,7 @@ final class PictureInPictureManager: NSObject, ObservableObject {
             if let lost { onDidLoseWatchPartyPiP?(lost) }
             guard sessionGeneration == mark, activeAetherController === controller else { return }
         }
-        guard !isPictureInPictureActive else { return } // Don't disrupt active PiP window
+        guard !pipStartState.isInProgress else { return } // Preserve the source during AVKit startup too.
 
         let engine = controller.engine
 
@@ -300,17 +306,26 @@ final class PictureInPictureManager: NSObject, ObservableObject {
             return
         }
 
+        // AVKit may ignore a start while unavailable instead of sending a failure callback.
+        guard pip.isPictureInPicturePossible, pipStartState.begin() else { return }
+        let startingGeneration = sessionGeneration
+        let startingAetherController = activeAetherController
+        // Protect the source from lifecycle parking in the gap before willStart.
+        startingAetherController?.engine.pictureInPictureActive = true
+        guard sessionGeneration == startingGeneration, pipController === pip,
+              activeAetherController === startingAetherController, pipStartState.isStarting else { return }
+
         print("[PictureInPicture] Requesting startPictureInPicture (isPossible=\(pip.isPictureInPicturePossible))")
         pip.startPictureInPicture()
     }
 
     func stopPictureInPicture() {
-        guard isPictureInPictureActive else { return }
+        guard pipStartState.isInProgress else { return }
         pipController?.stopPictureInPicture()
     }
 
     func togglePictureInPicture() {
-        if isPictureInPictureActive {
+        if pipStartState.isInProgress {
             stopPictureInPicture()
         } else {
             startPictureInPicture()
@@ -334,15 +349,20 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         guard pipController === pictureInPictureController else { return }
         print("[PictureInPicture] willStartPictureInPicture")
-        isPictureInPictureActive = true
+        // Also admits automatic AVKit startup. Keep fullscreen mounted until didStart.
+        _ = pipStartState.begin()
+        guard pipStartState.isStarting else { return }
         activeAetherController?.engine.pictureInPictureActive = true
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        guard pipController === pictureInPictureController else { return }
+        guard pipController === pictureInPictureController, pipStartState.confirm() else { return }
+        let startedGeneration = sessionGeneration
         print("[PictureInPicture] didStartPictureInPicture")
-        isPictureInPictureActive = true
         activeAetherController?.engine.pictureInPictureActive = true
+        guard sessionGeneration == startedGeneration, pipController === pictureInPictureController else { return }
+        isPictureInPictureActive = true
+        guard sessionGeneration == startedGeneration, pipController === pictureInPictureController else { return }
         onDidStartPiP?()
     }
 
@@ -350,10 +370,21 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
-        guard pipController === pictureInPictureController else { return }
+        guard pipController === pictureInPictureController, pipStartState.fail() else { return }
+        let failedGeneration = sessionGeneration
+        let failedCoordinator = activeCoordinator
+        let failedAetherController = activeAetherController
         print("[PictureInPicture] failedToStartPictureInPictureWithError: \(error.localizedDescription)")
-        isPictureInPictureActive = false
         activeAetherController?.engine.pictureInPictureActive = false
+        guard sessionGeneration == failedGeneration, pipController === pictureInPictureController else { return }
+        activeAetherController?.rebindSurface()
+        guard sessionGeneration == failedGeneration, pipController === pictureInPictureController,
+              activeCoordinator === failedCoordinator, activeAetherController === failedAetherController else { return }
+        if let failedCoordinator, failedAetherController?.isWatchPartyControlled == true,
+           UIApplication.shared.applicationState != .active {
+            onDidLoseWatchPartyPiP?(failedCoordinator)
+        }
+        // No fullscreen dismissal or lease transfer occurred, so there is nothing to restore.
     }
 
     func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
@@ -364,10 +395,29 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         guard pipController === pictureInPictureController else { return }
         let stoppedGeneration = sessionGeneration
+        let stoppedCoordinator = activeCoordinator
+        let stoppedAetherController = activeAetherController
+        let stoppedPendingPiP = pipStartState.isStarting
+        let stoppedConfirmedPiP = pipStartState.stop()
         print("[PictureInPicture] didStopPictureInPicture (isRestoringUI=\(isRestoringUI))")
         isPictureInPictureActive = false
+        guard sessionGeneration == stoppedGeneration, pipController === pictureInPictureController else { return }
         activeAetherController?.engine.pictureInPictureActive = false
+        guard sessionGeneration == stoppedGeneration, pipController === pictureInPictureController else { return }
         activeAetherController?.rebindSurface()
+
+        guard sessionGeneration == stoppedGeneration, pipController === pictureInPictureController,
+              activeCoordinator === stoppedCoordinator,
+              activeAetherController === stoppedAetherController else { return }
+        guard stoppedConfirmedPiP else {
+            // Cancellation may arrive as didStop instead of failedToStart, after
+            // the only background notification has already passed.
+            if stoppedPendingPiP, let stoppedCoordinator, stoppedAetherController?.isWatchPartyControlled == true,
+               UIApplication.shared.applicationState != .active {
+                onDidLoseWatchPartyPiP?(stoppedCoordinator)
+            }
+            return
+        }
 
         if !isRestoringUI {
             onDidStopPiPWithoutRestoring?()
@@ -407,6 +457,7 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
             return
         }
         print("[PictureInPicture] restoreUserInterfaceForPictureInPictureStop")
+        let restoringGeneration = sessionGeneration
         isRestoringUI = true
         pendingRestoreCompletion = completionHandler
         pendingRestoreResult = nil
@@ -419,9 +470,12 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
         }
 
         if let onRestoreUI {
-            onRestoreUI(context) { [weak self] success in
-                self?.pendingRestoreResult = success
-                self?.finishRestoreIfReady()
+            onRestoreUI(context) { [weak self, weak pictureInPictureController] success in
+                guard let self, let pip = pictureInPictureController,
+                      self.sessionGeneration == restoringGeneration,
+                      self.pipController === pip, self.pendingRestoreCompletion != nil else { return }
+                self.pendingRestoreResult = success
+                self.finishRestoreIfReady()
             }
         } else {
             pendingRestoreResult = false

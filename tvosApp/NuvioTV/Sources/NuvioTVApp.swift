@@ -585,6 +585,12 @@ struct ContentView: View {
             creatingParty = false; choosingPartySource = false
         }
         .onOpenURL(perform: handleDeepLink)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            watchPartyOwner.suspendForInactivity()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            watchPartyOwner.resumeAfterForeground()
+        }
         .onAppear {
             watchPartyOwner.attach(authManager: authManager, profiles: profileViewModel)
             syncManager.attach(authManager: authManager, profileViewModel: profileViewModel)
@@ -671,6 +677,7 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .background:
+                watchPartyOwner.suspendForInactivity()
                 backgroundedAt = Date()
                 syncManager.flushPendingPushes()
             case .active:
@@ -1767,7 +1774,8 @@ struct ContentView: View {
 
     private func setupPictureInPicture() {
         PictureInPictureManager.shared.onDidLoseWatchPartyPiP = { coordinator in
-            guard watchPartyOwner.owns(coordinator), !activeScreen.isPlayer else { return }
+            guard watchPartyOwner.owns(coordinator),
+                  !activeScreen.isPlayer || UIApplication.shared.applicationState != .active else { return }
             watchPartyOwner.finishPlayback()
         }
         PictureInPictureManager.shared.onRestoreUI = { [self] context, completion in

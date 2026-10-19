@@ -170,8 +170,34 @@ final class WatchPartyPlaybackBindingTests: XCTestCase {
         do { try await binding.perform(.play); XCTFail("Suspended control accepted") }
         catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady) }
         binding.setSuspended(false)
+        f.tick() // Resume must receive a fresh observation after parking.
         await settle(f)
         XCTAssertGreaterThan(f.playCalls, 0)
+        XCTAssertTrue(f.room.publications.isEmpty)
+    }
+
+    func testResumeCannotUseThePreSuspensionSampleForLocalPlay() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        binding.setSuspended(true)
+        binding.setSuspended(false)
+        do { try await binding.perform(.play); XCTFail("Pre-park sample admitted after resume") }
+        catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady) }
+        XCTAssertTrue(f.room.publications.isEmpty)
+        f.tick()
+        await settle(f)
+        try await binding.perform(.play)
+        XCTAssertEqual(f.room.publications.count, 1)
+    }
+
+    func testResumeDiscardsSamplesObservedWhileSuspended() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        binding.setSuspended(true)
+        f.position = 12_000; f.tick()
+        binding.setSuspended(false)
+        do { try await binding.perform(.pause); XCTFail("Inactive sample admitted after resume") }
+        catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady) }
         XCTAssertTrue(f.room.publications.isEmpty)
     }
 
