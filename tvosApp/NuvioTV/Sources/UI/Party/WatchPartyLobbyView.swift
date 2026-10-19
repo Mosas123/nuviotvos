@@ -15,6 +15,11 @@ struct WatchPartyLobbyView: View {
 
     @State private var code = ""
     @State private var roomCodeIsEditing = false
+    @State private var roomPreview: WatchPartyPreview?
+    @State private var previewCode: String?
+    @State private var previewRequestID = UUID()
+    @State private var reviewRoomID: String?
+    @State private var reviewMediaKey: String?
     @State private var operation: Task<Void, Never>?
     @State private var endingRoom = false
     @State private var showingInvitation = false
@@ -56,26 +61,54 @@ struct WatchPartyLobbyView: View {
             }
         }
         .onAppear {
-            if service.session?.party != nil {
-                focusedAction = owner.presentation == nil ? "choose-source" : "catch-up"
+            if canUseAccount {
+                focusedAction = preferredRoomFocus
+            } else {
+                accountGateFocused = true
             }
         }
         .onChange(of: code) { _, newValue in
             let normalized = String(WatchPartyCode.normalize(newValue).prefix(WatchPartyCode.length))
             if normalized != newValue { code = normalized }
+            if previewCode != normalized {
+                previewRequestID = UUID()
+                roomPreview = nil
+                previewCode = nil
+            }
         }
         .onChange(of: service.session?.party?.code) { oldCode, newCode in
-            guard oldCode == nil, newCode != nil else { return }
-            focusedAction = owner.presentation == nil ? "choose-source" : "catch-up"
+            guard oldCode == nil, newCode != nil, canUseAccount else { return }
+            focusedAction = preferredRoomFocus
         }
         .sheet(isPresented: $showingInvitation) {
             if let party = service.session?.party, WatchPartyCode.isValid(party.code) {
                 WatchPartyLobbyInvitation(code: WatchPartyCode.normalize(party.code))
             }
         }
-        .onChange(of: service.session?.party?.id) { _, _ in
-            // Never keep an invitation visible after leaving or replacing a room.
+        .onChange(of: service.session?.party?.id) { _, newID in
             showingInvitation = false
+            if reviewRoomID != newID {
+                reviewRoomID = nil
+                reviewMediaKey = nil
+            }
+            if canUseAccount { focusedAction = preferredRoomFocus }
+        }
+        .onChange(of: service.session?.party?.media.key) { oldKey, newKey in
+            guard WatchPartyMediaReviewPolicy.changed(from: oldKey, to: newKey),
+                  let party = service.session?.party, let newKey else { return }
+            reviewRoomID = party.id
+            reviewMediaKey = newKey
+            focusedAction = preferredRoomFocus
+        }
+        .onChange(of: service.session?.connection) { _, _ in
+            if canUseAccount { focusedAction = preferredRoomFocus }
+        }
+        .onChange(of: service.session?.membershipExit) { _, _ in
+            if canUseAccount { focusedAction = preferredRoomFocus }
+        }
+        .onChange(of: canUseAccount) { _, allowed in
+            accountGateFocused = !allowed
+            focusedAction = allowed ? preferredRoomFocus : nil
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
@@ -85,6 +118,23 @@ struct WatchPartyLobbyView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    private var needsMediaReview: Bool {
+        guard let party = service.session?.party else { return false }
+        return reviewRoomID == party.id && reviewMediaKey == party.media.key
+    }
+
+    private var preferredRoomFocus: String? {
+        let room = service.session
+        return WatchPartyRoomFocusPolicy.initialAction(
+            hasRoom: room?.party != nil,
+            membershipEnded: room?.membershipExit != nil,
+            connectionReady: room?.connection == .ready,
+            playerAttached: owner.presentation?.mount.isCurrent == true,
+            busy: service.busy || operation != nil,
+            needsMediaReview: needsMediaReview
+        )
     }
 
     private var header: some View {
