@@ -65,16 +65,20 @@ struct WatchPartyLobbyView: View {
         .onChange(of: service.session?.party?.id) { _, _ in
             // Never keep an invitation visible after leaving or replacing a room.
             showingInvitation = false
-            if service.session?.party != nil {
-                focusedAction = owner.presentation?.mount.isCurrent == true ? "catch-up" : "choose-source"
-            } else {
-                focusedAction = "room-code"
-            }
+            focusedAction = preferredRoomFocus
+        }
+        .onChange(of: service.session?.connection) { _, _ in
+            // The source action is disabled during recovery. Focus Reconnect instead.
+            focusedAction = preferredRoomFocus
+        }
+        .onChange(of: service.session?.membershipExit) { _, _ in
+            focusedAction = preferredRoomFocus
+        }
+        .onChange(of: owner.presentation?.id) { _, _ in
+            focusedAction = preferredRoomFocus
         }
         .onAppear {
-            focusedAction = service.session?.party != nil
-                ? (owner.presentation?.mount.isCurrent == true ? "catch-up" : "choose-source")
-                : "room-code"
+            focusedAction = preferredRoomFocus
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
@@ -84,6 +88,17 @@ struct WatchPartyLobbyView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    private var preferredRoomFocus: String? {
+        let room = service.session
+        return WatchPartyRoomFocusPolicy.initialAction(
+            hasRoom: room?.party != nil,
+            membershipEnded: room?.membershipExit != nil,
+            connectionReady: room?.connection == .ready,
+            playerAttached: owner.presentation?.mount.isCurrent == true,
+            busy: service.busy || operation != nil
+        )
     }
 
     private var header: some View {
