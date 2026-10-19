@@ -10,6 +10,13 @@ struct PlaybackDiagnosticTimeline: Codable, Sendable, Equatable {
         case subtitleSelectionRequested, subtitleSelectionReturned, externalSubtitleRequested
         case controlsShown, controlsHidden, settingsOpened, settingsClosed
         case sidePanelOpened, sidePanelClosed, backPressed, sourceSelectionRequested
+        // Opt-in, allowlisted Watch Party breadcrumbs: no room IDs, codes, member IDs or URLs.
+        case partyPauseReceived, partyPlayReceived, partyStateRejected
+        case partyPauseAccepted, partyPlayAccepted
+        case partyPauseBindingObserved, partyPlayBindingObserved
+        case partyBindingDeferredSample, partyBindingDeferredBehind, partyBindingDeferredBusy
+        case partyRemotePauseStarted, partyRemotePlayStarted
+        case partyRemoteTransportIssued, partyRemoteEffectFailed
     }
 
     enum Engine: String, Codable, Sendable { case aether, mpv }
