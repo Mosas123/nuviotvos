@@ -17,6 +17,10 @@ struct WatchPartyLobbyView: View {
     @State private var preview: WatchPartyPreview?
     @State private var previewedCode: String?
     @State private var previewRequestID = UUID()
+    // Explicit re-confirmation if the authoritative room changes title/episode
+    // after preview or while the member remains connected.
+    @State private var reviewRoomID: String?
+    @State private var reviewMediaKey: String?
     @State private var operation: Task<Void, Never>?
     @State private var endingRoom = false
     @State private var showingInvitation = false
@@ -62,10 +66,23 @@ struct WatchPartyLobbyView: View {
                 WatchPartyLobbyInvitation(code: WatchPartyCode.normalize(party.code))
             }
         }
-        .onChange(of: service.session?.party?.id) { _, _ in
-            // Never keep an invitation visible after leaving or replacing a room.
+        .onChange(of: service.session?.party?.id) { _, newID in
+            // Never carry a confirmation into a different membership.
             showingInvitation = false
+            if reviewRoomID != newID {
+                reviewRoomID = nil
+                reviewMediaKey = nil
+            }
             focusedAction = canUseAccount ? preferredRoomFocus : nil
+        }
+        .onChange(of: service.session?.party?.media.key) { oldKey, newKey in
+            guard let oldKey, let newKey, oldKey != newKey,
+                  let party = service.session?.party else { return }
+            // A room can switch episodes while the user is browsing the sidebar.
+            // Do not let a stale focused source button launch the new title silently.
+            reviewRoomID = party.id
+            reviewMediaKey = newKey
+            focusedAction = "review-room"
         }
         .onChange(of: service.session?.connection) { _, _ in
             // The source action is disabled during recovery. Focus Reconnect instead.
@@ -108,6 +125,10 @@ struct WatchPartyLobbyView: View {
 
     private var preferredRoomFocus: String? {
         let room = service.session
+        if requiresMediaReview, !service.busy && operation == nil,
+           room?.connection == .ready && room?.membershipExit == nil {
+            return "review-room"
+        }
         return WatchPartyRoomFocusPolicy.initialAction(
             hasRoom: room?.party != nil,
             membershipEnded: room?.membershipExit != nil,
@@ -115,6 +136,11 @@ struct WatchPartyLobbyView: View {
             playerAttached: owner.presentation?.mount.isCurrent == true,
             busy: service.busy || operation != nil
         )
+    }
+
+    private var requiresMediaReview: Bool {
+        guard let party = service.session?.party else { return false }
+        return reviewRoomID == party.id && reviewMediaKey == party.media.key
     }
 
     private var header: some View {
@@ -271,8 +297,11 @@ struct WatchPartyLobbyView: View {
                 onCancelSelection()
                 run {
                     try await service.join(code: expectedCode)
-                    if let joined = service.session?.party?.media, joined.key != expectedMedia {
-                        owner.message = "The room changed its title or episode after preview. Review the current room before choosing a source."
+                    if let joined = service.session?.party, joined.media.key != expectedMedia {
+                        reviewRoomID = joined.id
+                        reviewMediaKey = joined.media.key
+                        owner.message = "The room changed its title or episode after preview. Confirm the current content before choosing a source."
+                        focusedAction = "review-room"
                     }
                 }
             } label: {
@@ -481,7 +510,35 @@ struct WatchPartyLobbyView: View {
                 statusRow(symbol: "antenna.radiowaves.left.and.right",
                           title: sharedNotice, tint: .white)
             }
-            primaryRoomAction(room, party: party)
+            if requiresMediaReview {
+                statusRow(
+                    symbol: "exclamationmark.triangle.fill",
+                    title: "This room now has different content: \(party.media.title)\(episodeDescription(party.media).map { " · " + $0 } ?? ""). Confirm the title before selecting a source.",
+                    tint: .orange
+                )
+                Button {
+                    guard room.party?.id == reviewRoomID,
+                          room.party?.media.key == reviewMediaKey,
+                          room.connection == .ready, room.membershipExit == nil else { return }
+                    reviewRoomID = nil
+                    reviewMediaKey = nil
+                    owner.message = nil
+                    focusedAction = "choose-source"
+                } label: {
+                    primaryActionLabel(
+                        symbol: "checkmark.shield",
+                        title: "Confirm current movie or episode",
+                        subtitle: "Only then can you choose a source for this room",
+                        isFocused: focusedAction == "review-room"
+                    )
+                }
+                .buttonStyle(PosterCardButtonStyle())
+                .focused($focusedAction, equals: "review-room")
+                .disabled(service.busy || operation != nil || room.connection != .ready
+                    || room.membershipExit != nil)
+            } else {
+                primaryRoomAction(room, party: party)
+            }
 
             Button {
                 showingInvitation = true
