@@ -358,9 +358,11 @@ struct WatchPartyLobbyView: View {
                         .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(.white.opacity(0.7))
                 }
-                Text(owner.presentation?.mount.isCurrent == true
-                     ? "Playback is attached to this room."
-                     : "You're still in this room. Choose a source to watch again.")
+                Text(room.membershipExit != nil
+                     ? "Your room membership ended. A new join is required."
+                     : owner.presentation?.mount.isCurrent == true
+                         ? "Playback is attached to this room."
+                         : "You're still in this room. Choose a source to watch again.")
                     .font(.system(size: 16))
                     .foregroundStyle(.white.opacity(0.7))
             }
