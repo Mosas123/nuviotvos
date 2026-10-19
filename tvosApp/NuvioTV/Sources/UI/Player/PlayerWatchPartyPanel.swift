@@ -51,7 +51,7 @@ struct PlayerWatchPartyPanel: View {
 
     private var openLobbyButton: some View {
         Button(action: onOpenLobby) {
-            PlayerPanelRow(title: "Open Watch Party lobby", subtitle: "Create a room or join with an invitation code.")
+            PlayerPanelRow(title: "Open Watch Party tab", subtitle: "Join by code or choose your own source for this room.")
         }
         .buttonStyle(PosterCardButtonStyle())
         .focusEffectDisabledIfAvailable()
