@@ -16,6 +16,7 @@ struct WatchPartyLobbyView: View {
     @State private var code = ""
     @State private var preview: WatchPartyPreview?
     @State private var previewedCode: String?
+    @State private var previewRequestID = UUID()
     @State private var operation: Task<Void, Never>?
     @State private var endingRoom = false
     @State private var showingInvitation = false
@@ -51,6 +52,7 @@ struct WatchPartyLobbyView: View {
             if normalized != newValue { code = normalized }
             // A preview never authorizes joining a different invitation.
             if previewedCode != normalized {
+                previewRequestID = UUID()
                 preview = nil
                 previewedCode = nil
             }
@@ -165,9 +167,12 @@ struct WatchPartyLobbyView: View {
             } else {
                 Button {
                     let requestedCode = WatchPartyCode.normalize(code)
+                    let requestID = UUID()
+                    previewRequestID = requestID
                     run {
                         let result = try await service.preview(code: requestedCode)
-                        guard WatchPartyCode.normalize(code) == requestedCode else { return }
+                        guard previewRequestID == requestID,
+                              WatchPartyCode.normalize(code) == requestedCode else { return }
                         guard result.error == nil, let media = result.media else {
                             owner.message = "The room could not be verified. Check its code and try again."
                             return
@@ -249,6 +254,7 @@ struct WatchPartyLobbyView: View {
             .focused($focusedAction, equals: "join")
             .disabled(service.busy || operation != nil || result.isFull || service.membershipOutcomeUncertain)
             Button("Use a different room code") {
+                previewRequestID = UUID()
                 preview = nil
                 previewedCode = nil
                 focusedAction = "room-code"
@@ -516,8 +522,8 @@ struct WatchPartyLobbyView: View {
             } label: {
                 primaryActionLabel(
                     symbol: "play.fill",
-                    title: "Choose my source",
-                    subtitle: "Pick any source you have for this title or episode",
+                    title: "Choose source for this title",
+                    subtitle: "Open the exact movie or episode assigned to this room",
                     isFocused: focusedAction == "choose-source"
                 )
             }
