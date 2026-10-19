@@ -161,6 +161,17 @@ extension AetherEngine {
         }
     }
 
+    /// Await release of every paused-only scrub decoder, including the software host's packet-cache
+    /// still extractor. Snapshot before the first await so a later source load owns its own contexts.
+    public func closeAuxiliaryScrubExtractorsAndWait() async {
+        let extractors = scrubThumbnailExtractors.map(\.extractor)
+        let stillHost = softwareHost
+        await stillHost?.closeAuxiliaryStillExtractor()
+        for extractor in extractors {
+            await extractor.closeAuxiliaryContext()
+        }
+    }
+
     /// True when the active session can serve cache-backed stills from `scrubThumbnail` with no
     /// second connection: any native session (live or VOD, SegmentCache), a software live session
     /// (DVR packet ring, #544) and a software VOD session reading a remote source (packet cache,
