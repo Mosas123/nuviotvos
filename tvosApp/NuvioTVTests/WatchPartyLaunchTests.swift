@@ -28,6 +28,32 @@ final class WatchPartyLaunchTests: XCTestCase {
         XCTAssertThrowsError(try WatchPartyLaunchPolicy.mediaForDetails(meta, episode: episode))
     }
 
+    func testPlaybackKeepsRoomIDWhenKnownAliasMatches() throws {
+        let meta = NuvioMeta(id: "tmdb:42", name: "Movie", imdbId: "tt42", type: "movie")
+        let room = WatchPartyMedia(type: "movie", metaID: "tmdb:42", metaType: "movie")
+        let selected = try WatchPartyLaunchPolicy.mediaForPlayback(meta, episode: nil, room: room)
+        XCTAssertEqual(selected.metaID, "tmdb:42")
+        XCTAssertNoThrow(try WatchPartyLaunchPolicy.validateSelection(selected, room: room))
+    }
+
+    func testPlaybackNormalizesAlternateSeriesTypeAndEpisode() throws {
+        let meta = NuvioMeta(id: "tt55", name: "Show", type: "tv")
+        let episode = NuvioVideo(id: "tt55:2:3", title: "Episode", season: 2, episode: 3)
+        let room = WatchPartyMedia(type: "series", metaID: "tt55", metaType: "series",
+                                   season: 2, episode: 3)
+        let selected = try WatchPartyLaunchPolicy.mediaForPlayback(meta, episode: episode, room: room)
+        XCTAssertEqual(selected.metaType, "series")
+        XCTAssertNoThrow(try WatchPartyLaunchPolicy.validateSelection(selected, room: room))
+    }
+
+    func testPlaybackDoesNotAdoptUnknownRoomID() throws {
+        let meta = NuvioMeta(id: "tmdb:42", name: "Same title", imdbId: "tt42", type: "movie")
+        let room = WatchPartyMedia(type: "movie", metaID: "tt999", metaType: "movie")
+        let selected = try WatchPartyLaunchPolicy.mediaForPlayback(meta, episode: nil, room: room)
+        XCTAssertEqual(selected.metaID, "tt42")
+        XCTAssertThrowsError(try WatchPartyLaunchPolicy.validateSelection(selected, room: room))
+    }
+
     func testMovieOwnSelectionMatchesRoomWithoutComparingReceivedURLs() throws {
         let room = WatchPartyMedia(type: "movie", metaID: "tt1", metaType: "movie", title: "Host title")
         let own = WatchPartyMedia(type: "movie", metaID: "tt1", metaType: "MOVIE", title: "Localized title")
