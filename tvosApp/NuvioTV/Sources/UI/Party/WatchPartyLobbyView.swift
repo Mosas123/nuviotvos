@@ -439,6 +439,20 @@ struct WatchPartyLobbyView: View {
 
     private func roomActions(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         VStack(alignment: .leading, spacing: 16) {
+            // Show that the host shared a source without exposing private URLs,
+            // headers, query parameters or tokens on the television screen.
+            if room.memberID != party.hostMemberID,
+               room.connection == .ready,
+               let stream = room.sharedStream,
+               stream.mediaKey == party.media.key {
+                let host = room.members.first(where: { $0.id == party.hostMemberID })
+                let hostName = host?.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                statusRow(
+                    symbol: "antenna.radiowaves.left.and.right",
+                    title: "\(hostName.flatMap { $0.isEmpty ? nil : $0 } ?? "The host") shared a source (Beta). Direct shared-source playback isn't enabled on Apple TV yet; choose your own source.",
+                    tint: .white
+                )
+            }
             primaryRoomAction(room, party: party)
 
             Button {
