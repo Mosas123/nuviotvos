@@ -9,6 +9,24 @@ final class WatchPartyFoundationTests: XCTestCase {
                            rate: rate, at: at, mediaKey: mediaKey, waiting: waiting)
     }
 
+    func testRoomReturnFocusAlwaysTargetsAvailableAction() {
+        func focus(_ hasRoom: Bool, _ ended: Bool, _ ready: Bool,
+                   _ player: Bool, _ busy: Bool = false) -> String? {
+            WatchPartyRoomFocusPolicy.initialAction(
+                hasRoom: hasRoom, membershipEnded: ended,
+                connectionReady: ready, playerAttached: player, busy: busy
+            )
+        }
+        XCTAssertEqual(focus(false, false, false, false), "room-code")
+        XCTAssertEqual(focus(true, false, true, false), "choose-source")
+        XCTAssertEqual(focus(true, false, true, true), "catch-up")
+        XCTAssertEqual(focus(true, false, false, false), "reconnect")
+        XCTAssertEqual(focus(true, false, false, true), "reconnect")
+        XCTAssertEqual(focus(true, true, false, false), "leave")
+        XCTAssertEqual(focus(true, true, true, true), "leave")
+        XCTAssertNil(focus(true, false, true, false, true))
+    }
+
     func testGuestSharedSourceNoticeNeverExposesURLOrHeaders() {
         let stream = WatchPartyStream(
             mediaKey: "movie|tt1||",
