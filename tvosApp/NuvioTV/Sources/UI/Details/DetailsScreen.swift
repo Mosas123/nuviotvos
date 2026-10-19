@@ -41,6 +41,8 @@ struct DetailsScreen: View {
         _ isActionPlaybackSession: Bool
     ) -> Void
     let onBack: () -> Void
+    /// Host a room for the current title or a specific series episode.
+    var onCreateWatchParty: ((NuvioMeta, NuvioVideo?) -> Void)? = nil
     /// Open another title (More Like This / production catalog).
     var onOpenTitle: ((String, String) -> Void)? = nil
     /// Open a production company / network catalog.
@@ -56,6 +58,8 @@ struct DetailsScreen: View {
 
     @StateObject private var viewModel: DetailsViewModel
     @State private var isStreamPickerPresented = false
+    @State private var isWatchPartyEpisodePickerPresented = false
+    @State private var pendingWatchPartySelection: (NuvioMeta, NuvioVideo)?
     @State private var isSmartPlaybackPending = false
     @State private var isPreparingPlayback = false
     @State private var isPreparingInitialPlayback = false
@@ -148,6 +152,7 @@ struct DetailsScreen: View {
             _ isActionPlaybackSession: Bool
         ) -> Void,
         onBack: @escaping () -> Void,
+        onCreateWatchParty: ((NuvioMeta, NuvioVideo?) -> Void)? = nil,
         onOpenTitle: ((String, String) -> Void)? = nil,
         onOpenProduction: ((MetaCompany) -> Void)? = nil,
         onOpenPerson: ((TmdbPersonMetadata) -> Void)? = nil
@@ -158,6 +163,7 @@ struct DetailsScreen: View {
         self.onInitialPlaybackRequestConsumed = onInitialPlaybackRequestConsumed
         self.onPlayClick = onPlayClick
         self.onBack = onBack
+        self.onCreateWatchParty = onCreateWatchParty
         self.onOpenTitle = onOpenTitle
         self.onOpenProduction = onOpenProduction
         self.onOpenPerson = onOpenPerson
@@ -232,6 +238,14 @@ struct DetailsScreen: View {
                             forceManualPicker: true
                         )
                     },
+                    onHostWatchParty: onCreateWatchParty == nil ? nil : {
+                        guard let meta = viewModel.uiState.meta else { return }
+                        if meta.isSeries {
+                            isWatchPartyEpisodePickerPresented = true
+                        } else {
+                            onCreateWatchParty?(meta, nil)
+                        }
+                    },
                     onEpisodeSelected: { video in
                         if creatingWatchPartyRoom, let meta = viewModel.uiState.meta {
                             onWatchPartyMediaSelected?(meta, video)
@@ -283,7 +297,7 @@ struct DetailsScreen: View {
                 // While the stream picker is open it sits on top as a full-screen
                 // overlay; disable the details content so the focus engine can't
                 // route focus to the (hidden) buttons behind it.
-                .disabled(isStreamPickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
+                .disabled(isStreamPickerPresented || isWatchPartyEpisodePickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
                 #else
                 MobileDetailsContent(
                     uiState: viewModel.uiState,
@@ -331,6 +345,26 @@ struct DetailsScreen: View {
             }
         }
         #if os(tvOS)
+        .fullScreenCover(isPresented: $isWatchPartyEpisodePickerPresented, onDismiss: {
+            // Wait for the native focus hierarchy to dismiss before navigating.
+            guard let selection = pendingWatchPartySelection else { return }
+            pendingWatchPartySelection = nil
+            onCreateWatchParty?(selection.0, selection.1)
+        }) {
+            if let meta = viewModel.uiState.meta {
+                WatchPartyDetailsEpisodePicker(
+                    episodes: (meta.videos ?? []).filter { $0.episode > 0 && $0.season >= 0 },
+                    onSelect: { episode in
+                        pendingWatchPartySelection = (meta, episode)
+                        isWatchPartyEpisodePickerPresented = false
+                    },
+                    onCancel: {
+                        pendingWatchPartySelection = nil
+                        isWatchPartyEpisodePickerPresented = false
+                    }
+                )
+            }
+        }
         // Present sources in an isolated full-screen focus hierarchy. Keeping
         // this overlay inside the details screen's vertical ScrollView ancestry
         // lets tvOS apply focus-visibility corrections to the shared host,
@@ -3165,12 +3199,84 @@ private enum TvDetailsFocusSection: Hashable {
     case comments
 }
 
+/// A separate focus hierarchy for choosing the exact episode to host.
+private struct WatchPartyDetailsEpisodePicker: View {
+    let episodes: [NuvioVideo]
+    let onSelect: (NuvioVideo) -> Void
+    let onCancel: () -> Void
+
+    @FocusState private var focusedEpisodeID: String?
+
+    private var sortedEpisodes: [NuvioVideo] {
+        episodes.sorted {
+            ($0.season, $0.episode, $0.id) < ($1.season, $1.episode, $1.id)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 26) {
+            HStack {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Choose an episode")
+                        .font(.system(size: 40, weight: .bold))
+                    Text("Your Watch Party room will be created for this exact episode.")
+                        .font(.system(size: 21))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel", action: onCancel)
+            }
+            .padding(.horizontal, 64)
+
+            if sortedEpisodes.isEmpty {
+                ContentUnavailableView(
+                    "Episodes unavailable",
+                    systemImage: "tv",
+                    description: Text("Wait for the episode list to load before creating a room.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ForEach(sortedEpisodes, id: \.id) { episode in
+                            Button {
+                                onSelect(episode)
+                            } label: {
+                                HStack(spacing: 20) {
+                                    Text("S\(episode.season) · E\(episode.episode)")
+                                        .font(.system(size: 23, weight: .semibold, design: .monospaced))
+                                    Text(episode.title)
+                                        .font(.system(size: 22))
+                                        .lineLimit(2)
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                }
+                                .padding(22)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
+                            }
+                            .buttonStyle(.plain)
+                            .focused($focusedEpisodeID, equals: episode.id)
+                        }
+                    }
+                    .padding(.horizontal, 64)
+                }
+            }
+        }
+        .padding(.vertical, 46)
+        .background(Color.black.ignoresSafeArea())
+        .onAppear { focusedEpisodeID = sortedEpisodes.first?.id }
+        .onExitCommand(perform: onCancel)
+    }
+}
+
 struct TvDetailsContent: View {
     let uiState: DetailsUiState
     var initialPlayRequestID: UInt? = nil
     var onInitialPlayRequestConsumed: ((UInt) -> Void)? = nil
     let onPlayClick: () -> Void
     var onPlayManually: (() -> Void)? = nil
+    var onHostWatchParty: (() -> Void)? = nil
     let onEpisodeSelected: (NuvioVideo) -> Void
     var onEpisodePlayManually: ((NuvioVideo) -> Void)? = nil
     var onEpisodeMenuPresented: ((Bool) -> Void)? = nil
@@ -3461,6 +3567,7 @@ struct TvDetailsContent: View {
             onPlayLongPress: canBypassPicker ? {
                 handlePlayLongPress(playTarget: playTarget)
             } : nil,
+            onHostWatchParty: onHostWatchParty,
             onWatchlistClick: onWatchlistClick,
             onWatchedClick: onWatchedClick,
             onRateClick: onRateClick != nil ? {
@@ -4286,7 +4393,7 @@ private struct TvDetailsLogo: View {
 /// (tvOS doesn't auto-focus the primary button when the details content swaps in
 /// after the async load — see `TvDetailsContent`).
 private enum DetailsActionFocus: Hashable {
-    case play, watchlist, watched, rate, trailer
+    case play, party, watchlist, watched, rate, trailer
 }
 
 private enum DetailsCastHeaderFocus: Hashable {
@@ -4300,6 +4407,7 @@ private struct TvDetailsActionRow: View {
     var playHint: String = L10n.string("details_play_hint", fallback: "Starts playback or opens stream sources")
     let onPlayClick: () -> Void
     var onPlayLongPress: (() -> Void)? = nil
+    var onHostWatchParty: (() -> Void)? = nil
     let onWatchlistClick: () -> Void
     let onWatchedClick: () -> Void
     var mdbListUserRating: Int? = nil
@@ -4326,6 +4434,22 @@ private struct TvDetailsActionRow: View {
                 longPressAction: onPlayLongPress,
                 onBack: onBack
             )
+
+            if let onHostWatchParty {
+                TvDetailsActionButton(
+                    title: nil,
+                    systemName: "person.2.fill",
+                    accessibilityLabel: "Create Watch Party",
+                    accessibilityHint: "Host a private room for this title",
+                    isPrimary: false,
+                    focus: focus,
+                    tag: .party,
+                    action: onHostWatchParty,
+                    onFocus: onFocus,
+                    onBack: onBack
+                )
+                .disabled(entryLocked)
+            }
 
             TvDetailsActionButton(
                 title: nil,
