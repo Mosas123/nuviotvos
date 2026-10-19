@@ -30,3 +30,23 @@ Separate RFC: `docs/watch-party-room-source-lifecycle-rfc.md`. Current realtime 
 ## Current delivery status
 
 **Not ready for PR/merge**. No Xcode build, XCTest, Apple TV/Fire TV QA or backend integration was run. No confirmed bug/severity is assigned to the unverified host-identity or header concerns.
+
+## Return-to-player audit (CP-321)
+
+Status: static review completed; return UI is not implemented.
+
+- Normal Back in ContentView.dismissPlayer calls WatchPartyAppOwner.finishPlayback unless the exact owned coordinator is actively in PiP or restoring. finishPlayback invalidates the lease/runtime and clears the presentation. Keeping room membership does not retain the player.
+- WatchPartyPlaybackRuntime.detachFullscreen invalidates the resource when keepingPictureInPicture is false. A stale lease cannot be restored merely by retaining its URL or room ID.
+- The lobby's current Catch up with room action invokes catchUpWithWatchParty on a live mount; it does not navigate back to the fullscreen surface.
+- The working system PiP restore path calls WatchPartyAppOwner.restorePlayback for the exact coordinator, rebuilds the root player surface from ActivePlaybackContext, and waits for fullscreenSurfaceDidRebind before completing AVKit restoration.
+- Calling stopPictureInPicture directly is not a return-to-player implementation: didStop without the restoration handshake runs onDidStopPiPWithoutRestoring and invalidates the Watch Party player.
+- Do not call onRestoreUI directly from the lobby or synthesize AVKit delegate callbacks. A future sidebar return action needs a supported restoration entry point that owns the generation, coordinator, pending completion and surface-rebind handshake.
+- Before implementing that entry point, define whether normal Back should stop playback (current semantics) or retain it through a distinct explicit action. Do not silently keep audio/video running behind the sidebar or promise restoration after app termination.
+- When the lease has already been released, keep Choose my source as the available action. When PiP is live, system expand remains the existing restore route until the new action is implemented and tested.
+- Required integration checks: same coordinator and membership, movie/episode identity, PiP start failure, close versus expand, source replacement, profile/auth change, room end and stale onDisappear callbacks. Cover Aether and MPV separately; the current PiP manager requires the Aether backend.
+
+## Server-contract discovery (CP-321)
+
+WatchPartyAPI uses authenticated PostgREST RPCs watch_party_create/join/heartbeat/update and related functions. Searching the app repositories for realtime.messages policies and accessible NuvioMedia server/sync repositories did not identify the authoritative backend implementation. An empty search is not proof that no backend exists.
+
+Before guest shared-source playback or room-lifetime persistence, obtain the server repository/migrations for these RPCs and the private watch-party channel authorization policies. The member_id claimed inside a peer message alone does not establish its authenticated sender. No server writes, Android writes, source forwarding, migrations or new playback button were added by this audit.
