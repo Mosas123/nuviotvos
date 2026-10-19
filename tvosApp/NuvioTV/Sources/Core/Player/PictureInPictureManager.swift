@@ -83,9 +83,7 @@ final class PictureInPictureManager: NSObject, ObservableObject {
     private var possibleObservation: NSKeyValueObservation?
     private var cancellables = Set<AnyCancellable>()
     private var isRestoringUI = false
-    private var pendingRestoreCompletion: ((Bool) -> Void)?
-    private var pendingRestoreResult: Bool?
-    private var restoreSurfaceReady = false
+    private let restoreRequest = PlayerPiPRestoreRequest()
     private weak var configuredSoftwareDisplayLayer: CALayer?
     private let softwareSkipRequests = PlayerPiPRequests()
     private var sessionGeneration = UUID()
@@ -165,7 +163,6 @@ final class PictureInPictureManager: NSObject, ObservableObject {
         let oldController = pipController
         let hadPendingOrActivePiP = pipStartState.isInProgress
         _ = pipStartState.stop()
-        let completion = pendingRestoreCompletion
         pipController = nil
         oldController?.delegate = nil
         possibleObservation?.invalidate()
@@ -180,12 +177,9 @@ final class PictureInPictureManager: NSObject, ObservableObject {
         isPictureInPicturePossible = false
         configuredSoftwareDisplayLayer = nil
         lastSoftwarePaused = nil
-        pendingRestoreCompletion = nil
-        pendingRestoreResult = nil
         isRestoringUI = false
-        restoreSurfaceReady = false
         softwareSkipRequests.cancelAll()
-        completion?(false)
+        restoreRequest.cancel()
     }
 
     /// Sets up or reconfigures the `AVPictureInPictureController` for the given Aether controller.
@@ -324,6 +318,35 @@ final class PictureInPictureManager: NSObject, ObservableObject {
         pipController?.stopPictureInPicture()
     }
 
+    /// Explicit app return for the exact retained session. Keep PiP alive until
+    /// its fullscreen surface is mounted; ordinary stop still means close.
+    @discardableResult
+    func restoreFullscreen(
+        for coordinator: PlaybackSessionCoordinator,
+        completion: @escaping (Bool) -> Void
+    ) -> Bool {
+        guard activeCoordinator === coordinator, let pip = pipController,
+              isPictureInPictureActive, pipStartState.isActive, !isRestoringUI,
+              activeContext != nil, onRestoreUI != nil else { return false }
+        let generation = sessionGeneration
+        restoreUserInterface(for: pip) { [weak self, weak pip, weak coordinator] success in
+            guard let self, let pip, let coordinator,
+                  self.sessionGeneration == generation, self.pipController === pip,
+                  self.activeCoordinator === coordinator else {
+                completion(false)
+                return
+            }
+            if success {
+                pip.stopPictureInPicture()
+            } else {
+                self.isRestoringUI = false
+                self.restoreRequest.cancel()
+            }
+            completion(success)
+        }
+        return true
+    }
+
     func togglePictureInPicture() {
         if pipStartState.isInProgress {
             stopPictureInPicture()
@@ -425,62 +448,57 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
             invalidateSession()
             return
         }
-        if sessionGeneration == stoppedGeneration { isRestoringUI = false }
+        if sessionGeneration == stoppedGeneration, !restoreRequest.isPending {
+            isRestoringUI = false
+            restoreRequest.cancel()
+        }
     }
 
     /// Called by the mounted full-screen Aether surface. AVKit's restore
     /// completion must wait until this rebind has happened; acknowledging it
     /// as soon as `activeScreen` changes can let AVKit tear down PiP while the
     /// new SwiftUI hierarchy still owns an empty surface.
-    func fullscreenSurfaceDidRebind() {
-        guard isRestoringUI else { return }
-        restoreSurfaceReady = true
-        activeAetherController?.rebindSurface()
-        finishRestoreIfReady()
+    func fullscreenSurfaceDidRebind(for controller: AetherPlaybackController) {
+        guard isRestoringUI, activeAetherController === controller else { return }
+        let generation = sessionGeneration
+        controller.rebindSurface()
+        guard sessionGeneration == generation, activeAetherController === controller else { return }
+        restoreRequest.surfaceDidRebind()
+        if sessionGeneration == generation, !restoreRequest.isPending, !pipStartState.isInProgress {
+            isRestoringUI = false
+            restoreRequest.cancel()
+        }
     }
 
-    private func finishRestoreIfReady() {
-        guard let result = pendingRestoreResult,
-              let completion = pendingRestoreCompletion,
-              !result || restoreSurfaceReady else { return }
-        pendingRestoreResult = nil
-        pendingRestoreCompletion = nil
-        completion(result)
+    private func restoreUserInterface(
+        for pip: AVPictureInPictureController,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard pipController === pip else { completion(false); return }
+        isRestoringUI = true
+        guard let token = restoreRequest.begin(completion: completion) else { return }
+        let generation = sessionGeneration
+        guard let context = activeContext, let onRestoreUI else {
+            restoreRequest.acceptUIResult(false, for: token)
+            return
+        }
+        onRestoreUI(context) { [weak self, weak pip] success in
+            guard let self, let pip, self.sessionGeneration == generation,
+                  self.pipController === pip else { return }
+            self.restoreRequest.acceptUIResult(success, for: token)
+            // AVKit may report didStop before an asynchronous UI acknowledgement.
+            if !self.restoreRequest.isPending, !self.pipStartState.isInProgress {
+                self.isRestoringUI = false
+                self.restoreRequest.cancel()
+            }
+        }
     }
 
     func pictureInPictureController(
         _ pictureInPictureController: AVPictureInPictureController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-        guard pipController === pictureInPictureController else {
-            completionHandler(false)
-            return
-        }
-        print("[PictureInPicture] restoreUserInterfaceForPictureInPictureStop")
-        let restoringGeneration = sessionGeneration
-        isRestoringUI = true
-        pendingRestoreCompletion = completionHandler
-        pendingRestoreResult = nil
-        restoreSurfaceReady = false
-
-        guard let context = activeContext else {
-            pendingRestoreResult = false
-            fullscreenSurfaceDidRebind()
-            return
-        }
-
-        if let onRestoreUI {
-            onRestoreUI(context) { [weak self, weak pictureInPictureController] success in
-                guard let self, let pip = pictureInPictureController,
-                      self.sessionGeneration == restoringGeneration,
-                      self.pipController === pip, self.pendingRestoreCompletion != nil else { return }
-                self.pendingRestoreResult = success
-                self.finishRestoreIfReady()
-            }
-        } else {
-            pendingRestoreResult = false
-            finishRestoreIfReady()
-        }
+        restoreUserInterface(for: pictureInPictureController, completion: completionHandler)
     }
 }
 
