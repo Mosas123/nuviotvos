@@ -23,7 +23,7 @@ struct PlayerWatchPartyPanel: View {
                         title: "Watch Party",
                         subtitle: service.membershipOutcomeUncertain
                             ? "Check the room status before trying again."
-                            : "Create or join a room in the Watch Party lobby."
+                            : "Join a room using an invitation code from the Watch Party tab."
                     )
                     openLobbyButton
                     if service.session?.membershipExit != nil {
@@ -61,16 +61,12 @@ struct PlayerWatchPartyPanel: View {
 
     @ViewBuilder
     private func roomRows(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
-        PlayerPanelRow(title: "Room code", subtitle: connectionText(room.connection), trailing: party.code)
-        if !party.media.title.isEmpty { PlayerPanelRow(title: party.media.title) }
-        ForEach(room.members, id: \.id) { member in
-            let role = member.id == room.memberID ? "You" : (member.id == party.hostMemberID ? "Host" : nil)
-            PlayerPanelRow(
-                title: member.displayName,
-                subtitle: room.presence[member.id]?.status.rawValue ?? "browsing",
-                trailing: role
-            )
-        }
+        roomOverview(room, party: party)
+        participantOverview(room, party: party)
+        PlayerPanelRow(
+            title: "Playback controls",
+            subtitle: party.hostOnly ? "Only the host can control playback." : "Participants can control playback."
+        )
 
         if owner.presentation?.mount.isCurrent == true {
             Button { viewModel.catchUpWithWatchParty() } label: {
@@ -101,6 +97,74 @@ struct PlayerWatchPartyPanel: View {
             Button("End room for everyone", role: .destructive) { endingRoom = true }
                 .buttonStyle(PosterCardButtonStyle())
                 .disabled(service.busy || operation != nil)
+        }
+    }
+
+    /// Server-issued code and membership information; never a source URL.
+    private func roomOverview(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("ROOM CODE")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .tracking(1)
+                    .foregroundStyle(.white.opacity(0.68))
+                Spacer()
+                Text(connectionText(room.connection))
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                Text(WatchPartyCode.formatted(party.code))
+                    .font(.system(size: 31, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 8)
+                Text(party.hostMemberID == room.memberID ? "HOST" : "GUEST")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            Text(party.media.title.isEmpty ? "Watch Party room" : party.media.title)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+            if let season = party.media.season, let episode = party.media.episode {
+                Text("Season \(season) · Episode \(episode)")
+                    .font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func participantOverview(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Participants")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Text("\(room.members.count) / \(party.maxMembers)")
+                    .font(.system(size: 15, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            if room.members.isEmpty {
+                Text("Waiting for participants…")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.white.opacity(0.7))
+            } else {
+                ForEach(room.members, id: \.id) { member in
+                    let isHost = member.id == party.hostMemberID
+                    let isMe = member.id == room.memberID
+                    PlayerPanelRow(
+                        title: member.displayName.isEmpty ? "Viewer" : member.displayName,
+                        subtitle: room.presence[member.id]?.status.rawValue ?? "browsing",
+                        trailing: isHost ? (isMe ? "Host · You" : "Host") : (isMe ? "You" : nil)
+                    )
+                }
+            }
         }
     }
 
