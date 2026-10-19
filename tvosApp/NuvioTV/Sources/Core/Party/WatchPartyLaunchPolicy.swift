@@ -49,11 +49,12 @@ enum WatchPartyMediaReviewPolicy {
 enum WatchPartyRoomFocusPolicy {
     static func initialAction(hasRoom: Bool, membershipEnded: Bool,
                               connectionReady: Bool, playerAttached: Bool,
-                              busy: Bool) -> String? {
+                              busy: Bool, needsMediaReview: Bool = false) -> String? {
         guard !busy else { return nil }
         guard hasRoom else { return "room-code" }
         if membershipEnded { return "leave" }
         if !connectionReady { return "reconnect" }
+        if needsMediaReview { return "review-room" }
         return playerAttached ? "catch-up" : "choose-source"
     }
 }
