@@ -27,7 +27,7 @@ enum WatchPartyLaunchPolicy {
     /// A series must select an explicit episode before contacting the server.
     static func mediaForDetails(_ meta: NuvioMeta, episode: NuvioVideo?) throws -> WatchPartyMedia {
         let series = meta.isSeries
-        guard !series || episode != nil, series || episode == nil else {
+        guard (series && episode != nil) || (!series && episode == nil) else {
             throw WatchPartyLaunchError.unsupportedMedia
         }
         let media = WatchPartyMedia(
