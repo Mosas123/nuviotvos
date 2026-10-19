@@ -66,3 +66,31 @@ enum WatchPartyLaunchPolicy {
         guard selection.key == room.key else { throw WatchPartyLaunchError.differentMedia }
     }
 }
+
+
+/// Presentation policy for explicit confirmation after the room changes content.
+/// Identity uses the canonical media key, never the displayed title.
+enum WatchPartyMediaReviewPolicy {
+    static func changed(from oldKey: String?, to newKey: String?) -> Bool {
+        guard let oldKey, let newKey else { return false }
+        return oldKey != newKey
+    }
+
+    static func needsConfirmation(previewKey: String, joinedKey: String) -> Bool {
+        previewKey != joinedKey
+    }
+}
+
+/// Prefer an enabled control when the sidebar regains focus after room operations.
+enum WatchPartyRoomFocusPolicy {
+    static func initialAction(hasRoom: Bool, membershipEnded: Bool,
+                              connectionReady: Bool, playerAttached: Bool,
+                              busy: Bool, needsMediaReview: Bool = false) -> String? {
+        guard !busy else { return nil }
+        guard hasRoom else { return "room-code" }
+        if membershipEnded { return "leave" }
+        if !connectionReady { return "reconnect" }
+        if needsMediaReview { return "review-room" }
+        return playerAttached ? "catch-up" : "choose-source"
+    }
+}
