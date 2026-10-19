@@ -43,6 +43,109 @@ final class WatchPartyCoordinationTests: XCTestCase {
         XCTAssertEqual(channel.states.map(\.seq), [2, 3])
     }
 
+    func testGuestManualSourceRefreshUsesExistingAndroidStateRequestAndCooldown() async throws {
+        let remote = Remote(), channel = Channel()
+        remote.hostMemberID = "other"
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        XCTAssertEqual(channel.stateRequestMemberIDs, ["me"],
+                       "Connection already requests state once for late join/reconnect")
+        let first = try await session.requestHostStreamRefresh()
+        XCTAssertTrue(first)
+        XCTAssertEqual(channel.stateRequestMemberIDs, ["me", "me"])
+        let duplicate = try await session.requestHostStreamRefresh()
+        XCTAssertFalse(duplicate, "Rapid remote presses must not fan out token-bearing responses")
+        XCTAssertEqual(channel.stateRequestMemberIDs.count, 2)
+    }
+
+    func testFailedManualSourceRefreshInvalidatesConnectionWithoutAutomaticReplay() async throws {
+        let remote = Remote(), channel = Channel()
+        remote.hostMemberID = "other"
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        XCTAssertEqual(channel.stateRequestMemberIDs.count, 1)
+        channel.failStateRequest = true
+        do {
+            _ = try await session.requestHostStreamRefresh()
+            XCTFail("Expected simulated transport failure")
+        } catch {
+            XCTAssertEqual(session.connection, .recovering)
+        }
+        XCTAssertEqual(channel.stateRequestMemberIDs.count, 1,
+                       "A failed send must not be replayed or sent twice")
+        XCTAssertNil(session.sharedStream)
+    }
+
+    func testHostCannotRequestGuestSourceRefresh() async throws {
+        let remote = Remote(), channel = Channel()
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        do {
+            _ = try await session.requestHostStreamRefresh()
+            XCTFail("Host must not issue a guest-only request")
+        } catch let error as WatchPartyStreamError {
+            XCTAssertEqual(error, .unavailable)
+        }
+        XCTAssertEqual(channel.stateRequestMemberIDs, ["me"])
+    }
+
+    func testGuestAcceptsOnlyCurrentHostStreamAndRevocationInvalidatesSelection() async throws {
+        let remote = Remote(), channel = Channel()
+        remote.hostMemberID = "other"
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        let source = WatchPartyStream(
+            mediaKey: "movie|tt1||", url: "https://example.test/video?token=private",
+            headers: ["User-Agent": "NuvioTV"],
+            responseHeaders: ["Content-Type": "video/mp4"]
+        )
+        func deliver(_ member: String, _ source: WatchPartyStream?) throws {
+            let payload = try JSONEncoder().encode(WatchPartyStreamMessage(memberID: member, stream: source))
+            channel.receive?(.message(name: "stream", payload: payload))
+        }
+        try deliver("not-the-host", source)
+        XCTAssertNil(session.sharedStream, "An unrelated participant cannot inject a source")
+        var wrong = source
+        wrong.mediaKey = "movie|tt2||"
+        try deliver("other", wrong)
+        XCTAssertNil(session.sharedStream, "The exact room movie or episode must match")
+        try deliver("other", source)
+        XCTAssertEqual(session.sharedStream, source)
+        let selected = try session.selectSharedStream(source)
+        XCTAssertEqual(selected.candidate.responseHeaders["Content-Type"], "video/mp4")
+        XCTAssertTrue(session.isCurrentSharedStreamSelection(selected))
+        try deliver("other", nil)
+        XCTAssertNil(session.sharedStream)
+        XCTAssertFalse(session.isCurrentSharedStreamSelection(selected),
+                       "A revoked source must not remain playable through an old selection")
+        XCTAssertThrowsError(try session.selectSharedStream(source))
+    }
+
+    func testGuestSourceSelectionInvalidatedOnConnectionLoss() async throws {
+        let remote = Remote(), channel = Channel()
+        remote.hostMemberID = "other"
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        try await session.start(snapshot: remote.snapshot)
+        let source = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://example.test/video")
+        let payload = try JSONEncoder().encode(WatchPartyStreamMessage(memberID: "other", stream: source))
+        channel.receive?(.message(name: "stream", payload: payload))
+        let selected = try session.selectSharedStream(source)
+        XCTAssertTrue(session.isCurrentSharedStreamSelection(selected))
+        channel.receive?(.disconnected)
+        XCTAssertNil(session.sharedStream)
+        XCTAssertFalse(session.isCurrentSharedStreamSelection(selected))
+    }
+
     func testFourClockSamplesKeepConnectionReadyWhenOneRefinementFails() async throws {
         let remote = Remote(), channel = Channel()
         let refined = expectation(description: "Four total clock RPC samples attempted")
@@ -372,10 +475,17 @@ final class WatchPartyCoordinationTests: XCTestCase {
         var receive: (@MainActor (WatchPartyChannelEvent) -> Void)?
         var onState: ((WatchPartyPlayback) -> Void)?
         var states: [WatchPartyPlayback] = []
+        var stateRequestMemberIDs: [String] = []
+        var failStateRequest = false
         func open(partyID: String, memberID: String, receive: @escaping @MainActor (WatchPartyChannelEvent) -> Void) async throws {
             isConnected = true; self.receive = receive
         }
         func send(event: String, payload: Data) async throws {
+            if event == "state_request" {
+                if failStateRequest { throw WatchPartyChannelError.disconnected }
+                let value = try JSONSerialization.jsonObject(with: payload) as? [String: String]
+                stateRequestMemberIDs.append(value?["member_id"] ?? "")
+            }
             if event == "state" {
                 let state = try JSONDecoder().decode(WatchPartyPlayback.self, from: payload)
                 states.append(state); onState?(state)
@@ -391,10 +501,11 @@ final class WatchPartyCoordinationTests: XCTestCase {
         var clockCalls = 0
         var failClockCall: Int?
         var onClock: ((Int) -> Void)?
+        var hostMemberID = "me"
         var snapshot: WatchPartySnapshot {
             let media = WatchPartyMedia(type: "movie", metaID: "tt1", metaType: "movie")
             let state = WatchPartyPlayback(seq: 1, memberID: "me", paused: false, positionMs: 1_000, at: 20_000, mediaKey: media.key)
-            return WatchPartySnapshot(party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: "me", media: media, playback: state),
+            return WatchPartySnapshot(party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: hostMemberID, media: media, playback: state),
                                       members: [WatchPartyMember(id: "me", displayName: "Me"), WatchPartyMember(id: "other", displayName: "Other")], memberID: "me")
         }
         func heartbeat(partyID: String, deviceID: String) async throws -> WatchPartySnapshot { snapshot }
