@@ -214,7 +214,8 @@ class PlayerViewModel: ObservableObject {
 
     // MARK: - Picture in Picture
     var isPictureInPictureSupported: Bool {
-        watchPartyPlayerBridge == nil && PictureInPictureManager.shared.isPictureInPictureSupported && activeEngineKind == .aether
+        PictureInPictureManager.shared.isPictureInPictureSupported && activeEngineKind == .aether
+            && (watchPartyPlayerBridge == nil || aetherController?.canUseWatchPartySoftwarePiP == true)
     }
     @Published var isPictureInPictureActive: Bool = false
     @Published var isPictureInPicturePossible: Bool = false
@@ -2551,6 +2552,9 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func tick(engineOverride: PlaybackEngineControlling? = nil) {
+        guard !didShutdown else { return }
+        watchPartyControls?.validateContext()
+        guard !didShutdown else { return }
         let sampledEngineKind = activeEngineKind
         let sampledLoadGeneration = sessionCoordinator.loadGeneration
         let c = engineOverride ?? engine
@@ -2563,6 +2567,9 @@ class PlayerViewModel: ObservableObject {
             trailerEndConfirmation.reset()
             return
         }
+        PictureInPictureManager.shared.refreshWatchPartyTimebase(for: sessionCoordinator)
+        guard !didShutdown, activeEngineKind == sampledEngineKind,
+              sessionCoordinator.loadGeneration == sampledLoadGeneration else { return }
         if pendingAdvanceResolutionGeneration != nil {
             trailerEndConfirmation.reset()
             if status != .buffering { status = .buffering }
@@ -3276,6 +3283,7 @@ class PlayerViewModel: ObservableObject {
         watchPartyControls = nil
         watchPartyPlayerBridge?.stop()
         watchPartyPlayerBridge = nil
+        PictureInPictureManager.shared.refreshController(for: sessionCoordinator)
     }
 
     func attachWatchPartyControls(binding: WatchPartyPlaybackBinding,
@@ -3285,9 +3293,9 @@ class PlayerViewModel: ObservableObject {
         }
         watchPartyControls = WatchPartyControlRouter(isCurrent: isCurrent,
             currentStamp: { [weak self] in self?.watchPartyPlayerStamp() },
-            canonicalRate: { [weak binding] in binding?.canonicalRate }, perform: { [weak binding] intent in
+            canonicalRate: { [weak binding] in binding?.canonicalRate }, perform: { [weak binding] intent, applied in
             guard let binding else { throw WatchPartyPlaybackBindingError.notReady }
-            try await binding.perform(intent)
+            try await binding.perform(intent, onApplied: applied)
         }, suspend: { [weak binding] in binding?.setSuspended($0) }, onError: { [weak self] error in
             self?.showPlayerToast((error as? WatchPartyPlaybackBindingError) == .busy
                 ? "Watch Party is synchronizing" : "Watch Party control unavailable")
@@ -3299,6 +3307,7 @@ class PlayerViewModel: ObservableObject {
         guard watchPartyPlayerBridge != nil else {
             playerController.setWatchPartyRemoteIntent(nil)
             aetherController?.setWatchPartyRemoteIntent(nil)
+            aetherController?.setWatchPartyPiPIntent(nil)
             return
         }
         let mpv = playerController
@@ -3307,6 +3316,10 @@ class PlayerViewModel: ObservableObject {
             return self.admitWatchPartyRemoteControl(intent)
         }
         if let aether = aetherController {
+            aether.setWatchPartyPiPIntent { [weak self, weak aether] intent, applied, completion in
+                guard let self, let aether, ObjectIdentifier(self.engine) == ObjectIdentifier(aether) else { completion(); return }
+                _ = self.admitWatchPartyRemoteControl(intent, completion: completion, onApplied: applied)
+            }
             aether.setWatchPartyRemoteIntent { [weak self, weak aether] intent in
                 guard let self, let aether, ObjectIdentifier(self.engine) == ObjectIdentifier(aether) else { return false }
                 return self.admitWatchPartyRemoteControl(intent)
@@ -3315,11 +3328,12 @@ class PlayerViewModel: ObservableObject {
         PictureInPictureManager.shared.refreshController(for: sessionCoordinator)
     }
 
-    private func admitWatchPartyRemoteControl(_ intent: PlayerRemoteIntent) -> Bool {
+    private func admitWatchPartyRemoteControl(_ intent: PlayerRemoteIntent, completion: (@MainActor () -> Void)? = nil,
+                                             onApplied: (@MainActor () -> Void)? = nil) -> Bool {
         guard watchPartyPlayerBridge != nil, let watchPartyControls,
-              var local = intent.localIntent(positionMs: engine.positionMs, isPlaying: engine.isTransportPlaying) else { return false }
+              var local = intent.localIntent(positionMs: engine.positionMs, isPlaying: engine.isTransportPlaying) else { completion?(); return false }
         if case .play = local, status == .ended { local = .seekAndPlay(0) }
-        return watchPartyControls.submit(local) == .accepted
+        return watchPartyControls.submit(local, completion: completion, onApplied: onApplied) == .accepted
     }
 
     /// Explicit root foreground hook; never called merely because a user presses Play.
@@ -6800,8 +6814,8 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Picture in Picture Methods
 
     func startPictureInPicture() {
-        guard watchPartyPlayerBridge == nil else {
-            showPlayerToast("Picture in Picture is not available for Watch Party yet")
+        guard watchPartyPlayerBridge == nil || aetherController?.canUseWatchPartySoftwarePiP == true else {
+            showPlayerToast("Picture in Picture is unavailable for this Watch Party source")
             return
         }
         PictureInPictureManager.shared.startPictureInPicture()

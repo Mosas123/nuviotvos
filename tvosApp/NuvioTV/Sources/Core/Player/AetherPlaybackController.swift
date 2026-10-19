@@ -4299,7 +4299,22 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var remoteCommandCenter: MPRemoteCommandCenter?
     private let remoteCommandTargets = PlayerRemoteCommandTargets()
     private var watchPartyRemoteIntent: (@MainActor (PlayerRemoteIntent) -> Bool)?
+    private var watchPartyPiPIntent: (@MainActor (PlayerRemoteIntent, @escaping @MainActor () -> Void, @escaping @MainActor () -> Void) -> Void)?
     var isWatchPartyControlled: Bool { watchPartyRemoteIntent != nil }
+    var canUseWatchPartySoftwarePiP: Bool {
+        isWatchPartyControlled && watchPartyPiPIntent != nil && remoteCommandsAllowed
+            && engine.nativePlayerLayer == nil && engine.softwarePiPSource != nil
+    }
+
+    func setWatchPartyPiPIntent(_ handler: (@MainActor (PlayerRemoteIntent, @escaping @MainActor () -> Void, @escaping @MainActor () -> Void) -> Void)?) {
+        watchPartyPiPIntent = handler
+    }
+
+    func performWatchPartyPiPIntent(_ intent: PlayerRemoteIntent, onApplied: @escaping @MainActor () -> Void = {},
+                                   completion: @escaping @MainActor () -> Void) {
+        guard canUseWatchPartySoftwarePiP, let handler = watchPartyPiPIntent else { completion(); return }
+        handler(intent, onApplied, completion)
+    }
 
     func setWatchPartyRemoteIntent(_ handler: (@MainActor (PlayerRemoteIntent) -> Bool)?) {
         let rebind = didConfigureRemoteCommands
@@ -4309,6 +4324,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func stopWatchPartyRemoteCommands() {
+        watchPartyPiPIntent = nil
         watchPartyRemoteIntent = { _ in false }
         remoteCommandsAllowed = false
         teardownRemoteCommands()

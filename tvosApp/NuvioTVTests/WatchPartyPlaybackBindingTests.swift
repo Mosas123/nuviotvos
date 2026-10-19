@@ -229,6 +229,61 @@ final class WatchPartyPlaybackBindingTests: XCTestCase {
         XCTAssertEqual(f.room.publications.count, 1)
     }
 
+    func testAppliedReceiptRequiresSeekConfirmationAndPrecedesPublication() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        var receipts = 0
+        let operation = Task {
+            try await binding.perform(.seek(30_000), onApplied: {
+                receipts += 1
+                XCTAssertTrue(f.room.publications.isEmpty)
+                XCTAssertEqual(f.position, 30_000)
+            })
+        }
+        await until { f.bridge.awaitsSeekSample }
+        XCTAssertEqual(receipts, 0)
+        f.position = 30_000; f.tick()
+        try await operation.value
+        XCTAssertEqual(receipts, 1)
+        XCTAssertEqual(f.room.publications.count, 1)
+    }
+
+    func testFailedSeekHasNoAppliedReceiptOrPublication() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f); f.failSeek = true
+        var receipts = 0
+        do { try await binding.perform(.seek(30_000), onApplied: { receipts += 1 }); XCTFail("Failed seek accepted") }
+        catch { XCTAssertEqual(error as? Failure, .engine) }
+        XCTAssertEqual(receipts, 0)
+        XCTAssertTrue(f.room.publications.isEmpty)
+    }
+
+    func testAppliedCallbackReentryCannotPublishAfterBindingStops() async throws {
+        let f = Fixture(); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        var receipts = 0
+        do {
+            try await binding.perform(.play, onApplied: { receipts += 1; binding.stop() })
+            XCTFail("Stopped membership published")
+        } catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .staleOperation) }
+        XCTAssertEqual(receipts, 1)
+        XCTAssertTrue(f.room.publications.isEmpty)
+    }
+
+    func testNativeReceiptRequestCannotPretendScheduledCatchUpIsACompletedSeek() async throws {
+        let f = Fixture(room: Room(hostOnly: true)); let binding = try f.start(); defer { f.stop() }
+        f.tick(); await settle(f)
+        try await binding.perform(.pause)
+        f.tick(); XCTAssertTrue(binding.isBehind)
+        var receipts = 0
+        do { try await binding.perform(.seek(10_000), onApplied: { receipts += 1 }); XCTFail("Unconfirmed catch-up accepted") }
+        catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .forbidden) }
+        XCTAssertTrue(binding.isBehind)
+        XCTAssertEqual(receipts, 0)
+        XCTAssertTrue(f.seekTargets.isEmpty)
+        XCTAssertTrue(f.room.publications.isEmpty)
+    }
+
     func testRemoteCommandCannotBypassLockedGuest() async throws {
         let f = Fixture(room: Room(hostOnly: true)); let binding = try f.start(); defer { f.stop() }
         f.tick(); await settle(f)

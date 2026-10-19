@@ -18,20 +18,25 @@ final class WatchPartyControlRouterTests: XCTestCase {
         var gate: CheckedContinuation<Void, Never>?
         var shouldWait = false
         var fail = false
+        var waitAfterApplied = false
+        var publicationGate: CheckedContinuation<Void, Never>?
         var stamp: WatchPartyPlayerStamp? {
             loaded ? WatchPartyPlayerStamp(generation: generation, engineID: ObjectIdentifier(engine), mediaKey: "movie|test||") : nil
         }
         lazy var router = WatchPartyControlRouter(isCurrent: { [weak self] in self?.current == true },
-            currentStamp: { [weak self] in self?.stamp }, perform: { [weak self] _ in
+            currentStamp: { [weak self] in self?.stamp }, perform: { [weak self] _, applied in
                 guard let self else { throw Failure.rejected }
                 self.calls += 1
                 if self.shouldWait { await withCheckedContinuation { self.gate = $0 } }
                 if self.fail { throw Failure.rejected }
+                applied?()
+                if self.waitAfterApplied { await withCheckedContinuation { self.publicationGate = $0 } }
             }, suspend: { [weak self] in self?.suspensions.append($0) },
             onError: { [weak self] _ in self?.errors += 1 },
             onCompleted: { [weak self] _ in self?.completed += 1 })
         func release() { let continuation = gate; gate = nil; continuation?.resume() }
-        func stop() { router.stop(); release() }
+        func releasePublication() { let continuation = publicationGate; publicationGate = nil; continuation?.resume() }
+        func stop() { router.stop(); release(); releasePublication() }
     }
 
     private func until(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
@@ -130,5 +135,80 @@ final class WatchPartyControlRouterTests: XCTestCase {
         XCTAssertNil(PlayerViewModel.watchPartySeekMilliseconds(Double(Int64.max)))
         XCTAssertEqual(PlayerViewModel.watchPartySeekMilliseconds(-5), 0)
         XCTAssertEqual(PlayerViewModel.watchPartySeekMilliseconds(12.345), 12_345)
+    }
+
+    func testPiPCompletionWaitsForEngineReceiptNotEnqueue() async {
+        let f = Fixture(); f.shouldWait = true; defer { f.stop() }
+        var callbacks = 0
+        XCTAssertEqual(f.router.submit(.seek(20_000), completion: { callbacks += 1 }), .accepted)
+        XCTAssertEqual(callbacks, 0)
+        await until { f.gate != nil }
+        XCTAssertEqual(callbacks, 0)
+        f.release()
+        await until { callbacks == 1 }
+        f.stop()
+        XCTAssertEqual(callbacks, 1)
+    }
+
+    func testBusyAndUnavailablePiPCallbacksAreNotStranded() async {
+        let f = Fixture(); f.shouldWait = true; defer { f.stop() }
+        var callbacks = 0
+        _ = f.router.submit(.play)
+        await until { f.gate != nil }
+        XCTAssertEqual(f.router.submit(.seek(20_000), completion: { callbacks += 1 }), .busy)
+        f.current = false
+        XCTAssertEqual(f.router.submit(.seek(20_000), completion: { callbacks += 1 }), .unavailable)
+        XCTAssertEqual(callbacks, 2)
+    }
+
+    func testStopReleasesNativeCallbackBeforeNonCooperativeReturn() async {
+        let f = Fixture(); f.shouldWait = true
+        var callbacks = 0
+        _ = f.router.submit(.seek(20_000), completion: { callbacks += 1 })
+        await until { f.gate != nil }
+        f.router.stop()
+        XCTAssertEqual(callbacks, 1)
+        f.release()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(callbacks, 1)
+    }
+
+    func testSourceValidationReleasesNativeCallbackImmediately() async {
+        let f = Fixture(); f.shouldWait = true; defer { f.stop() }
+        var callbacks = 0
+        _ = f.router.submit(.seek(20_000), completion: { callbacks += 1 })
+        await until { f.gate != nil }
+        f.generation += 1
+        f.router.validateContext()
+        XCTAssertEqual(callbacks, 1)
+        f.release()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(f.completed, 0)
+    }
+
+    func testFailedPiPOperationFinishesWithoutAppliedReceipt() async {
+        let f = Fixture(); f.fail = true; defer { f.stop() }
+        var callbacks = 0
+        var applied = 0
+        _ = f.router.submit(.seek(20_000), completion: { callbacks += 1 }, onApplied: { applied += 1 })
+        await until { callbacks == 1 }
+        XCTAssertEqual(applied, 0)
+        XCTAssertEqual(f.errors, 1)
+    }
+
+    func testEngineReceiptCanReleasePiPWhilePublicationRemainsPending() async {
+        let f = Fixture(); f.waitAfterApplied = true; defer { f.stop() }
+        var callbacks = 0
+        var applied = 0
+        _ = f.router.submit(.seek(20_000), completion: { callbacks += 1 }, onApplied: { applied += 1 })
+        await until { f.publicationGate != nil }
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(applied, 1)
+        XCTAssertEqual(f.completed, 0)
+        XCTAssertEqual(f.router.submit(.play), .busy)
+        f.releasePublication()
+        await until { f.completed == 1 }
+        XCTAssertEqual(callbacks, 1)
     }
 }

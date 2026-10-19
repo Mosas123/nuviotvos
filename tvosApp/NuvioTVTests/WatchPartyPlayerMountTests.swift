@@ -93,7 +93,7 @@ final class WatchPartyPlayerMountTests: XCTestCase {
         XCTAssertNotNil(model.playerToast)
     }
 
-    func testPartyPiPEntryRemainsDisabledBeforeDelegateAdmissionExists() throws {
+    func testPartyPiPEntryRemainsDisabledWithoutEligibleSoftwareSource() throws {
         let model = model()
         defer { model.shutdownForWatchParty() }
         _ = try model.attachWatchPartyPlayerBridge(isCurrent: { true })

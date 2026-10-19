@@ -312,11 +312,12 @@ final class WatchPartyPlaybackBinding {
     }
 
     /// Called only for an explicit control intent. Observer-driven reconciliation never calls publish.
-    func perform(_ intent: WatchPartyLocalIntent) async throws {
+    func perform(_ intent: WatchPartyLocalIntent, onApplied: (@MainActor () -> Void)? = nil) async throws {
         try Task.checkCancellation()
         guard active, state.connected, let sample = usableSample() else { throw WatchPartyPlaybackBindingError.notReady }
         guard !localBusy, worker == nil else { throw WatchPartyPlaybackBindingError.busy }
         if case .catchUp = intent {
+            guard onApplied == nil else { throw WatchPartyPlaybackBindingError.forbidden }
             isBehind = false; behindMs = nil; lastApplied = nil
             reconcile()
             return
@@ -342,7 +343,10 @@ final class WatchPartyPlaybackBinding {
                 guard let playback = state.playback else { throw WatchPartyPlaybackBindingError.notReady }
                 switch WatchPartyPolicy.ownSeek(targetMs: bounded, partyPositionMs: expected(playback, sample: sample), behind: isBehind) {
                 case .behind(let position): isBehind = true; target = position
-                case .catchUp: isBehind = false; behindMs = nil; lastApplied = nil; reconcile(); return
+                case .catchUp:
+                    // AVKit skip needs a concrete seek receipt, not a scheduled catch-up worker.
+                    guard onApplied == nil else { throw WatchPartyPlaybackBindingError.forbidden }
+                    isBehind = false; behindMs = nil; lastApplied = nil; reconcile(); return
                 case .blocked: throw WatchPartyPlaybackBindingError.forbidden
                 }
             } else { target = bounded }
@@ -358,6 +362,8 @@ final class WatchPartyPlaybackBinding {
             }
             let receipt = try await bridge.apply(WatchPartyPlayerEffect(paused: paused, rate: rate, seekToMs: target),
                                                   origin: .localUser, isAdmitted: permit)
+            guard permit() else { throw WatchPartyPlaybackBindingError.staleOperation }
+            onApplied?()
             guard permit() else { throw WatchPartyPlaybackBindingError.staleOperation }
             if controlsRoom {
                 let position = receipt.confirmedSeekPositionMs ?? bridge.sample?.positionMs ?? sample.positionMs

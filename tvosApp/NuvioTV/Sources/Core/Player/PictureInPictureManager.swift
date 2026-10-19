@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import AVKit
 import AVFoundation
+import CoreMedia
 import Combine
 import AetherEngine
 
@@ -86,6 +87,9 @@ final class PictureInPictureManager: NSObject, ObservableObject {
     private var pendingRestoreResult: Bool?
     private var restoreSurfaceReady = false
     private weak var configuredSoftwareDisplayLayer: CALayer?
+    private let softwareSkipRequests = PlayerPiPRequests()
+    private var sessionGeneration = UUID()
+    private var lastSoftwarePaused: Bool?
 
     var isRestoringUIInProgress: Bool { isRestoringUI }
 
@@ -109,9 +113,13 @@ final class PictureInPictureManager: NSObject, ObservableObject {
         coordinator: PlaybackSessionCoordinator,
         context: ActivePlaybackContext
     ) {
+        let mark = UUID()
+        sessionGeneration = mark
         if let previous = activeCoordinator, previous !== coordinator {
             clearController()
+            guard sessionGeneration == mark else { return }
             previous.stopAll()
+            guard sessionGeneration == mark else { return }
         }
         self.activeCoordinator = coordinator
         self.activeContext = context
@@ -130,34 +138,53 @@ final class PictureInPictureManager: NSObject, ObservableObject {
         setupPipController(for: controller)
     }
 
+    func refreshWatchPartyTimebase(for coordinator: PlaybackSessionCoordinator) {
+        guard activeCoordinator === coordinator else { return }
+        softwareSkipRequests.tick()
+        guard activeCoordinator === coordinator, let controller = activeAetherController,
+              controller.isWatchPartyControlled, let pip = pipController,
+              let current = softwareController(for: pip) else { return }
+        let paused = current.engine.softwarePiPSource?.isPaused ?? true
+        if lastSoftwarePaused != paused { lastSoftwarePaused = paused; pip.invalidatePlaybackState() }
+    }
+
     private func clearController() {
+        discardPipController(clearingSource: true)
+    }
+
+    /// A blocked native/temporarily absent software path must keep source observers so it can
+    /// become eligible later. Clear identity/state before any completion can re-enter.
+    private func discardPipController(clearingSource: Bool = false) {
         let oldController = pipController
         let completion = pendingRestoreCompletion
         pipController = nil
         oldController?.delegate = nil
         possibleObservation?.invalidate()
         possibleObservation = nil
-        cancellables.removeAll()
         if isPictureInPictureActive { oldController?.stopPictureInPicture() }
         activeAetherController?.engine.pictureInPictureActive = false
-        activeAetherController = nil
+        if clearingSource {
+            cancellables.removeAll()
+            activeAetherController = nil
+        }
         isPictureInPictureActive = false
         isPictureInPicturePossible = false
         configuredSoftwareDisplayLayer = nil
+        lastSoftwarePaused = nil
         pendingRestoreCompletion = nil
         pendingRestoreResult = nil
         isRestoringUI = false
         restoreSurfaceReady = false
+        softwareSkipRequests.cancelAll()
         completion?(false)
     }
 
     /// Sets up or reconfigures the `AVPictureInPictureController` for the given Aether controller.
     func setupPipController(for aetherController: AetherPlaybackController) {
-        // Party PiP remains disabled until sample-buffer completion and native control admission
-        // are implemented. The VM toolbar guard alone cannot block an automatic/system entry.
-        guard !aetherController.isWatchPartyControlled else { clearController(); return }
+        let mark = sessionGeneration
         let controllerChanged = activeAetherController !== aetherController
         if controllerChanged { clearController() }
+        guard sessionGeneration == mark else { return }
         self.activeAetherController = aetherController
         if controllerChanged {
             configuredSoftwareDisplayLayer = nil
@@ -187,7 +214,16 @@ final class PictureInPictureManager: NSObject, ObservableObject {
 
     private func rebuildPipControllerIfNeeded() {
         guard isPictureInPictureSupported, let controller = activeAetherController else { return }
-        guard !controller.isWatchPartyControlled else { clearController(); return }
+        let mark = sessionGeneration
+        if controller.isWatchPartyControlled, !controller.canUseWatchPartySoftwarePiP {
+            discardPipController()
+            return // Native Party PiP stays blocked; observe until an eligible software path exists.
+        }
+        if controller.isWatchPartyControlled, let layer = configuredSoftwareDisplayLayer,
+           controller.engine.softwarePiPSource?.layer !== layer {
+            discardPipController()
+            guard sessionGeneration == mark, activeAetherController === controller else { return }
+        }
         guard !isPictureInPictureActive else { return } // Don't disrupt active PiP window
 
         let engine = controller.engine
@@ -197,7 +233,8 @@ final class PictureInPictureManager: NSObject, ObservableObject {
             if let existing = pipController, existing.playerLayer === nativeLayer {
                 return
             }
-            possibleObservation?.invalidate()
+            discardPipController()
+            guard sessionGeneration == mark, activeAetherController === controller else { return }
             let pip = AVPictureInPictureController(playerLayer: nativeLayer)
             pip?.delegate = self
             #if os(iOS)
@@ -211,7 +248,9 @@ final class PictureInPictureManager: NSObject, ObservableObject {
             if configuredSoftwareDisplayLayer === swSource.layer, pipController != nil {
                 return
             }
-            possibleObservation?.invalidate()
+            discardPipController()
+            guard sessionGeneration == mark, activeAetherController === controller,
+                  controller.engine.softwarePiPSource?.layer === swSource.layer else { return }
             let contentSource = AVPictureInPictureController.ContentSource(
                 sampleBufferDisplayLayer: swSource.layer,
                 playbackDelegate: self
@@ -273,33 +312,12 @@ final class PictureInPictureManager: NSObject, ObservableObject {
 
     /// Stops playback and clears the active session state.
     func invalidateSession() {
+        sessionGeneration = UUID()
         let retainedCoordinator = activeCoordinator
-        let oldPipController = pipController
-        let restoreCompletion = pendingRestoreCompletion
-        // Clear the identity before stopping AVKit. A stop callback can be
-        // delivered synchronously, and callbacks from this old controller
-        // must not mutate a subsequently registered session.
-        pipController = nil
-        oldPipController?.delegate = nil
-        possibleObservation?.invalidate()
-        possibleObservation = nil
-        cancellables.removeAll()
-        if isPictureInPictureActive {
-            oldPipController?.stopPictureInPicture()
-        }
-        retainedCoordinator?.aetherController?.engine.pictureInPictureActive = false
-        retainedCoordinator?.stopAll()
         activeCoordinator = nil
-        activeAetherController = nil
         activeContext = nil
-        isPictureInPictureActive = false
-        isPictureInPicturePossible = false
-        isRestoringUI = false
-        pendingRestoreCompletion = nil
-        pendingRestoreResult = nil
-        restoreSurfaceReady = false
-        configuredSoftwareDisplayLayer = nil
-        restoreCompletion?(false)
+        clearController()
+        if activeCoordinator !== retainedCoordinator { retainedCoordinator?.stopAll() }
     }
 }
 
@@ -406,17 +424,31 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
 
 @available(tvOS 15.0, *)
 extension PictureInPictureManager: @preconcurrency AVPictureInPictureSampleBufferPlaybackDelegate {
+    private func softwareController(for pip: AVPictureInPictureController) -> AetherPlaybackController? {
+        guard pipController === pip, let controller = activeAetherController,
+              activeCoordinator?.aetherController === controller, activeCoordinator?.activeBackend == .aether,
+              controller.engine.nativePlayerLayer == nil, let source = controller.engine.softwarePiPSource,
+              configuredSoftwareDisplayLayer === source.layer else { return nil }
+        return controller
+    }
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
-        activeAetherController?.engine.softwarePiPSource?.setPlaying(playing)
+        guard let controller = softwareController(for: pictureInPictureController) else { return }
+        if controller.isWatchPartyControlled {
+            controller.performWatchPartyPiPIntent(playing ? .play : .pause, completion: { [weak self, weak pictureInPictureController] in
+                guard let self, let pip = pictureInPictureController, self.pipController === pip else { return }
+                pip.invalidatePlaybackState()
+            })
+        } else { controller.engine.softwarePiPSource?.setPlaying(playing) }
     }
 
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
-        activeAetherController?.engine.softwarePiPSource?.timeRange()
+        softwareController(for: pictureInPictureController)?.engine.softwarePiPSource?.timeRange()
             ?? CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
     }
 
     func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
-        activeAetherController?.engine.softwarePiPSource?.isPaused ?? true
+        softwareController(for: pictureInPictureController)?.engine.softwarePiPSource?.isPaused ?? true
     }
 
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
@@ -424,7 +456,29 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureSampleBuffe
     }
 
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void) {
-        activeAetherController?.engine.softwarePiPSource?.skip(by: skipInterval.seconds)
-        completionHandler()
+        guard let controller = softwareController(for: pictureInPictureController), skipInterval.seconds.isFinite else {
+            completionHandler()
+            return
+        }
+        if controller.isWatchPartyControlled {
+            let generation = sessionGeneration
+            let request = softwareSkipRequests.begin({ [weak self, weak pictureInPictureController] in
+                if let self, let pip = pictureInPictureController, self.pipController === pip { pip.invalidatePlaybackState() }
+                completionHandler()
+            }, check: { [weak self, weak controller, weak pictureInPictureController] in
+                guard let self, let controller, let pip = pictureInPictureController,
+                      self.sessionGeneration == generation, self.softwareController(for: pip) === controller else { return nil }
+                guard let base = controller.engine.softwarePiPSource?.layer.controlTimebase else { return false }
+                let seconds = CMTimebaseGetTime(base).seconds
+                let rate = CMTimebaseGetRate(base)
+                let expected = controller.isTransportPlaying ? Double(controller.currentSpeed) : 0
+                return seconds.isFinite && rate.isFinite
+                    && abs(seconds - Double(controller.positionMs) / 1000) <= 0.5 && abs(rate - expected) <= 0.01
+            })
+            controller.performWatchPartyPiPIntent(.skip(skipInterval.seconds), onApplied: request.applied, completion: request.finished)
+        } else {
+            controller.engine.softwarePiPSource?.skip(by: skipInterval.seconds)
+            completionHandler() // Preserve the existing non-Party path; not a seek receipt.
+        }
     }
 }
