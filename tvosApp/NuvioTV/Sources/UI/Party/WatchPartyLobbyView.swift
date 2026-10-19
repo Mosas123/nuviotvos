@@ -709,6 +709,27 @@ struct WatchPartyLobbyView: View {
                 statusRow(symbol: "antenna.radiowaves.left.and.right",
                           title: notice, tint: .white)
             }
+            if isGuest, room.sharedStream == nil, !needsMediaReview,
+               room.connection == .ready, room.membershipExit == nil {
+                Button {
+                    run {
+                        let sent = try await room.requestHostStreamRefresh()
+                        owner.message = sent
+                            ? "Source refresh requested. If the host is online and sharing, the source should appear shortly."
+                            : "Please wait a few seconds before requesting the source again."
+                    }
+                } label: {
+                    secondaryActionLabel(
+                        symbol: "arrow.clockwise",
+                        title: "Refresh host's shared source · BETA",
+                        isFocused: focusedAction == "refresh-host-source"
+                    )
+                }
+                .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
+                .focused($focusedAction, equals: "refresh-host-source")
+                .disabled(service.busy || operation != nil)
+            }
             if needsMediaReview {
                 statusRow(symbol: "exclamationmark.triangle.fill",
                           title: "The room changed to \(party.media.title)\(episodeDescription(party.media).map { " · " + $0 } ?? ""). Confirm before choosing a source.",
