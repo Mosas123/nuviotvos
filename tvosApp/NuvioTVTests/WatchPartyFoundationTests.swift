@@ -39,16 +39,16 @@ final class WatchPartyFoundationTests: XCTestCase {
 
     func testRealtimeEnvelopeRejectsMismatchedEventsAndMalformedBodies() throws {
         let invalid: [Any] = [
-            ["type": "broadcast", "event": "status", "payload": [:]],
-            ["type": "presence", "event": "state", "payload": [:]],
-            ["event": "state", "payload": [:]],
-            ["type": "broadcast", "payload": [:]],
+            ["type": "broadcast", "event": "status", "payload": [String: Any]()],
+            ["type": "presence", "event": "state", "payload": [String: Any]()],
+            ["event": "state", "payload": [String: Any]()],
+            ["type": "broadcast", "payload": [String: Any]()],
             ["type": "broadcast", "event": "state"],
             ["type": "broadcast", "event": "state", "payload": NSNull()],
-            ["type": "broadcast", "event": "state", "payload": []],
+            ["type": "broadcast", "event": "state", "payload": [Any]()],
             ["type": "broadcast", "event": "state", "payload": "invalid"],
             ["seq": 1, "paused": true, "position_ms": 0, "at": 0],
-            []
+            [Any]()
         ]
         for object in invalid {
             let data = try JSONSerialization.data(withJSONObject: object)
