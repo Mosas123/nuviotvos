@@ -3429,6 +3429,33 @@ class PlayerViewModel: ObservableObject {
         )
     }
 
+    /// Beta: prepare the *currently playing* HTTP source for explicit host approval.
+    /// This never sends anything, and never reads a discovery URL in place of the resolved URL.
+    /// Local torrent/loopback and sources with unavailable response headers remain unsupported.
+    func watchPartyShareableStream(for roomMedia: WatchPartyMedia) throws -> WatchPartyStream {
+        let snapshot = try watchPartyRoomCreationSnapshot()
+        guard snapshot.media.key == roomMedia.key,
+              let sourceURL = URL(string: snapshot.sourceURL),
+              ["http", "https"].contains(sourceURL.scheme?.lowercased() ?? ""),
+              TorrentEngineManager.shared.activeStreamURL?.absoluteString != snapshot.sourceURL else {
+            throw WatchPartyStreamError.unsupportedSource
+        }
+        let source = NuvioStream(
+            url: snapshot.sourceURL,
+            name: activeFilename ?? activeMeta?.name,
+            description: nil,
+            addonName: activeAddonName,
+            filename: activeFilename,
+            videoSize: activeVideoSize,
+            httpHeaders: activeHTTPHeaders
+        )
+        return try WatchPartyStream.fromPlayback(
+            source, mediaKey: roomMedia.key, resolvedURL: snapshot.sourceURL,
+            requestHeaders: activeHTTPHeaders, responseHeaders: [:],
+            origin: .directHTTP
+        )
+    }
+
     /// Compare load/media/source identity separately so a new local transport intent can refresh
     /// the snapshot without accidentally adopting another source or episode.
     func isSameWatchPartyRoomCreationPlayback(_ snapshot: WatchPartyRoomCreationSnapshot) -> Bool {
