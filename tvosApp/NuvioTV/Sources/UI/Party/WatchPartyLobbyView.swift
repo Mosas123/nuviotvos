@@ -81,44 +81,13 @@ struct WatchPartyLobbyView: View {
         .padding(.bottom, 4)
     }
 
-    /// Guests can join immediately without choosing a title. Until hosting is
-    /// available from Details, keep the existing creation flow reachable here.
+    /// Room creation now belongs to Details. The sidebar remains the single
+    /// entry and recovery point for invited guests and existing members.
+    /// Merge only after feat-watchparty-host-from-details is available.
     private var guestEntryContent: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            joinRoomCard
-            hostEntryFallback
-        }
-        .frame(maxWidth: 760, alignment: .leading)
-        .frame(maxWidth: .infinity)
-    }
-
-    private var hostEntryFallback: some View {
-        HStack(spacing: 24) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Hosting instead?")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text("Choose a movie or episode to create your room.")
-                    .font(.system(size: 17))
-                    .foregroundStyle(.white.opacity(0.68))
-            }
-            Spacer(minLength: 12)
-            Button {
-                owner.message = nil
-                onCreate()
-            } label: {
-                secondaryActionLabel(
-                    symbol: "plus.circle",
-                    title: "Choose a title",
-                    isFocused: focusedAction == "create"
-                )
-            }
-            .buttonStyle(PosterCardButtonStyle())
-            .focused($focusedAction, equals: "create")
-            .disabled(service.busy || operation != nil || service.membershipOutcomeUncertain)
-        }
-        .padding(24)
-        .modifier(LiquidGlassSurface(cornerRadius: 22))
+        joinRoomCard
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
     }
 
     private var joinRoomCard: some View {
@@ -196,7 +165,7 @@ struct WatchPartyLobbyView: View {
                     Text("Choose a profile to continue")
                         .font(.system(size: 28, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-                    Text("Sign in and choose a profile to create or join a Watch Party.")
+                    Text("Sign in and choose a profile to join or return to a Watch Party.")
                         .font(.system(size: 20))
                         .foregroundStyle(.white.opacity(0.7))
                 }
@@ -223,6 +192,16 @@ struct WatchPartyLobbyView: View {
 
     private func roomContent(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         VStack(alignment: .leading, spacing: 24) {
+            HStack(spacing: 14) {
+                Image(systemName: "arrow.uturn.backward.circle.fill")
+                    .font(.system(size: 24))
+                Text("Your current room")
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                Spacer()
+                roleBadge(party.hostMemberID == room.memberID ? "HOST" : "GUEST",
+                          isHost: party.hostMemberID == room.memberID)
+            }
+            .foregroundStyle(.white)
             HStack(alignment: .top, spacing: 24) {
                 roomSummaryCard(room, party: party)
                 membersCard(room, party: party)
