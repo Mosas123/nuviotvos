@@ -108,7 +108,22 @@ struct WatchPartyLobbyView: View {
         }
         .onChange(of: canUseAccount) { _, allowed in
             accountGateFocused = !allowed
+            if !allowed {
+                invalidateInvitationPreview()
+                reviewRoomID = nil
+                reviewMediaKey = nil
+            }
             focusedAction = allowed ? preferredRoomFocus : nil
+        }
+        .onReceive(service.contextDidInvalidate) { _ in
+            // An invitation preview belongs to one authenticated environment.
+            // A profile/account/server switch must not leave an old preview
+            // available for confirmation in a different context.
+            invalidateInvitationPreview()
+            reviewRoomID = nil
+            reviewMediaKey = nil
+            showingInvitation = false
+            focusedAction = nil
         }
         .onChange(of: service.busy) { _, busy in
             if !busy && canUseAccount && focusedAction == nil && operation == nil {
@@ -126,6 +141,13 @@ struct WatchPartyLobbyView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    private func invalidateInvitationPreview() {
+        previewRequestID = UUID()
+        roomPreview = nil
+        previewCode = nil
+        roomCodeIsEditing = false
     }
 
     private var needsMediaReview: Bool {
