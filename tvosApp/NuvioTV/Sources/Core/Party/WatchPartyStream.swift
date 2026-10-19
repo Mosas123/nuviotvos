@@ -92,6 +92,17 @@ extension WatchPartyStream {
     }
 }
 
+/// Presentation-only status. Never format or expose shared URLs or HTTP headers.
+enum WatchPartySharedSourceNotice {
+    static func text(hostName: String?, stream: WatchPartyStream?, mediaKey: String,
+                     isGuest: Bool, connected: Bool) -> String? {
+        guard isGuest, connected, let stream, stream.mediaKey == mediaKey else { return nil }
+        let rawName = hostName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let displayName = rawName.isEmpty ? "The host" : String(rawName.prefix(48))
+        return "\(displayName) shared a source (Beta). Shared-source playback isn't available on Apple TV yet; choose your own source."
+    }
+}
+
 struct WatchPartyStreamCandidate {
     let stream: NuvioStream
     let metadata: WatchPartyStream
