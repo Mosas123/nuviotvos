@@ -825,7 +825,15 @@ struct WatchPartyLobbyView: View {
         guard !service.busy, operation == nil else { return }
         owner.message = nil
         operation = Task { @MainActor in
-            defer { operation = nil }
+            defer {
+                operation = nil
+                // The service's busy flag may clear *before* this local Task
+                // completes. Restore focus only after both gates are open;
+                // otherwise an RPC can leave tvOS without a focused control.
+                if focusedAction == nil && canUseAccount {
+                    focusedAction = preferredRoomFocus
+                }
+            }
             do { try await action() }
             catch {
                 if !Task.isCancelled {
