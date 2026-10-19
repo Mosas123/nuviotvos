@@ -391,8 +391,8 @@ extension PlayerView {
                         ))
                     }
                     : nil,
-                watchPartyFocusTarget: watchPartyOwner?.presentation?.mount.isCurrent == true
-                    ? "party.catchUp" : "party.lobby"
+                watchPartyFocusTarget: watchPartyOwner?.service?.session?.party != nil
+                    ? "party.invite" : "party.lobby"
             )
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(15)
