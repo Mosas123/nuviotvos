@@ -12,6 +12,7 @@ struct PlayerWatchPartyPanel: View {
     @State private var operation: Task<Void, Never>?
     @State private var message: String?
     @State private var endingRoom = false
+    @State private var showingInviteCode = false
 
     var body: some View {
         ScrollView {
@@ -38,7 +39,16 @@ struct PlayerWatchPartyPanel: View {
             }
         }
         .onAppear {
-            focusedControlID = owner.presentation?.mount.isCurrent == true ? "party.catchUp" : "party.lobby"
+            focusedControlID = service.session?.party != nil
+                ? (owner.presentation?.mount.isCurrent == true ? "party.catchUp" : "party.invite")
+                : "party.lobby"
+        }
+        .alert("Invite a friend", isPresented: $showingInviteCode) {
+            Button("Done", role: .cancel) {}
+        } message: {
+            if let party = service.session?.party {
+                Text("Share this room code: \(WatchPartyCode.formatted(party.code)). Friends can enter it in Watch Party on any Nuvio app.")
+            }
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
@@ -63,6 +73,15 @@ struct PlayerWatchPartyPanel: View {
     private func roomRows(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         roomOverview(room, party: party)
         participantOverview(room, party: party)
+        Button { showingInviteCode = true } label: {
+            PlayerPanelRow(
+                title: "Invite a friend",
+                subtitle: "Show the room code to invite someone."
+            )
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focusEffectDisabledIfAvailable()
+        .focused($focusedControlID, equals: "party.invite")
         PlayerPanelRow(
             title: "Playback controls",
             subtitle: party.hostOnly ? "Only the host can control playback." : "Participants can control playback."
@@ -160,11 +179,21 @@ struct PlayerWatchPartyPanel: View {
                     let isMe = member.id == room.memberID
                     PlayerPanelRow(
                         title: member.displayName.isEmpty ? "Viewer" : member.displayName,
-                        subtitle: room.presence[member.id]?.status.rawValue ?? "browsing",
+                        subtitle: participantStatus(room.presence[member.id]?.status),
                         trailing: isHost ? (isMe ? "Host · You" : "Host") : (isMe ? "You" : nil)
                     )
                 }
             }
+        }
+    }
+
+    private func participantStatus(_ status: WatchPartyMemberStatus?) -> String {
+        switch status ?? .browsing {
+        case .browsing: return "Browsing"
+        case .loading: return "Choosing a source"
+        case .buffering: return "Buffering"
+        case .ready: return "Ready to watch"
+        case .behind: return "Catching up"
         }
     }
 
