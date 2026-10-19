@@ -10,6 +10,7 @@ struct WatchPartyLobbyView: View {
     let isChoosing: Bool
     let onCreate: () -> Void
     let onChooseSource: (WatchPartyMedia) -> Void
+    let onReturnPlayer: () -> Void
     let onCancelSelection: () -> Void
     let onOpenProfile: () -> Void
 
@@ -858,20 +859,19 @@ struct WatchPartyLobbyView: View {
     private func primaryRoomAction(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         if owner.presentation?.mount.isCurrent == true {
             Button {
-                guard let presentation = owner.presentation, presentation.mount.isCurrent else { return }
-                presentation.mount.viewModel.catchUpWithWatchParty()
+                onReturnPlayer()
             } label: {
                 primaryActionLabel(
-                    symbol: "arrow.down.to.line",
-                    title: "Catch up with room",
-                    subtitle: "Return to the shared playback position",
+                    symbol: "arrow.up.left.and.arrow.down.right",
+                    title: "Return to player",
+                    subtitle: "Open your current playback in full screen",
                     isFocused: focusedAction == "catch-up"
                 )
             }
             .buttonStyle(PosterCardButtonStyle())
             .focusEffectDisabledIfAvailable()
             .focused($focusedAction, equals: "catch-up")
-            .disabled(service.busy || operation != nil || room.connection != .ready)
+            .disabled(service.busy || operation != nil || room.connection != .ready || room.membershipExit != nil)
         } else {
             Button {
                 onChooseSource(party.media)
