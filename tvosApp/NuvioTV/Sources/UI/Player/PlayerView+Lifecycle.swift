@@ -255,6 +255,12 @@ extension PlayerView {
     /// so each of these hands focus to whichever layer is now on top.
     var layersObservingFocus: some View {
         layersObservingPlayback
+            .onChange(of: remoteInputFocused) { _, isFocused in
+                PlaybackTimelineRecorder.record(
+                    isFocused ? .focusSinkFocused : .focusSinkUnfocused,
+                    engine: viewModel.activeEngineKind
+                )
+            }
             .onChange(of: viewModel.showControls) { _, isVisible in
                 if viewModel.sidePanel != nil || viewModel.postPlayState.isVisible {
                     remoteInputFocused = false

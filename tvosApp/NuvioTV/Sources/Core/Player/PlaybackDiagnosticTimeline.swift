@@ -10,6 +10,8 @@ struct PlaybackDiagnosticTimeline: Codable, Sendable, Equatable {
         case subtitleSelectionRequested, subtitleSelectionReturned, externalSubtitleRequested
         case controlsShown, controlsHidden, settingsOpened, settingsClosed
         case sidePanelOpened, sidePanelClosed, backPressed, sourceSelectionRequested
+        case audioMenuFocusLeft, audioMenuFocusReturned, subtitleMenuFocusLeft, subtitleMenuFocusReturned
+        case controlsExitReceived, focusSinkFocused, focusSinkUnfocused
     }
 
     enum Engine: String, Codable, Sendable { case aether, mpv }
