@@ -372,8 +372,16 @@ final class WatchPartySession {
         }
         // Record before awaiting; repeated remote presses cannot fan out sends.
         lastManualSourceRequestAt = now
-        try await send("state_request", MemberPayload(memberID: memberID), epoch: epoch)
-        return true
+        let attempt = connectionID
+        do {
+            try await send("state_request", MemberPayload(memberID: memberID), epoch: epoch)
+            return true
+        } catch {
+            // The failed request may have reached the host. Do not retry it;
+            // reconcile the connection before admitting another manual request.
+            lost(epoch: epoch, attempt: attempt)
+            throw error
+        }
     }
 
     /// Explicit guest selection returns all metadata, including response headers missing in NuvioStream.
