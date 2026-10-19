@@ -152,6 +152,9 @@ final class WatchPartyService: ObservableObject {
             )
             try check(setup.context, operation: setup.operation)
             guard session === current else { throw WatchPartyAPIError.staleContext }
+            if let failure = WatchPartyFailure(serverCode: snapshot.error) {
+                throw WatchPartyServiceError.rejected(failure)
+            }
             try current.acceptHostOnlySnapshot(snapshot, enabled: enabled)
         } catch { throw report(error, context: setup.context, operation: setup.operation) }
     }
