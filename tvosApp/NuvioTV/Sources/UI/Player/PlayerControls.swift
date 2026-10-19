@@ -158,6 +158,21 @@ struct PlayerControls: View {
             // even before the next render cycle.
             let onTimeline = (newControl == .timeline)
             viewModel.setTimelineFocused(onTimeline)
+            // Opt-in breadcrumbs only: native Menu has no explicit presentation binding.
+            // These record focus transitions, not confirmed menu-open/menu-close events.
+            if newControl == nil {
+                if oldControl == .audio {
+                    PlaybackTimelineRecorder.record(.audioMenuFocusLeft, engine: viewModel.activeEngineKind)
+                } else if oldControl == .subtitles {
+                    PlaybackTimelineRecorder.record(.subtitleMenuFocusLeft, engine: viewModel.activeEngineKind)
+                }
+            } else if oldControl == nil {
+                if newControl == .audio {
+                    PlaybackTimelineRecorder.record(.audioMenuFocusReturned, engine: viewModel.activeEngineKind)
+                } else if newControl == .subtitles {
+                    PlaybackTimelineRecorder.record(.subtitleMenuFocusReturned, engine: viewModel.activeEngineKind)
+                }
+            }
             if onTimeline {
                 viewModel.setControlsAutoHideSuspended(false)
                 viewModel.scheduleControlsHide(after: 5.0)
@@ -181,6 +196,7 @@ struct PlayerControls: View {
     }
 
     private func handleExit() {
+        PlaybackTimelineRecorder.record(.controlsExitReceived, engine: viewModel.activeEngineKind)
         if viewModel.isScrubbing {
             viewModel.cancelScrub()
         } else {
