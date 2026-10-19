@@ -31,6 +31,19 @@ enum WatchPartyLaunchPolicy {
 }
 
     
+/// Explicit content review is required when the authoritative room media changes.
+/// Never use title text as identity; media keys include type, ID and exact episode.
+enum WatchPartyMediaReviewPolicy {
+    static func changed(from previousKey: String?, to currentKey: String?) -> Bool {
+        guard let previousKey, let currentKey else { return false }
+        return previousKey != currentKey
+    }
+
+    static func needsConfirmation(previewKey: String, joinedKey: String) -> Bool {
+        previewKey != joinedKey
+    }
+}
+
 /// Picks an actually available tvOS focus destination when returning to the room.
 /// The room code field must not receive focus while a membership still exists.
 enum WatchPartyRoomFocusPolicy {
