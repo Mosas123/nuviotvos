@@ -1735,13 +1735,16 @@ struct ContentView: View {
         guard let service = watchPartyOwner.service else { return }
         let createsRoom = creatingParty
         let roomMedia = service.session?.party?.media
-        let identifiers = [meta.id, meta.imdbId].compactMap { $0 }
-        let mediaID = roomMedia.flatMap { identifiers.contains($0.metaID) ? $0.metaID : nil }
-            ?? meta.imdbId ?? meta.id
         let episode = meta.isSeries ? playbackCurrentEpisode : nil
-        let media = WatchPartyMedia(type: meta.isSeries ? "series" : "movie", metaID: mediaID,
-            metaType: meta.type, videoID: episode?.id, season: episode?.season,
-            episode: episode?.episode, title: meta.name)
+        let media: WatchPartyMedia
+        do {
+            media = try WatchPartyLaunchPolicy.mediaForPlayback(
+                meta, episode: episode, room: roomMedia
+            )
+        } catch {
+            watchPartyOwner.message = "Choose a valid title and episode for this room."
+            return
+        }
         partyLaunchTask?.cancel()
         let mark = UUID()
         partyLaunchID = mark
