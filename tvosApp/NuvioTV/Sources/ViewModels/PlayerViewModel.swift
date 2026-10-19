@@ -214,7 +214,10 @@ class PlayerViewModel: ObservableObject {
 
     // MARK: - Picture in Picture
     var isPictureInPictureSupported: Bool {
-        PictureInPictureManager.shared.isPictureInPictureSupported && activeEngineKind == .aether
+        !isStandalonePlaybackSession
+            && PictureInPictureManager.shared.isPictureInPictureSupported
+            && activeEngineKind == .aether
+            && (watchPartyPlayerBridge == nil || aetherController?.canUseWatchPartySoftwarePiP == true)
     }
     @Published var isPictureInPictureActive: Bool = false
     @Published var isPictureInPicturePossible: Bool = false
@@ -326,7 +329,17 @@ class PlayerViewModel: ObservableObject {
     private var controlsHideTimer: Timer?
     private var hasLoaded = false
     private var didShutdown = false
+    private(set) var watchPartyPlayerBridge: WatchPartyPlayerBridge?
+    private var watchPartyAdmittedMedia: WatchPartyMedia?
+    private var watchPartyLifecycle = PlayerLifecycleAdmission()
+    private var watchPartyControls: WatchPartyControlRouter?
+    private let adoptsPictureInPictureSession: Bool
     private var isTrailerPlaybackSession = false
+    private var isActionPlaybackSession = false
+
+    private var isStandalonePlaybackSession: Bool {
+        isTrailerPlaybackSession || isActionPlaybackSession
+    }
     private var trailerEndConfirmation = TrailerEndConfirmation()
     private var hasClearedDismissalsForCurrentPlaybackSession = false
     var activeMeta: NuvioMeta?
@@ -531,16 +544,18 @@ class PlayerViewModel: ObservableObject {
 
     init(
         sessionCoordinator suppliedCoordinator: PlaybackSessionCoordinator? = nil,
+        adoptsPictureInPictureSession: Bool = true,
         scrubThumbnailProvider: (any ScrubThumbnailProviding)? = nil,
         pauseOverlayDelaySeconds: TimeInterval = 15
     ) {
+        self.adoptsPictureInPictureSession = adoptsPictureInPictureSession
         suppliedScrubThumbnailProvider = scrubThumbnailProvider
         self.pauseOverlayDelaySeconds = max(0, pauseOverlayDelaySeconds)
         // A PiP restore creates this view model after the app has already
         // dismissed the original PlayerView. Adopt the retained coordinator
         // before SwiftUI mounts a surface so it never binds a fresh, empty
         // Aether controller for the first render pass.
-        sessionCoordinator = suppliedCoordinator ?? PictureInPictureManager.shared.activeCoordinator
+        sessionCoordinator = suppliedCoordinator ?? (adoptsPictureInPictureSession ? PictureInPictureManager.shared.activeCoordinator : nil)
             ?? PlaybackSessionCoordinator()
         activeEngineKind = sessionCoordinator.activeBackend
         sessionCoordinator.prepareControllers()
@@ -568,6 +583,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func bindSessionCoordinatorCallbacks() {
+        bindWatchPartyRemoteControls()
         coordinatorErrorCancellable?.cancel()
         updateCoordinatorLoadError(sessionCoordinator.lastLoadError)
         coordinatorErrorCancellable = sessionCoordinator.$lastLoadError
@@ -578,6 +594,29 @@ class PlayerViewModel: ObservableObject {
 
         let coordinator = sessionCoordinator
         let generation = coordinator.loadGeneration
+        let mpv = playerController
+        mpv.onWillSuspendPlayback = { [weak self, weak coordinator, weak mpv] in
+            guard let self, let coordinator, let mpv, !self.didShutdown,
+                  self.sessionCoordinator === coordinator, self.engine === mpv else { return }
+            self.suspendWatchPartyForLifecycle(engineWillPark: true)
+        }
+        mpv.onDidRestorePlayback = { [weak self, weak coordinator, weak mpv] in
+            guard let self, let coordinator, let mpv, !self.didShutdown,
+                  self.sessionCoordinator === coordinator, self.engine === mpv else { return }
+            self.watchPartyEngineDidRestore()
+        }
+        if let aether = aetherController {
+            aether.onWillSuspendPlayback = { [weak self, weak coordinator, weak aether] in
+                guard let self, let coordinator, let aether, !self.didShutdown,
+                      self.sessionCoordinator === coordinator, self.engine === aether else { return }
+                self.suspendWatchPartyForLifecycle(engineWillPark: true)
+            }
+            aether.onDidRestorePlayback = { [weak self, weak coordinator, weak aether] in
+                guard let self, let coordinator, let aether, !self.didShutdown,
+                      self.sessionCoordinator === coordinator, self.engine === aether else { return }
+                self.watchPartyEngineDidRestore()
+            }
+        }
         let suspend: (Int64, Int64) -> Void = { [weak self, weak coordinator] positionMs, durationMs in
             Task { @MainActor [weak self, weak coordinator] in
                 guard let self, let coordinator,
@@ -599,7 +638,7 @@ class PlayerViewModel: ObservableObject {
                       self.currentLoadPresentationIsConfirmed(
                         engineKind: self.activeEngineKind,
                         generation: generation
-                      ) else { return }
+                      ), self.engine.hasFirstFrameReadyForDisplay else { return }
                 if !self.hasRenderedFirstFrame {
                     self.hasRenderedFirstFrame = true
                     if let meta = self.activeMeta {
@@ -687,6 +726,7 @@ class PlayerViewModel: ObservableObject {
 
             let isEngineUnavailable = error.contains("unavailable on this device") || error.contains("AetherEngine is unavailable")
             if !isEngineUnavailable,
+               !isStandalonePlaybackSession,
                reloadCurrentStream != nil,
                reloadAttempts < Self.maxReloadAttempts,
                !isFailingOver,
@@ -738,6 +778,10 @@ class PlayerViewModel: ObservableObject {
 
     func retryPlaybackStartup() {
         guard !didShutdown else { return }
+        if watchPartyPlayerBridge != nil, UIApplication.shared.applicationState == .active {
+            watchPartyLifecycle.engineDidRestore()
+            resumeWatchPartyAfterForeground()
+        }
         cancelPendingAdvanceResolution()
         cancelPauseOverlaySchedule()
         showPauseOverlay = false
@@ -829,10 +873,12 @@ class PlayerViewModel: ObservableObject {
         cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         trickplayURL: URL? = nil,
         sourceID: String? = nil,
-        currentEpisode: NuvioVideo? = nil
+        currentEpisode: NuvioVideo? = nil,
+        isActionPlaybackSession: Bool = false
     ) {
         PlaybackTimelineRecorder.record(.playbackLoadRequested)
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
+        self.isActionPlaybackSession = isActionPlaybackSession
         // Keep this session-level flag authoritative for tracking decisions.
         // The trailer uses the movie's metadata so checking only the current
         // subtitle can accidentally send the movie identity to Trakt.
@@ -853,7 +899,8 @@ class PlayerViewModel: ObservableObject {
 
         // Adopt active Picture in Picture session if already playing this content
         let pipManager = PictureInPictureManager.shared
-        if let activeCoord = pipManager.activeCoordinator,
+        if !isStandalonePlaybackSession, adoptsPictureInPictureSession,
+           let activeCoord = pipManager.activeCoordinator,
            pipManager.activeContext?.url == url,
            pipManager.isPictureInPictureActive
             || pipManager.isRestoringUIInProgress
@@ -978,7 +1025,7 @@ class PlayerViewModel: ObservableObject {
         configureWheelTrackingIfNeeded()
         startLoadWatchdog()
 
-        if !isTrailerPlayback {
+        if !isStandalonePlaybackSession {
             let context = ActivePlaybackContext(
                 url: url,
                 meta: meta,
@@ -1048,7 +1095,7 @@ class PlayerViewModel: ObservableObject {
             isAnime: isAnime,
             isLiveStream: isLiveStream,
             isSports: activeMeta?.isSports ?? false,
-            autoplay: true,
+            autoplay: watchPartyPlayerBridge == nil,
             playbackRate: playbackSpeed.rawValue,
             aspectMode: aspectMode,
             subtitleDelaySeconds: Double(subtitleDelayMs) / 1_000,
@@ -1183,6 +1230,7 @@ class PlayerViewModel: ObservableObject {
         preservesCompletionResumeTarget: Bool = false
     ) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
+        let isStandalonePlaybackSession = isTrailerPlayback || isActionPlaybackSession
         isTrailerPlaybackSession = isTrailerPlayback
         trailerEndConfirmation.reset()
         isPlaybackDebugEnabled = ProfileSettings.current.bool(forKey: SettingsKey.playbackDebug)
@@ -1246,7 +1294,7 @@ class PlayerViewModel: ObservableObject {
         }
         self.activeStreamURL = url.absoluteString
         self.activeHTTPHeaders = httpHeaders
-        if !isTrailerPlayback {
+        if !isStandalonePlaybackSession && watchPartyPlayerBridge == nil {
             postPlayController.start(
                 contentId: meta.id,
                 contentType: meta.isSeries ? "series" : meta.type,
@@ -1255,64 +1303,71 @@ class PlayerViewModel: ObservableObject {
         } else {
             postPlayController.stop()
         }
-        self.activeEpisodeNumbers = isTrailerPlayback
+        self.activeEpisodeNumbers = isStandalonePlaybackSession
             ? nil
             : Self.episodeNumbers(fromSubtitle: subtitle)
                 ?? Self.episodeNumbers(fromStreamURL: url.absoluteString, isSeries: meta.isSeries)
-        if currentEpisodeVideo == nil, !isTrailerPlayback, meta.isSeries, let numbers = self.activeEpisodeNumbers {
+        if isStandalonePlaybackSession {
+            self.seriesEpisodes = []
+            self.currentEpisodeVideo = nil
+            self.resolveNextStream = nil
+            self.nextEpisode = nil
+        } else if currentEpisodeVideo == nil, meta.isSeries, let numbers = self.activeEpisodeNumbers {
             self.currentEpisodeVideo = meta.videos?.first(where: { $0.season == numbers.season && $0.episode == numbers.episode })
         } else if !meta.isSeries {
             self.currentEpisodeVideo = nil
         }
-        let completionIdentity = playbackCompletionIdentity(for: meta)
-        if beginsNewPlaybackCompletionSession {
-            let completionContext = capturePlaybackCompletionContext(profileID: WatchedStore.activeProfileId)
-            sessionCoordinator.beginNewPlaybackCompletionSession(
-                identity: completionIdentity,
-                profileID: WatchedStore.activeProfileId,
-                resumeTargetSeconds: resumeFrom,
-                source: completionContext.source,
-                completionAccounts: completionContext.accountIDs
-            )
-        } else if preservesCompletionResumeTarget {
-            sessionCoordinator.preservePlaybackCompletionTargetIdentity(
-                completionIdentity,
-                fallbackProfileID: WatchedStore.activeProfileId
-            )
-        } else {
-            sessionCoordinator.updatePlaybackCompletionTarget(
-                completionIdentity,
-                fallbackProfileID: WatchedStore.activeProfileId,
-                resumeTargetSeconds: resumeFrom
-            )
+        if !isStandalonePlaybackSession {
+            let completionIdentity = playbackCompletionIdentity(for: meta)
+            if beginsNewPlaybackCompletionSession {
+                let completionContext = capturePlaybackCompletionContext(profileID: WatchedStore.activeProfileId)
+                sessionCoordinator.beginNewPlaybackCompletionSession(
+                    identity: completionIdentity,
+                    profileID: WatchedStore.activeProfileId,
+                    resumeTargetSeconds: resumeFrom,
+                    source: completionContext.source,
+                    completionAccounts: completionContext.accountIDs
+                )
+            } else if preservesCompletionResumeTarget {
+                sessionCoordinator.preservePlaybackCompletionTargetIdentity(
+                    completionIdentity,
+                    fallbackProfileID: WatchedStore.activeProfileId
+                )
+            } else {
+                sessionCoordinator.updatePlaybackCompletionTarget(
+                    completionIdentity,
+                    fallbackProfileID: WatchedStore.activeProfileId,
+                    resumeTargetSeconds: resumeFrom
+                )
+            }
         }
-        let selectionKey = isTrailerPlayback
+        let selectionKey = isStandalonePlaybackSession
             ? nil
             : PlayerTrackSelectionStore.key(meta: meta, episode: self.activeEpisodeNumbers)
         let savedSelection = selectionKey.flatMap { PlayerTrackSelectionStore.selection(for: $0) }
         if sessionTrackSelection == nil { sessionTrackSelection = savedSelection }
-        let effectiveSelection = Self.effectiveTrackSelection(
+        let effectiveSelection = isStandalonePlaybackSession ? nil : Self.effectiveTrackSelection(
             stored: savedSelection,
             session: sessionTrackSelection,
             externalSubtitles: externalSubtitles
         )
         self.activeTrackSelectionKey = selectionKey
         self.pendingTrackSelection = effectiveSelection
-        self.pendingResumeSeconds = isLiveStream ? nil : resumeFrom
+        self.pendingResumeSeconds = isActionPlaybackSession || isLiveStream ? nil : resumeFrom
         self.didApplyResume = false
         self.lastStablePlaybackTime = nil
         self.hasProducedMidFilePosition = false
         self.explicitSeekProgressCheckpoint = nil
         self.didStartTraktScrobble = false
         self.lastTraktProgressReport = .distantPast
-        self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
+        self.expectedDurationSeconds = isStandalonePlaybackSession ? nil : Self.expectedDuration(for: meta)
         self.didDetectReplacementStream = false
         self.replacementStreamHits = 0
         self.hasRenderedFirstFrame = false
         // The full list stays browsable in the subtitle panel; only smart-matched
         // ones are eagerly loaded into mpv (loading all would fetch dozens of files).
-        self.availableExternalSubtitles = isTrailerPlayback ? [] : externalSubtitles
-        let smartMatched = isTrailerPlayback || effectiveSelection?.subtitle != nil
+        self.availableExternalSubtitles = isStandalonePlaybackSession ? [] : externalSubtitles
+        let smartMatched = isStandalonePlaybackSession || effectiveSelection?.subtitle != nil
             ? []
             : Self.smartMatchedSubtitles(in: externalSubtitles)
         self.pendingExternalSubtitles = Self.subtitlesToPreload(
@@ -1350,7 +1405,7 @@ class PlayerViewModel: ObservableObject {
         self.didApplySubtitlePreference = false
         self.hasExplicitSubtitleSelection = false
         self.sceneSessionID = UUID()
-        loadSkipIntervalsIfNeeded(meta: meta, isTrailerPlayback: isTrailerPlayback)
+        loadSkipIntervalsIfNeeded(meta: meta, isStandalonePlaybackSession: isStandalonePlaybackSession)
     }
 
     private var effectiveFilename: String? {
@@ -1381,7 +1436,7 @@ class PlayerViewModel: ObservableObject {
         filename: String? = nil
     ) {
         subtitleFetchTask?.cancel()
-        guard subtitle != PlaybackMarkers.trailerSubtitle else {
+        guard !isStandalonePlaybackSession else {
             isLoadingExternalSubtitles = false
             return
         }
@@ -1519,6 +1574,15 @@ class PlayerViewModel: ObservableObject {
         autoPlayCountdownSeconds: Int,
         resolver: @escaping (NuvioVideo, UUID?) async -> PreparedNextStream?
     ) {
+        guard !isStandalonePlaybackSession else {
+            seriesEpisodes = []
+            currentEpisodeVideo = nil
+            resolveNextStream = nil
+            nextEpisode = nil
+            clearNextEpisodeCard()
+            return
+        }
+        guard watchPartyPlayerBridge == nil else { return }
         seriesEpisodes = episodes
         if currentEpisodeVideo?.id != current?.id {
             lastAdvancedEpisodeId = nil
@@ -1581,7 +1645,7 @@ class PlayerViewModel: ObservableObject {
     /// IntroDB has an outro) and auto-hides it like the Skip Intro card.
     private func updateNextEpisodeState() {
         guard let _ = nextEpisode,
-              subtitle != PlaybackMarkers.trailerSubtitle,
+              !isStandalonePlaybackSession,
               !isAdvanceInFlight,
               !isAdvancingEpisode,
               !isAwaitingStreamStart,
@@ -1671,8 +1735,8 @@ class PlayerViewModel: ObservableObject {
 
     // MARK: - IntroDB skip segments
 
-    private func loadSkipIntervalsIfNeeded(meta: NuvioMeta, isTrailerPlayback: Bool) {
-        guard !isTrailerPlayback else { return }
+    private func loadSkipIntervalsIfNeeded(meta: NuvioMeta, isStandalonePlaybackSession: Bool) {
+        guard !isStandalonePlaybackSession else { return }
 
         let imdbId = meta.imdbId ?? (meta.id.hasPrefix("tt") ? meta.id : nil)
         let expectedMetaId = meta.id
@@ -1755,7 +1819,7 @@ class PlayerViewModel: ObservableObject {
         guard !skipIntervals.isEmpty,
               time.current > 0,
               status != .ended,
-              subtitle != PlaybackMarkers.trailerSubtitle,
+              !isStandalonePlaybackSession,
               !postPlayState.isVisible,
               !showSettingsPanel,
               !showScenePanel,
@@ -1874,7 +1938,7 @@ class PlayerViewModel: ObservableObject {
             && !isSceneDetailVisible
             && !isScrubbing
             && sidePanel == nil
-            && subtitle != PlaybackMarkers.trailerSubtitle
+            && !isStandalonePlaybackSession
             && !didShutdown
     }
 
@@ -1893,7 +1957,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     func advance() {
-        guard !isAdvanceInFlight,
+        guard !isStandalonePlaybackSession, watchPartyPlayerBridge == nil, !isAdvanceInFlight,
               let next = nextEpisode,
               currentEpisodeVideo?.id != next.id,
               lastAdvancedEpisodeId != next.id,
@@ -2041,7 +2105,7 @@ class PlayerViewModel: ObservableObject {
                 videoSize: prepared.videoSize,
                 filename: prepared.filename
             )
-        } else if let activeMeta, subtitle != PlaybackMarkers.trailerSubtitle {
+        } else if let activeMeta, !isStandalonePlaybackSession {
             let contentId = currentEpisodeVideo?.id ?? activeMeta.id
             fetchExternalSubtitles(
                 contentId: contentId,
@@ -2074,6 +2138,10 @@ class PlayerViewModel: ObservableObject {
     /// stream for the current title (excluding URLs already tried) and reloads
     /// at the last known position.
     private func recoverExpiredStream() {
+        guard !isStandalonePlaybackSession else {
+            surfaceExpiredStreamError()
+            return
+        }
         if let url = activeStreamURL { failedStreamURLs.insert(url) }
         if let meta = activeMeta {
             let numbers = resolvedEpisodeNumbers
@@ -2107,7 +2175,9 @@ class PlayerViewModel: ObservableObject {
         // Trailers / missing resolver: no alternate sources to fail over to.
         loadWatchdogTask?.cancel()
         loadWatchdogTask = nil
-        guard reloadCurrentStream != nil, sessionCoordinator.lastLoadError == nil else { return }
+        guard !isStandalonePlaybackSession,
+              reloadCurrentStream != nil,
+              sessionCoordinator.lastLoadError == nil else { return }
         currentLoadStarted = false
         let targetURL = activeStreamURL
         let timeout = loadTimeoutSeconds
@@ -2122,6 +2192,10 @@ class PlayerViewModel: ObservableObject {
             else { return }
             let memReport = TVMemoryDiagnostic.detailedReport(label: "LOAD_WATCHDOG_TIMEOUT")
             print("[TVTrace] ⚠️ [LOAD_WATCHDOG_TIMEOUT] Source failed to start within \(timeout)s for url=\(targetURL ?? "nil")\n\(memReport)")
+            if self.isStandalonePlaybackSession {
+                self.status = .error("The stream did not start within \(self.loadTimeoutSeconds) seconds.")
+                return
+            }
             if let url = self.activeStreamURL {
                 self.failedStreamURLs.insert(url)
             }
@@ -2178,6 +2252,13 @@ class PlayerViewModel: ObservableObject {
     /// overlay only appears when every candidate is exhausted.
     private func attemptFailover(reason: String, toast: String?) {
         guard !isFailingOver, !didShutdown else { return }
+        guard !isStandalonePlaybackSession else {
+            isReloadingStream = false
+            isFailingOver = false
+            isSwitchingSource = false
+            status = .error(reason)
+            return
+        }
         cancelPendingAdvanceResolution()
         guard let reloadCurrentStream else {
             status = .error(reason)
@@ -2544,6 +2625,9 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func tick(engineOverride: PlaybackEngineControlling? = nil) {
+        guard !didShutdown else { return }
+        watchPartyControls?.validateContext()
+        guard !didShutdown else { return }
         let sampledEngineKind = activeEngineKind
         let sampledLoadGeneration = sessionCoordinator.loadGeneration
         let c = engineOverride ?? engine
@@ -2556,6 +2640,9 @@ class PlayerViewModel: ObservableObject {
             trailerEndConfirmation.reset()
             return
         }
+        PictureInPictureManager.shared.refreshWatchPartyTimebase(for: sessionCoordinator)
+        guard !didShutdown, activeEngineKind == sampledEngineKind,
+              sessionCoordinator.loadGeneration == sampledLoadGeneration else { return }
         if pendingAdvanceResolutionGeneration != nil {
             trailerEndConfirmation.reset()
             if status != .buffering { status = .buffering }
@@ -2567,8 +2654,28 @@ class PlayerViewModel: ObservableObject {
             generation: sampledLoadGeneration
         )
 
+        // Reuse this refresh; Party never starts its own engine polling loop.
+        if let bridge = watchPartyPlayerBridge, let stamp = watchPartyPlayerStamp() {
+            bridge.observe(WatchPartyPlayerSample(
+                stamp: stamp, positionMs: c.positionMs, durationMs: c.durationMs,
+                rate: c.currentSpeed, paused: !c.isTransportPlaying,
+                loading: !hasPresentedCurrentLoad || c.isPlayerLoading || isSwitchingSource
+                    || isReloadingStream || isFailingOver || isAwaitingStreamStart
+                    || isScrubbing || isHoldingSeek || pendingSeekDelta != 0,
+                coherent: c.hasCoherentTimeSample && c.currentErrorMessage.isEmpty
+                    && !c.isPlayerEnded && !isLiveStream,
+                seeking: sampledEngineKind == .mpv && playerController.isSeekingForWatchParty,
+                rendered: hasPresentedCurrentLoad && hasRenderedFirstFrame,
+                failed: !c.currentErrorMessage.isEmpty || sessionCoordinator.lastLoadError != nil
+            ))
+            // A binding's synchronous callback can invalidate or replace the source.
+            guard activeEngineKind == sampledEngineKind,
+                  sessionCoordinator.loadGeneration == sampledLoadGeneration,
+                  c === engine, !didShutdown else { return }
+        }
+
         let confirmedTrailerEnd = trailerEndConfirmation.observe(
-            isTrailer: isTrailerPlaybackSession,
+            isTrailer: isStandalonePlaybackSession,
             usesMPV: sampledEngineKind == .mpv,
             reachedEOF: c.isAtEndOfFile,
             isStable: hasPresentedCurrentLoad && hasRenderedFirstFrame
@@ -2594,6 +2701,7 @@ class PlayerViewModel: ObservableObject {
             guard recoveredPlayback, c.currentErrorMessage.isEmpty else {
                 let isEngineUnavailable = startupError.contains("unavailable on this device") || startupError.contains("AetherEngine is unavailable")
                 if !isEngineUnavailable,
+                   !isStandalonePlaybackSession,
                    reloadCurrentStream != nil,
                    reloadAttempts < Self.maxReloadAttempts,
                    !didShutdown {
@@ -2651,7 +2759,7 @@ class PlayerViewModel: ObservableObject {
                 >= Self.explicitSeekSettleWindow
             return !seekConfirmed && !protectionExpired
         }()
-        let isReplacementSlate = subtitle != PlaybackMarkers.trailerSubtitle && !isLiveStream && loadedStreamLooksLikeReplacement()
+        let isReplacementSlate = !isStandalonePlaybackSession && !isLiveStream && loadedStreamLooksLikeReplacement()
         if !isLiveStream,
            c.hasCoherentTimeSample,
            !c.isPlayerLoading,
@@ -2783,6 +2891,10 @@ class PlayerViewModel: ObservableObject {
            !isRecoverableAetherLoading,
            !isFailingOver,
            !isReloadingStream {
+            if isStandalonePlaybackSession {
+                status = .error(c.currentErrorMessage)
+                return
+            }
             if let url = activeStreamURL { failedStreamURLs.insert(url) }
             if let meta = activeMeta {
                 let numbers = resolvedEpisodeNumbers
@@ -2927,7 +3039,7 @@ class PlayerViewModel: ObservableObject {
         // stream's transient ended/loading state so nothing flickers or re-fires.
         if isAdvanceInFlight || isAwaitingStreamStart { return }
 
-        if subtitle != PlaybackMarkers.trailerSubtitle,
+        if !isStandalonePlaybackSession,
            detectReplacementStream(c) { return }
 
         addPendingExternalSubtitlesIfNeeded()
@@ -2952,12 +3064,14 @@ class PlayerViewModel: ObservableObject {
                 && !c.isPlayerLoading
                 && !c.isPlayerEnded
                 && !c.isAtEndOfFile
-            observePlaybackCompletionEligibility(
-                at: latestTime,
-                isCoherent: isCoherentCompletionSample,
-                isGenuinelyPlaying: isGenuinelyPlaying,
-                isBelowCompletionBoundary: !shouldMarkAsWatched(at: latestTime)
-            )
+            if isTrackablePlayback {
+                observePlaybackCompletionEligibility(
+                    at: latestTime,
+                    isCoherent: isCoherentCompletionSample,
+                    isGenuinelyPlaying: isGenuinelyPlaying,
+                    isBelowCompletionBoundary: !shouldMarkAsWatched(at: latestTime)
+                )
+            }
         }
 
         if c.isPlayerEnded {
@@ -3007,7 +3121,7 @@ class PlayerViewModel: ObservableObject {
             updateNextEpisodeState()
         }
 
-        if !isLiveStream {
+        if !isStandalonePlaybackSession && !isLiveStream && watchPartyPlayerBridge == nil {
             let postPlayEnabled = ProfileSettings.current.object(forKey: SettingsKey.postPlayRecommendationsEnabled) as? Bool ?? true
             let hasBlockingOverlay = showSettingsPanel || showScenePanel || isSceneDetailVisible || sidePanel != nil || isScrubbing || showPauseOverlay
             let endingStartTime = skipIntervals.first(where: \.isEnding)?.startTime
@@ -3033,7 +3147,8 @@ class PlayerViewModel: ObservableObject {
             failedStreamURLs.removeAll()
         }
 
-        if let latestSpeed = PlaybackSpeed(rawValue: c.currentSpeed),
+        let displayedRate = watchPartyPlayerBridge == nil ? c.currentSpeed : watchPartyControls?.canonicalRate
+        if let displayedRate, let latestSpeed = PlaybackSpeed(rawValue: displayedRate),
            latestSpeed.rawValue != playbackSpeed.rawValue {
             playbackSpeed = latestSpeed
         }
@@ -3077,9 +3192,14 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Transport
 
     func play() {
+        if watchPartyPlayerBridge != nil && status == .ended {
+            showPlayerToast("Start a new room to watch again")
+            return
+        }
+        if routeWatchPartyControl(status == .ended ? .seekAndPlay(0) : .play) { return }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] play() called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         if status == .ended {
-            if let activeMeta {
+            if isTrackablePlayback, let activeMeta {
                 let completionContext = capturePlaybackCompletionContext(profileID: WatchedStore.activeProfileId)
                 sessionCoordinator.beginNewPlaybackCompletionSession(
                     identity: playbackCompletionIdentity(for: activeMeta),
@@ -3094,6 +3214,18 @@ class PlayerViewModel: ObservableObject {
         }
         engine.playPlayback()
         status = .playing
+        recordPlaybackResumeIfEligible()
+        cancelPauseOverlaySchedule()
+        showPauseOverlay = false
+        if showControls {
+            scheduleControlsHide()
+        }
+        if showScenePanel {
+            sceneCoordinator.handlePlaybackResumed()
+        }
+    }
+
+    private func recordPlaybackResumeIfEligible() {
         // MDBList has an explicit start transition for resuming a paused
         // session. The normal progress save path will still handle a fresh
         // playback whose timeline is not ready yet.
@@ -3109,17 +3241,14 @@ class PlayerViewModel: ObservableObject {
                 force: true
             )
         }
-        cancelPauseOverlaySchedule()
-        showPauseOverlay = false
-        if showControls {
-            scheduleControlsHide()
-        }
-        if showScenePanel {
-            sceneCoordinator.handlePlaybackResumed()
-        }
     }
 
     func pause(forBackground: Bool = false) {
+        if forBackground {
+            // Revoke room effects first; lifecycle parking must not broadcast a user's pause.
+            watchPartyLifecycle.suspend(engineWillPark: false)
+            watchPartyControls?.setSuspended(true)
+        } else if routeWatchPartyControl(.pause) { return }
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] pause(forBackground=\(forBackground)) called: currentStatus=\(status), time=\(time.current)/\(time.duration)")
         cancelControlsHideTimer()
         engine.pausePlayback()
@@ -3166,9 +3295,221 @@ class PlayerViewModel: ObservableObject {
         pauseOverlayTask = nil
     }
 
-    func shutdown() {
+    private func watchPartyPlayerStamp() -> WatchPartyPlayerStamp? {
+        guard !didShutdown, hasLoaded, let meta = activeMeta else { return nil }
+        let numbers = meta.isSeries ? resolvedEpisodeNumbers : nil
+        let canonicalID = watchPartyAdmittedMedia.flatMap { admitted in
+            [meta.id, meta.imdbId].compactMap { $0 }.contains(admitted.metaID) ? admitted.metaID : nil
+        } ?? meta.id
+        let media = WatchPartyMedia(type: meta.isSeries ? "episode" : "movie", metaID: canonicalID,
+                                   metaType: meta.isSeries ? "series" : meta.type,
+                                   season: numbers?.season, episode: numbers?.episode)
+        if let admitted = watchPartyAdmittedMedia,
+           (try? WatchPartyLaunchPolicy.validateSelection(media, room: admitted)) == nil { return nil }
+        return WatchPartyPlayerStamp(generation: sessionCoordinator.loadGeneration,
+                                     engineID: ObjectIdentifier(engine), mediaKey: media.key)
+    }
+
+    /// Explicit opt-in for the future runtime binding. UI/room admission must precede apply().
+    @discardableResult
+    func attachWatchPartyPlayerBridge(media: WatchPartyMedia? = nil, isCurrent: @escaping @MainActor () -> Bool) throws -> WatchPartyPlayerBridge {
+        guard watchPartyPlayerBridge == nil else { throw WatchPartyPlayerBridgeError.alreadyAttached }
+        watchPartyAdmittedMedia = media
+        let bridge = WatchPartyPlayerBridge(isCurrent: isCurrent, currentStamp: { [weak self] in
+            self?.watchPartyPlayerStamp()
+        }, issueSeek: { [weak self] target, stamp in
+            guard let self, self.watchPartyPlayerStamp() == stamp else { throw WatchPartyPlayerBridgeError.staleOperation }
+            switch self.activeEngineKind {
+            case .aether:
+                guard let controller = self.aetherController else { throw WatchPartyPlayerBridgeError.notReady }
+                await controller.engine.seek(to: Double(target) / 1000)
+            case .mpv:
+                try self.playerController.beginWatchPartySeek(target)
+            }
+            try Task.checkCancellation()
+            guard self.watchPartyPlayerStamp() == stamp else { throw WatchPartyPlayerBridgeError.staleOperation }
+        }, transport: { [weak self] paused, rate, stamp in
+            guard let self, self.watchPartyPlayerStamp() == stamp else { throw WatchPartyPlayerBridgeError.staleOperation }
+            let engine = self.engine
+            if let rate { engine.setSpeed(rate) }
+            if let paused {
+                let wasPlaying = engine.isTransportPlaying
+                if paused {
+                    engine.pausePlayback()
+                    self.status = .paused
+                    if wasPlaying { self.saveProgress(force: true, eventAction: .pause) }
+                    self.cancelPauseOverlaySchedule()
+                    if self.showScenePanel { self.sceneCoordinator.handlePlaybackPaused() }
+                } else {
+                    engine.playPlayback()
+                    self.status = .playing
+                    if !wasPlaying { self.recordPlaybackResumeIfEligible() }
+                    self.cancelPauseOverlaySchedule()
+                    self.showPauseOverlay = false
+                    if self.showScenePanel { self.sceneCoordinator.handlePlaybackResumed() }
+                }
+            }
+            return engine.currentSpeed
+        }, maximumRate: { [weak self] in
+            guard let self else { return 0 }
+            return self.activeEngineKind == .aether ? (self.aetherController?.engine.maxSupportedRate ?? 0) : 4
+        })
+        watchPartyPlayerBridge = bridge
+        bindWatchPartyRemoteControls()
+        return bridge
+    }
+
+    func detachWatchPartyPlayerBridge() {
+        if watchPartyPlayerBridge != nil {
+            playerController.stopWatchPartyRemoteCommands()
+            aetherController?.stopWatchPartyRemoteCommands()
+            // Discard previews before removing admission, including runtime cleanup before shutdown.
+            seekDebounceTask?.cancel()
+            seekDebounceTask = nil
+            stopRepeatingNudge(commit: false)
+            pendingSeekDelta = 0
+            resetScrubSession()
+        }
+        watchPartyControls?.stop()
+        watchPartyControls = nil
+        watchPartyPlayerBridge?.stop()
+        watchPartyPlayerBridge = nil
+        watchPartyAdmittedMedia = nil
+        watchPartyLifecycle = PlayerLifecycleAdmission()
+        PictureInPictureManager.shared.refreshController(for: sessionCoordinator)
+    }
+
+    func attachWatchPartyControls(binding: WatchPartyPlaybackBinding,
+                                  isCurrent: @escaping @MainActor () -> Bool) throws {
+        guard watchPartyPlayerBridge != nil, watchPartyControls == nil else {
+            throw WatchPartyPlaybackBindingError.alreadyBound
+        }
+        watchPartyControls = WatchPartyControlRouter(isCurrent: isCurrent,
+            currentStamp: { [weak self] in self?.watchPartyPlayerStamp() },
+            canonicalRate: { [weak binding] in binding?.canonicalRate }, perform: { [weak binding] intent, applied in
+            guard let binding else { throw WatchPartyPlaybackBindingError.notReady }
+            try await binding.perform(intent, onApplied: applied)
+        }, suspend: { [weak binding] in binding?.setSuspended($0) }, onError: { [weak self] error in
+            self?.showPlayerToast((error as? WatchPartyPlaybackBindingError) == .busy
+                ? "Watch Party is synchronizing" : "Watch Party control unavailable")
+        }, onCompleted: { [weak self] intent in self?.completedWatchPartyControl(intent) })
+        bindWatchPartyRemoteControls()
+    }
+
+    private func bindWatchPartyRemoteControls() {
+        guard watchPartyPlayerBridge != nil else {
+            playerController.setWatchPartyRemoteIntent(nil)
+            aetherController?.setWatchPartyRemoteIntent(nil)
+            aetherController?.setWatchPartyPiPIntent(nil)
+            return
+        }
+        let mpv = playerController
+        mpv.setWatchPartyRemoteIntent { [weak self, weak mpv] intent in
+            guard let self, let mpv, ObjectIdentifier(self.engine) == ObjectIdentifier(mpv) else { return false }
+            return self.admitWatchPartyRemoteControl(intent)
+        }
+        if let aether = aetherController {
+            aether.setWatchPartyPiPIntent { [weak self, weak aether] intent, applied, completion in
+                guard let self, let aether, ObjectIdentifier(self.engine) == ObjectIdentifier(aether) else { completion(); return }
+                _ = self.admitWatchPartyRemoteControl(intent, completion: completion, onApplied: applied)
+            }
+            aether.setWatchPartyRemoteIntent { [weak self, weak aether] intent in
+                guard let self, let aether, ObjectIdentifier(self.engine) == ObjectIdentifier(aether) else { return false }
+                return self.admitWatchPartyRemoteControl(intent)
+            }
+        }
+        PictureInPictureManager.shared.refreshController(for: sessionCoordinator)
+    }
+
+    private func admitWatchPartyRemoteControl(_ intent: PlayerRemoteIntent, completion: (@MainActor () -> Void)? = nil,
+                                             onApplied: (@MainActor () -> Void)? = nil) -> Bool {
+        guard status != .ended else { completion?(); return false }
+        guard watchPartyPlayerBridge != nil, let watchPartyControls,
+              let local = intent.localIntent(positionMs: engine.positionMs, isPlaying: engine.isTransportPlaying) else { completion?(); return false }
+        return watchPartyControls.submit(local, completion: completion, onApplied: onApplied) == .accepted
+    }
+
+    /// Explicit root foreground hook; never called merely because a user presses Play.
+    func resumeWatchPartyAfterForeground() {
+        watchPartyLifecycle.enterForeground()
+        if watchPartyLifecycle.canResume { watchPartyControls?.setSuspended(false) }
+    }
+
+    func suspendWatchPartyForLifecycle(engineWillPark: Bool = false) {
+        guard watchPartyPlayerBridge != nil, !didShutdown else { return }
+        let pip = PictureInPictureManager.shared
+        if pip.activeCoordinator === sessionCoordinator,
+           pip.isPictureInPictureActive || pip.isPictureInPictureStarting || pip.isRestoringUIInProgress { return }
+        watchPartyLifecycle.suspend(engineWillPark: engineWillPark)
+        watchPartyControls?.setSuspended(true) // Revokes permits before any raw engine pause/vid parking.
+        if engineWillPark { hasRenderedFirstFrame = false }
+    }
+
+    private func watchPartyEngineDidRestore() {
+        guard watchPartyPlayerBridge != nil else { return }
+        watchPartyLifecycle.engineDidRestore()
+        if watchPartyLifecycle.canResume { watchPartyControls?.setSuspended(false) }
+    }
+    func catchUpWithWatchParty() { _ = routeWatchPartyControl(.catchUp) }
+
+    /// A mounted bridge without controls must fail closed rather than bypass room permissions.
+    private func routeWatchPartyControl(_ intent: WatchPartyLocalIntent) -> Bool {
+        guard watchPartyPlayerBridge != nil else { return false }
+        guard let watchPartyControls else {
+            showPlayerToast("Watch Party control unavailable")
+            return true
+        }
+        watchPartyControls.submit(intent)
+        return true
+    }
+
+    private func completedWatchPartyControl(_ intent: WatchPartyLocalIntent) {
+        guard let sample = watchPartyPlayerBridge?.sample else { return }
+        switch intent {
+        case .seek, .seekAndPlay:
+            recordCommittedSeek(to: Double(sample.positionMs) / 1000, previous: time.current,
+                                duration: Double(sample.durationMs) / 1000)
+        default: break
+        }
+        // UI effects happen after admission/completion, never through play()/pause() again.
+        if status == .paused {
+            cancelControlsHideTimer()
+            showControls = true
+            isTimelineFocused = true
+            schedulePauseOverlay()
+        } else if showControls { scheduleControlsHide() }
+    }
+
+    /// Reattach the same Party model without applying stale launch metadata or restarting load work.
+    /// AetherPlayerSurface still owns the PiP manager's fullscreenSurfaceDidRebind handshake.
+    @discardableResult
+    func rebindWatchPartyFullscreen() -> Bool {
+        guard hasLoaded, !didShutdown else { return false }
+        sessionCoordinator.prepareControllers()
+        aetherController?.rebindSurface()
+        if pollTimer == nil { startPolling() }
+        return true
+    }
+
+    /// Only the checked Party runtime's resource cleanup calls this entry point.
+    func shutdownForWatchParty() {
         guard !didShutdown else { return }
-        if PictureInPictureManager.shared.isPictureInPictureActive {
+        let sourceURL = sessionCoordinator.torrentStreamSourceURL
+        cancelStartupBenchmark()
+        shutdown(preservingPictureInPicture: false)
+        if let sourceURL {
+            // Server URLs carry unique session tokens; a delayed exit cannot stop a successor.
+            Task { await TorrentEngineManager.shared.stopActiveStream(for: sourceURL) }
+        }
+    }
+
+    func shutdown() {
+        shutdown(preservingPictureInPicture: true)
+    }
+
+    private func shutdown(preservingPictureInPicture: Bool) {
+        guard !didShutdown else { return }
+        if preservingPictureInPicture && PictureInPictureManager.shared.isPictureInPictureActive {
             // Keep playback and session alive for PiP
             pollTimer?.invalidate()
             pollTimer = nil
@@ -3177,6 +3518,7 @@ class PlayerViewModel: ObservableObject {
             cancelPauseOverlaySchedule()
             return
         }
+        detachWatchPartyPlayerBridge()
         cancelPendingAdvanceResolution()
         didShutdown = true
         PlaybackTimelineRecorder.record(.playbackStopRequested, engine: activeEngineKind)
@@ -3222,10 +3564,18 @@ class PlayerViewModel: ObservableObject {
         skipIntervalLoadTask = nil
         playerController.pausePlayback()
         saveProgress(force: true, eventAction: .pause)
-        // Leave the fallback host destroyed so re-entry cannot resume a ghost pipeline.
-        playerController.destroyPlayer()
-        aetherController?.destroyPlayer()
-        PictureInPictureManager.shared.invalidateSession()
+        if preservingPictureInPicture {
+            // Preserve the existing non-Party teardown path.
+            playerController.destroyPlayer()
+            aetherController?.destroyPlayer()
+            PictureInPictureManager.shared.invalidateSession()
+        } else if PictureInPictureManager.shared.activeCoordinator === sessionCoordinator {
+            // Progress was saved above, before invalidation stops the owned coordinator.
+            PictureInPictureManager.shared.invalidateSession()
+        } else {
+            // Never invalidate another playback's PiP. Also releases this coordinator's cache/wake lock.
+            sessionCoordinator.stopAll()
+        }
         postPlayController.stop()
         sceneCoordinator.resetSession()
         status = .idle
@@ -3259,6 +3609,11 @@ class PlayerViewModel: ObservableObject {
             commitScrub(andPlay: true)
             return
         }
+        if watchPartyPlayerBridge != nil {
+            // The transport may have changed since the last 250 ms sample (rapid remote taps).
+            _ = routeWatchPartyControl(engine.isTransportPlaying ? .pause : .play)
+            return
+        }
         let dir = PlaybackToggleDirection(isTransportPlaying: engine.isTransportPlaying)
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] togglePlayPause() called: isTransportPlaying=\(engine.isTransportPlaying), direction=\(dir), status=\(status), time=\(time.current)")
         switch dir {
@@ -3268,7 +3623,12 @@ class PlayerViewModel: ObservableObject {
     }
 
     func seek(to seconds: Double) {
-        guard !isLiveStream else { return }
+        guard !isLiveStream, seconds.isFinite else { return }
+        if watchPartyPlayerBridge != nil {
+            guard let target = Self.watchPartySeekMilliseconds(seconds) else { return }
+            _ = routeWatchPartyControl(.seek(target))
+            return
+        }
         let duration = time.duration > 0 ? time.duration : clock.duration
         let target = duration > 0
             ? min(max(seconds, 0), max(duration - 0.25, 0))
@@ -3276,10 +3636,18 @@ class PlayerViewModel: ObservableObject {
         let prevCurrent = time.current
         print("[SeekWatchdog][PlayerVM] 👆 User seek to \(String(format: "%.3f", seconds))s (target: \(String(format: "%.3f", target))s, current: \(String(format: "%.3f", time.current))s, duration: \(String(format: "%.3f", duration))s)")
         screensaverDebugLog("[ScreensaverDebug][PlayerVM] seek(to: \(seconds)) called: target=\(target), prevCurrent=\(time.current), duration=\(duration)")
-        if target < prevCurrent - 0.5 {
-            handleRewind(from: prevCurrent, to: target)
-        }
         engine.seekToMs(Int64(target * 1000))
+        recordCommittedSeek(to: target, previous: prevCurrent, duration: duration)
+    }
+
+    static func watchPartySeekMilliseconds(_ seconds: Double) -> Int64? {
+        let milliseconds = max(0, seconds) * 1000
+        guard seconds.isFinite, milliseconds.isFinite, milliseconds < Double(Int64.max) else { return nil }
+        return Int64(milliseconds.rounded(.towardZero))
+    }
+
+    private func recordCommittedSeek(to target: Double, previous: Double, duration: Double) {
+        if target < previous - 0.5 { handleRewind(from: previous, to: target) }
         if let source = activeStreamURL.flatMap(URL.init(string:)) {
             let generation = sessionCoordinator.loadGeneration
             Task { @MainActor [weak self] in
@@ -3482,7 +3850,7 @@ class PlayerViewModel: ObservableObject {
         } else if showControls {
             scheduleControlsHide()
             if status == .paused,
-               subtitle != PlaybackMarkers.trailerSubtitle,
+               !isStandalonePlaybackSession,
                !showSettingsPanel {
                 schedulePauseOverlay()
             }
@@ -3876,12 +4244,18 @@ class PlayerViewModel: ObservableObject {
             resetScrubSession()
             return
         }
+        if watchPartyPlayerBridge != nil {
+            resetScrubSession()
+            guard let milliseconds = Self.watchPartySeekMilliseconds(target) else { return }
+            _ = routeWatchPartyControl(andPlay ? .seekAndPlay(milliseconds) : .seek(milliseconds))
+            return
+        }
         seek(to: target)
         resetScrubSession()
         if andPlay || status == .playing {
             play()
         } else if status == .paused,
-           subtitle != PlaybackMarkers.trailerSubtitle,
+           !isStandalonePlaybackSession,
            !showSettingsPanel {
             // Transport first; pause sheet returns after the usual idle delay.
             schedulePauseOverlay()
@@ -3894,7 +4268,7 @@ class PlayerViewModel: ObservableObject {
         resetScrubSession()
         showControls = true
         if status == .paused,
-           subtitle != PlaybackMarkers.trailerSubtitle,
+           !isStandalonePlaybackSession,
            !showSettingsPanel {
             schedulePauseOverlay()
         }
@@ -4302,7 +4676,7 @@ class PlayerViewModel: ObservableObject {
         if status == .playing {
             scheduleControlsHide()
         } else if status == .paused,
-                  subtitle != PlaybackMarkers.trailerSubtitle,
+                  !isStandalonePlaybackSession,
                   !showSettingsPanel {
             schedulePauseOverlay()
         }
@@ -4336,7 +4710,7 @@ class PlayerViewModel: ObservableObject {
         }
         if showControls {
             if status == .paused,
-               subtitle != PlaybackMarkers.trailerSubtitle,
+               !isStandalonePlaybackSession,
                !showSettingsPanel {
                 schedulePauseOverlay()
             } else {
@@ -4365,6 +4739,7 @@ class PlayerViewModel: ObservableObject {
     func cancelMoveSeekTracking() {}
 
     func setSpeed(_ speed: PlaybackSpeed) {
+        if routeWatchPartyControl(.speed(speed.rawValue)) { return }
         playbackSpeed = speed
         sessionCoordinator.updatePlaybackRate(speed.rawValue)
         engine.setSpeed(speed.rawValue)
@@ -5083,11 +5458,11 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Side panels (episodes / sources)
 
     var canShowEpisodesPanel: Bool {
-        !seriesEpisodes.isEmpty && subtitle != PlaybackMarkers.trailerSubtitle
+        !seriesEpisodes.isEmpty && !isStandalonePlaybackSession
     }
 
     var canShowSourcesPanel: Bool {
-        fetchPlaybackSources != nil && subtitle != PlaybackMarkers.trailerSubtitle
+        fetchPlaybackSources != nil && !isStandalonePlaybackSession
     }
 
     var panelEpisodes: [NuvioVideo] {
@@ -5186,6 +5561,10 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectSource(_ stream: NuvioStream) {
+        guard watchPartyPlayerBridge == nil else {
+            showPlayerToast("Choose a new source from the Watch Party room")
+            return
+        }
         PlaybackTimelineRecorder.record(.sourceSelectionRequested, engine: activeEngineKind)
         if let unavailableReason = stream.unavailabilityReason {
             showPlayerToast(unavailableReason)
@@ -5275,6 +5654,10 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectEpisode(_ episode: NuvioVideo) {
+        guard watchPartyPlayerBridge == nil else {
+            showPlayerToast("Episode switching is unavailable in Watch Party")
+            return
+        }
         guard let resolveNextStream else {
             showPlayerToast("Episode switching unavailable")
             return
@@ -5358,12 +5741,12 @@ class PlayerViewModel: ObservableObject {
             if status == .playing {
                 scheduleControlsHide()
             } else if status == .paused,
-                      subtitle != PlaybackMarkers.trailerSubtitle,
+                      !isStandalonePlaybackSession,
                       !isScrubbing {
                 schedulePauseOverlay()
             }
         } else if status == .paused,
-                  subtitle != PlaybackMarkers.trailerSubtitle,
+                  !isStandalonePlaybackSession,
                   !isScrubbing {
             schedulePauseOverlay()
         }
@@ -5828,6 +6211,8 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func applyPendingResumeIfNeeded() {
+        // The accepted room timeline owns Party startup; local history is not a user seek.
+        guard watchPartyPlayerBridge == nil else { return }
         let minResumeThreshold = isTrailerPlaybackSession ? 0.5 : 5.0
         guard !didApplyResume,
               let pendingResumeSeconds,
@@ -5845,7 +6230,8 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func rememberManualSourceIfReady() {
-        guard ProfileSettings.current.bool(forKey: SettingsKey.rememberLastSourceFocus),
+        guard isTrackablePlayback,
+              ProfileSettings.current.bool(forKey: SettingsKey.rememberLastSourceFocus),
               !didRememberManualSource, !isLiveStream, !isTrailerPlaybackSession,
               hasRenderedFirstFrame, !isAwaitingStreamStart,
               !isSwitchingSource, !isReloadingStream, !isFailingOver,
@@ -5887,6 +6273,7 @@ class PlayerViewModel: ObservableObject {
             print("[ContinueWatching][Player] saveProgress skipped: isLiveStream=true")
             return
         }
+        guard isTrackablePlayback else { return }
         // Never persist progress during an Aether→MPV handoff.
         if sessionCoordinator.isProgressSaveSuspended {
             print("[ContinueWatching][Player] saveProgress skipped: sessionCoordinator.isProgressSaveSuspended=true")
@@ -6067,14 +6454,19 @@ class PlayerViewModel: ObservableObject {
     /// Trailers use the movie's metadata for artwork and playback, but are not
     /// playback of that movie. Keep the marker check as a compatibility
     /// fallback while the session flag protects against subtitle changes.
-    static func shouldTrackPlayback(subtitle: String, isTrailerSession: Bool) -> Bool {
-        !isTrailerSession && subtitle != PlaybackMarkers.trailerSubtitle
+    static func shouldTrackPlayback(
+        subtitle: String,
+        isTrailerSession: Bool,
+        isActionSession: Bool = false
+    ) -> Bool {
+        !isTrailerSession && !isActionSession && subtitle != PlaybackMarkers.trailerSubtitle
     }
 
     private var isTrackablePlayback: Bool {
         Self.shouldTrackPlayback(
             subtitle: subtitle,
-            isTrailerSession: isTrailerPlaybackSession
+            isTrailerSession: isTrailerPlaybackSession,
+            isActionSession: isActionPlaybackSession
         )
     }
 
@@ -6222,6 +6614,7 @@ class PlayerViewModel: ObservableObject {
         isGenuinelyPlaying: Bool,
         isBelowCompletionBoundary: Bool
     ) {
+        guard isTrackablePlayback else { return }
         let resumeTargetReached: Bool
         if let resumeTarget = sessionCoordinator.playbackCompletionTracker?.resumeTargetSeconds {
             let target = min(resumeTarget, max(sample.duration - 5, 0))
@@ -6432,20 +6825,31 @@ class PlayerViewModel: ObservableObject {
     /// shorter than the content we meant to resume. Judged against the duration
     /// we expected (prior Continue Watching entry or metadata runtime) and the
     /// resume point — you can't be 40 min into a 2 min file.
-    private func loadedStreamLooksLikeReplacement() -> Bool {
-        let loaded = time.duration
-        guard loaded > 0 else { return false }
+    static func streamLooksLikeReplacement(
+        loadedDuration: Double,
+        pendingResumeSeconds: Double?,
+        expectedDurationSeconds: Double?,
+        isStandalonePlaybackSession: Bool,
+        isLiveStream: Bool
+    ) -> Bool {
+        guard !isStandalonePlaybackSession, loadedDuration > 0 else { return false }
+        if let resume = pendingResumeSeconds, resume > loadedDuration + 60 {
+            return true
+        }
+        if let expected = expectedDurationSeconds, expected >= 60, loadedDuration < expected * 0.5 {
+            return true
+        }
+        return !isLiveStream && loadedDuration < 180
+    }
 
-        if let resume = pendingResumeSeconds, resume > loaded + 60 {
-            return true
-        }
-        if let expected = expectedDurationSeconds, expected >= 60, loaded < expected * 0.5 {
-            return true
-        }
-        if subtitle != PlaybackMarkers.trailerSubtitle, !isLiveStream, loaded < 180 {
-            return true
-        }
-        return false
+    private func loadedStreamLooksLikeReplacement() -> Bool {
+        Self.streamLooksLikeReplacement(
+            loadedDuration: time.duration,
+            pendingResumeSeconds: pendingResumeSeconds,
+            expectedDurationSeconds: expectedDurationSeconds,
+            isStandalonePlaybackSession: isStandalonePlaybackSession,
+            isLiveStream: isLiveStream
+        )
     }
 
     /// Confirms — with a short debounce so a transient duration read can't trip
@@ -6453,6 +6857,7 @@ class PlayerViewModel: ObservableObject {
     /// pauses and surfaces an error. Returns true once handled so the caller
     /// skips all progress bookkeeping. Idempotent after the first detection.
     private func detectReplacementStream(_ c: PlaybackEngineControlling) -> Bool {
+        guard !isStandalonePlaybackSession else { return false }
         // A reload is already resolving/loading a fresh stream — treat the old
         // slate as handled so no bookkeeping runs against it.
         if isReloadingStream { return true }
@@ -6558,6 +6963,10 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Picture in Picture Methods
 
     func startPictureInPicture() {
+        guard watchPartyPlayerBridge == nil || aetherController?.canUseWatchPartySoftwarePiP == true else {
+            showPlayerToast("Picture in Picture is unavailable for this Watch Party source")
+            return
+        }
         PictureInPictureManager.shared.startPictureInPicture()
     }
 

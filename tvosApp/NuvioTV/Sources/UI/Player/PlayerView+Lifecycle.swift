@@ -21,6 +21,27 @@ extension PlayerView {
     var layersWithLifecycle: some View {
         animatedLayers
             .onAppear {
+                if let partyPlayback {
+                    // A changed root identity must mount a new StateObject for a new runtime.
+                    guard partyPlayback.viewModel === viewModel else { return }
+                    do {
+                        let attachment = try partyPlayback.attach()
+                        partySurface = attachment.surface
+                        if !attachment.startsLoad {
+                            guard viewModel.rebindWatchPartyFullscreen() else {
+                                partyPlayback.finish()
+                                return
+                            }
+                            PlaybackWakeLock.acquire(ownerID: viewModel.sessionCoordinator.wakeLockOwnerID)
+                            syncPlaybackWakeLock()
+                            focusRemoteInput()
+                            // Preserve active episode/source, subtitle task, resolver, benchmark and poller.
+                            return
+                        }
+                    } catch {
+                        return // Obsolete membership/context; never fall through to a fresh load.
+                    }
+                }
                 TVHomeDebugTrace.log("player.appear meta=\(meta.id)")
                 focusRemoteInput()
                 viewModel.adoptStartupBenchmarkToken(initialStartupBenchmarkToken)
@@ -45,13 +66,14 @@ extension PlayerView {
                     cacheFileIdentity: cacheFileIdentity,
                     trickplayURL: trickplayURL,
                     sourceID: sourceID,
-                    currentEpisode: currentEpisode
+                    currentEpisode: currentEpisode,
+                    isActionPlaybackSession: isActionPlaybackSession
                 )
                 // load() may adopt the retained PiP coordinator. Acquire for
                 // that session so restoring fullscreen cannot add another hold.
                 PlaybackWakeLock.acquire(ownerID: viewModel.sessionCoordinator.wakeLockOwnerID)
                 syncPlaybackWakeLock()
-                if subtitle != PlaybackMarkers.trailerSubtitle {
+                if !isStandalonePlaybackSession {
                     viewModel.fetchExternalSubtitles(
                         contentId: subtitleContentId,
                         type: meta.isSeries ? "series" : meta.type,
@@ -60,7 +82,7 @@ extension PlayerView {
                         filename: filename
                     )
                 }
-                if let resolveNextStream {
+                if !isStandalonePlaybackSession, let resolveNextStream {
                     viewModel.configureNextEpisode(
                         episodes: episodes,
                         current: currentEpisode,
@@ -71,6 +93,14 @@ extension PlayerView {
                 }
             }
             .onDisappear {
+                if let partyPlayback {
+                    guard let surface = partySurface else { return }
+                    partySurface = nil
+                    // Only the current surface may close the owner; old callbacks are inert.
+                    // The runtime's resource cleanup handles progress, wake lock, PiP and torrent.
+                    partyPlayback.detach(surface)
+                    return
+                }
                 TVHomeDebugTrace.log("player.disappear meta=\(meta.id)")
                 let sourceURL = viewModel.sessionCoordinator.torrentStreamSourceURL
                 viewModel.cancelStartupBenchmark()
@@ -96,6 +126,10 @@ extension PlayerView {
     var layersObservingPlayback: some View {
         layersWithLifecycle
             .onChange(of: viewModel.isPictureInPictureActive) { _, isActive in
+                if let partyPlayback {
+                    guard partyPlayback.isCurrent,
+                          PictureInPictureManager.shared.activeCoordinator === viewModel.sessionCoordinator else { return }
+                }
                 if isActive {
                     onBack()
                 }

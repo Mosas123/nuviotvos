@@ -2416,6 +2416,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
+    var onWillSuspendPlayback: (() -> Void)?
+    var onDidRestorePlayback: (() -> Void)?
     /// Terminal load/runtime failures the coordinator may use for MPV fallback.
     var onTerminalError: ((String) -> Void)?
 
@@ -3523,6 +3525,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     @objc private func appDidEnterBackground() {
+        if !engine.pictureInPictureActive {
+            let mark = lifecycleReloadToken
+            onWillSuspendPlayback?()
+            guard lifecycleReloadToken == mark else { return }
+        }
         let pos = lastKnownPositionMs
         let dur = lastKnownDurationMs
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidEnterBackground: state=\(engine.state), isPlayerPlaying=\(isPlayerPlaying), pos=\(pos)ms, dur=\(dur)ms, clock=\(engine.clock.currentTime)")
@@ -3545,8 +3552,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     @objc private func appDidBecomeActive() {
         screensaverDebugLog("[ScreensaverDebug][AetherController] appDidBecomeActive: appState=\(UIApplication.shared.applicationState.rawValue), needsReload=\(needsForegroundReload), hasTask=\(foregroundReloadTask != nil), wasPlaying=\(playbackWasPlayingBeforeBackground), pip=\(engine.pictureInPictureActive)")
         guard UIApplication.shared.applicationState == .active else { return }
-        guard needsForegroundReload,
-              foregroundReloadTask == nil else { return }
+        if !needsForegroundReload, foregroundReloadTask == nil {
+            onDidRestorePlayback?()
+            return
+        }
+        guard needsForegroundReload, foregroundReloadTask == nil else { return }
 
         // PiP keeps Aether's video pipeline alive across backgrounding. If PiP
         // is still active at foreground return, there is no torn down session
@@ -3554,6 +3564,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         guard !engine.pictureInPictureActive else {
             needsForegroundReload = false
             playbackWasPlayingBeforeBackground = false
+            onDidRestorePlayback?()
             return
         }
 
@@ -3595,11 +3606,13 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             self.rebindSurface()
             let resumeAfterReload = shouldResume || self.playbackWasPlayingBeforeBackground
             screensaverDebugLog("[ScreensaverDebug][AetherController] reload completed, asserting post-reload state: resumeAfterReload=\(resumeAfterReload)")
-            if resumeAfterReload {
+            if resumeAfterReload && !self.isWatchPartyControlled {
                 self.engine.play()
             } else {
                 self.engine.pause()
             }
+            guard self.lifecycleReloadToken == token else { return }
+            self.onDidRestorePlayback?()
         }
     }
 
@@ -4144,7 +4157,6 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             token: request.startupBenchmarkToken,
             engineGeneration: nil
         )
-        resetSoftwareFrameExtractor()
         lifecycleReloadToken &+= 1
         needsForegroundReload = false
         playbackWasPlayingBeforeBackground = false
@@ -4274,12 +4286,6 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         if #available(tvOS 11.0, *) {
             panelPresentsDV = AVPlayer.availableHDRModes.contains(.dolbyVision)
         }
-
-        let isRemoteHLS = request.videoURL.pathExtension.lowercased() == "m3u8"
-            || request.videoURL.absoluteString.contains(".m3u8")
-            || request.videoURL.absoluteString.contains("manifest.googlevideo.com")
-            || request.videoURL.host?.contains("googlevideo.com") == true
-            || request.streamDescription == PlaybackMarkers.trailerSubtitle
 
         let options = LoadOptions(
             httpHeaders: request.httpHeaders,
@@ -4510,6 +4516,12 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func destroyPlayer() {
+        remoteCommandsAllowed = false
+        teardownRemoteCommands()
+        cancelScrubThumbnailWork()
+        thumbnailSourceContext = nil
+        externalProviderGeneration &+= 1
+        externalTrickplayProvider = nil
         if let key = contentCanonicalKey {
             let durationSec = Double(durationMs) / 1000.0
             Task.detached(priority: .utility) {
@@ -4660,62 +4672,91 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     #if os(tvOS) || os(iOS)
     private var didConfigureRemoteCommands = false
+    private var remoteCommandsAllowed = true
+    private var remoteCommandCenter: MPRemoteCommandCenter?
+    private let remoteCommandTargets = PlayerRemoteCommandTargets()
+    private var watchPartyRemoteIntent: (@MainActor (PlayerRemoteIntent) -> Bool)?
+    private var watchPartyPiPIntent: (@MainActor (PlayerRemoteIntent, @escaping @MainActor () -> Void, @escaping @MainActor () -> Void) -> Void)?
+    var isWatchPartyControlled: Bool { watchPartyRemoteIntent != nil }
+    var canUseWatchPartySoftwarePiP: Bool {
+        isWatchPartyControlled && watchPartyPiPIntent != nil && remoteCommandsAllowed
+            && engine.nativePlayerLayer == nil && engine.softwarePiPSource != nil
+    }
+
+    func setWatchPartyPiPIntent(_ handler: (@MainActor (PlayerRemoteIntent, @escaping @MainActor () -> Void, @escaping @MainActor () -> Void) -> Void)?) {
+        watchPartyPiPIntent = handler
+    }
+
+    func performWatchPartyPiPIntent(_ intent: PlayerRemoteIntent, onApplied: @escaping @MainActor () -> Void = {},
+                                   completion: @escaping @MainActor () -> Void) {
+        guard canUseWatchPartySoftwarePiP, let handler = watchPartyPiPIntent else { completion(); return }
+        handler(intent, onApplied, completion)
+    }
+
+    func setWatchPartyRemoteIntent(_ handler: (@MainActor (PlayerRemoteIntent) -> Bool)?) {
+        let rebind = didConfigureRemoteCommands
+        if rebind { teardownRemoteCommands() }
+        watchPartyRemoteIntent = handler
+        if rebind { configureRemoteCommandsIfNeeded() }
+    }
+
+    func stopWatchPartyRemoteCommands() {
+        watchPartyPiPIntent = nil
+        watchPartyRemoteIntent = { _ in false }
+        remoteCommandsAllowed = false
+        teardownRemoteCommands()
+    }
 
     private func configureRemoteCommandsIfNeeded() {
-        guard !didConfigureRemoteCommands,
-              let center = engine.videoNowPlayingSession?.remoteCommandCenter else { return }
+        guard remoteCommandsAllowed, let center = engine.videoNowPlayingSession?.remoteCommandCenter else { return }
+        if didConfigureRemoteCommands, remoteCommandCenter === center { return }
+        teardownRemoteCommands()
         didConfigureRemoteCommands = true
+        remoteCommandCenter = center
+        installRemoteCommands(center)
+    }
 
-        center.playCommand.isEnabled = true
-        center.playCommand.addTarget { [weak self] _ in
-            self?.playPlayback()
-            return .success
-        }
-
-        center.pauseCommand.isEnabled = true
-        center.pauseCommand.addTarget { [weak self] _ in
-            self?.pausePlayback()
-            return .success
-        }
-
-        center.togglePlayPauseCommand.isEnabled = true
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            switch self.engine.state {
-            case .loading, .playing, .paused, .seeking:
-                if self.isTransportPlaying {
-                    self.pausePlayback()
-                } else {
-                    self.playPlayback()
+    private func installRemoteCommands(_ center: MPRemoteCommandCenter) {
+        let action: @MainActor @Sendable (PlayerRemoteIntent) -> Void = { [weak self] intent in
+            guard let self else { return }
+            if let handler = self.watchPartyRemoteIntent { _ = handler(intent); return }
+            if case .toggle = intent {
+                switch self.engine.state {
+                case .loading, .playing, .paused, .seeking: break
+                case .idle, .ended, .error: return
                 }
-            case .idle, .ended, .error:
-                return .commandFailed
             }
-            return .success
+            guard let intent = intent.localIntent(positionMs: self.positionMs, isPlaying: self.isTransportPlaying) else { return }
+            switch intent {
+            case .play: self.playPlayback()
+            case .pause: self.pausePlayback()
+            case .seek(let position): self.seekToMs(position)
+            default: break
+            }
         }
-
+        center.playCommand.isEnabled = true
+        center.pauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.isEnabled = true
         center.changePlaybackPositionCommand.isEnabled = true
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            self?.seekToMs(Int64((event.positionTime * 1000).rounded()))
-            return .success
-        }
-
         center.skipForwardCommand.isEnabled = true
         center.skipForwardCommand.preferredIntervals = [10]
-        center.skipForwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(self.positionMs + 10_000)
-            return .success
-        }
-
         center.skipBackwardCommand.isEnabled = true
         center.skipBackwardCommand.preferredIntervals = [10]
-        center.skipBackwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(max(0, self.positionMs - 10_000))
-            return .success
-        }
+        remoteCommandTargets.add(center.playCommand, intent: .play, action: action)
+        remoteCommandTargets.add(center.pauseCommand, intent: .pause, action: action)
+        remoteCommandTargets.add(center.togglePlayPauseCommand, intent: .toggle, action: action)
+        remoteCommandTargets.add(center.changePlaybackPositionCommand, resolve: { event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent, event.positionTime.isFinite else { return nil }
+            return .position(event.positionTime)
+        }, action: action)
+        remoteCommandTargets.add(center.skipForwardCommand, intent: .skip(10), action: action)
+        remoteCommandTargets.add(center.skipBackwardCommand, intent: .skip(-10), action: action)
+    }
+
+    private func teardownRemoteCommands() {
+        remoteCommandTargets.stop()
+        remoteCommandCenter = nil
+        didConfigureRemoteCommands = false
     }
     #endif
 

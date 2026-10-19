@@ -521,6 +521,11 @@ enum PlaybackThumbnailSourceFallback {
 // status-bar, screen-edge gestures — none exist on tvOS) removed.
 
 final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling, ScrubThumbnailProviding {
+    /// Synchronously revoke Party control admission before parking the engine.
+    var onWillSuspendPlayback: (() -> Void)?
+    /// Lifecycle reattachment has been requested; visual readiness still
+    /// requires a fresh MPV playback restart and a coherent state sample.
+    var onDidRestorePlayback: (() -> Void)?
     /// Called after a coherent position is captured but before tvOS suspends
     /// the player. PlayerViewModel uses it for a durable lifecycle save.
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
@@ -529,27 +534,57 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private let hybridThumbnailIndex = HybridSeekThumbnailIndex()
     private var externalTrickplayProvider: (any TrickplayProviding)?
     private var loadGeneration: UInt64 = 0
+    private let firstFrameReadiness = MPVFirstFrameReadiness()
+    // Accessed only on eventQueue; copy the ID before hopping to the UI queue.
+    private var eventPlaylistEntryID: Int64?
     private var contentCanonicalKey: String?
     private var currentStreamKey: String = ""
+    private var thumbnailSourceContext: PlaybackThumbnailSourceContext?
+    private var thumbnailIndexResetTask: Task<Void, Never>?
+    private var thumbnailRequestSequence: UInt64 = 0
+    private var activeThumbnailCancellation: PlaybackThumbnailRequestCancellation?
+    private var activeThumbnailTask: Task<CGImage?, Never>?
+    private var activeThumbnailTaskRequestID: UInt64?
+    private var externalProviderGeneration: UInt64 = 0
 
     var supportsScrubThumbnails: Bool { true }
 
     func setExternalTrickplayProvider(_ provider: (any TrickplayProviding)?) {
+        cancelScrubThumbnailWork()
+        externalProviderGeneration &+= 1
+        let providerGeneration = externalProviderGeneration
+        let generation = loadGeneration
         self.externalTrickplayProvider = provider
-        Task { await hybridThumbnailIndex.setExternalTrickplayProvider(provider) }
+        let resetTask = thumbnailIndexResetTask
+        Task { [weak self] in
+            await resetTask?.value
+            guard let self,
+                  self.loadGeneration == generation,
+                  self.externalProviderGeneration == providerGeneration else { return }
+            await self.hybridThumbnailIndex.setExternalTrickplayProvider(provider)
+        }
     }
 
     func cachedScrubThumbnail(atSeconds seconds: Double, duration: Double) async -> CGImage? {
+        let generation = loadGeneration
+        let requestID = beginScrubThumbnailRequest()
+        let providerGeneration = externalProviderGeneration
         if let external = externalTrickplayProvider {
-            if let image = await external.thumbnail(at: seconds) {
+            let image = await external.thumbnail(at: seconds)
+            guard isCurrentScrubThumbnailRequest(
+                requestID, generation: generation, providerGeneration: providerGeneration) else { return nil }
+            if let image {
                 return image
             }
         }
-        return await hybridThumbnailIndex.lookup(
+        let image = await hybridThumbnailIndex.lookup(
             seconds: seconds,
             duration: duration,
-            generation: loadGeneration
+            generation: generation
         )
+        guard isCurrentScrubThumbnailRequest(
+            requestID, generation: generation, providerGeneration: providerGeneration) else { return nil }
+        return image
     }
 
     func scrubThumbnail(
@@ -773,6 +808,20 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var artworkLoadTask: Task<Void, Never>?
     #endif
     private var didConfigureMPVRemoteCommands = false
+    private let remoteCommandTargets = PlayerRemoteCommandTargets()
+    private var watchPartyRemoteIntent: (@MainActor (PlayerRemoteIntent) -> Bool)?
+
+    func setWatchPartyRemoteIntent(_ handler: (@MainActor (PlayerRemoteIntent) -> Bool)?) {
+        let rebind = didConfigureMPVRemoteCommands
+        if rebind { teardownMPVRemoteCommands() }
+        watchPartyRemoteIntent = handler
+        if rebind { setupMPVRemoteCommandsIfNeeded() }
+    }
+
+    func stopWatchPartyRemoteCommands() {
+        watchPartyRemoteIntent = { _ in false }
+        teardownMPVRemoteCommands()
+    }
     /// Physical Apple TV can blank HDMI while matching frame rate / dynamic
     /// range. Keep the file paused until that switch finishes so playback time
     /// cannot advance behind the black screen.
@@ -835,7 +884,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private(set) var isAtEndOfFile: Bool = false
     private(set) var hasCoherentTimeSample: Bool = false
     var hasFirstFrameReadyForDisplay: Bool {
-        (videoFrameSize != .zero || durationMs > 0) && isPlayerPlaying && !isPlayerLoading
+        firstFrameReadiness.isReady && !isPlayerLoading
     }
     var durationMs: Int64 = 0
     var positionMs: Int64 = 0
@@ -1103,6 +1152,11 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard mpv != nil else { return }
         guard !isApplicationBackgrounded else { return }
 
+        onWillSuspendPlayback?()
+        // A callback may synchronously retire this player.
+        guard mpv != nil, !isApplicationBackgrounded else { return }
+        firstFrameReadiness.reset(keepingPlaylistEntry: true)
+
         let sampledDurationMs = milliseconds(from: readDoubleProperty("duration")) ?? durationMs
         let sampledPositionMs = milliseconds(from: readDoubleProperty("time-pos")) ?? positionMs
         let verifiedPositionMs = lastVerifiedPositionMs ?? positionMs
@@ -1153,14 +1207,15 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             foregroundRestoreDeadline = Date().addingTimeInterval(4)
             let rawPositionMs = milliseconds(from: readDoubleProperty("time-pos"))
             screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback restoring pos: target=\(target)ms, rawPos=\(String(describing: rawPositionMs))ms")
-            if rawPositionMs == nil
+            if watchPartyRemoteIntent != nil
+                || rawPositionMs == nil
                 || abs((rawPositionMs ?? target) - target) > 1_500
                 || getFlag("eof-reached") {
                 seekToMs(target)
             }
         }
 
-        if shouldResume {
+        if shouldResume && watchPartyRemoteIntent == nil {
             screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback resuming playback")
             playPlayback()
         } else {
@@ -1168,6 +1223,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             screensaverDebugLog("[ScreensaverDebug][MPVController] restorePlayback preserving pause")
             pausePlayback()
         }
+        onDidRestorePlayback?()
     }
 
     @objc private func appWillResignActive() {
@@ -1214,11 +1270,16 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     // MARK: - Playback API
 
     func loadFile(_ urlString: String) {
+        firstFrameReadiness.reset()
+        if didConfigureMPVRemoteCommands { teardownMPVRemoteCommands(); setupMPVRemoteCommandsIfNeeded() }
         pendingLoadConfiguration = nil
         pendingHTTPHeaders = [:]
         pendingIsLiveStream = false
         pendingCacheProfile = .fromSettings(ProfileSettings.current.string(forKey: SettingsKey.networkCache))
         pendingURL = urlString
+        resetScrubThumbnailSource(
+            playbackURL: URL(string: urlString), headers: [:], isLive: false,
+            streamKey: TrickplayDiskCache.streamKey(for: urlString), canonicalMediaKey: nil)
         if Thread.isMainThread {
             attemptStartPendingLoad()
         } else {
@@ -1227,6 +1288,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func load(_ request: PlaybackLoadRequest) {
+        firstFrameReadiness.reset()
+        teardownMPVRemoteCommands()
         pendingLoadConfiguration = MPVLoadConfiguration(request: request)
         pendingAudioURL = request.audioURL?.absoluteString
         pendingHTTPHeaders = request.httpHeaders
@@ -1369,10 +1432,14 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         }
         setFlag("pause", true)
         command("loadfile", args: [url, "replace"])
+        // loadfile replace creates its playlist entry synchronously. Unlike
+        // path/duration, the entry ID distinguishes reloading the same URL.
+        firstFrameReadiness.arm(playlistEntryID: readOptionalInt64Property("playlist/0/id"))
         setAspectMode(currentAspectMode)
     }
 
     func playPlayback() {
+        cancelScrubThumbnailWork()
         guard mpv != nil else { return }
         screensaverDebugLog("[ScreensaverDebug][MPVController] playPlayback() called: pos=\(positionMs)ms")
         lastVerifiedWasPlaying = true
@@ -1387,6 +1454,18 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func seekToMs(_ ms: Int64) {
+        seekToMs(ms, exact: false)
+    }
+
+    /// Party completion is confirmed by a later coherent VM sample, not this command's return.
+    func beginWatchPartySeek(_ ms: Int64) throws {
+        guard mpv != nil else { throw WatchPartyPlayerBridgeError.notReady }
+        seekToMs(ms, exact: true)
+    }
+
+    private(set) var isSeekingForWatchParty = false
+
+    private func seekToMs(_ ms: Int64, exact: Bool) {
         guard mpv != nil else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryWatchdog.record(event: "seek")
@@ -1404,7 +1483,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         print("[SeekWatchdog][#\(seekId)] ⏩ Seek started -> target: \(ms)ms (current: \(positionMs)ms, duration: \(durationMs)ms, isLocalCache: \(isLocalOrDiskCacheStream))")
         subtitleTranslationState.cancelPendingTranslations()
         rememberExplicitSeek(to: ms)
-        command("seek", args: [String(format: "%.3f", Double(ms) / 1000.0), "absolute+keyframes"])
+        command("seek", args: [String(format: "%.3f", Double(ms) / 1000.0), exact ? "absolute+exact" : "absolute+keyframes"])
     }
 
     func seekByMs(_ ms: Int64) {
@@ -1448,64 +1527,43 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         guard !didConfigureMPVRemoteCommands else { return }
         didConfigureMPVRemoteCommands = true
         let center = MPRemoteCommandCenter.shared()
+        installRemoteCommands(center)
+    }
 
-        center.playCommand.isEnabled = true
-        center.playCommand.addTarget { [weak self] _ in
-            self?.playPlayback()
-            return .success
-        }
-
-        center.pauseCommand.isEnabled = true
-        center.pauseCommand.addTarget { [weak self] _ in
-            self?.pausePlayback()
-            return .success
-        }
-
-        center.togglePlayPauseCommand.isEnabled = true
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            if self.isPlayerPlaying {
-                self.pausePlayback()
-            } else {
-                self.playPlayback()
+    private func installRemoteCommands(_ center: MPRemoteCommandCenter) {
+        let action: @MainActor @Sendable (PlayerRemoteIntent) -> Void = { [weak self] intent in
+            guard let self else { return }
+            if let handler = self.watchPartyRemoteIntent { _ = handler(intent); return }
+            guard let intent = intent.localIntent(positionMs: self.positionMs, isPlaying: self.isTransportPlaying) else { return }
+            switch intent {
+            case .play: self.playPlayback()
+            case .pause: self.pausePlayback()
+            case .seek(let position): self.seekToMs(position)
+            default: break
             }
-            return .success
         }
-
+        center.playCommand.isEnabled = true
+        center.pauseCommand.isEnabled = true
+        center.togglePlayPauseCommand.isEnabled = true
         center.changePlaybackPositionCommand.isEnabled = true
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            self?.seekToMs(Int64((event.positionTime * 1000).rounded()))
-            return .success
-        }
-
         center.skipForwardCommand.isEnabled = true
         center.skipForwardCommand.preferredIntervals = [10]
-        center.skipForwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(self.positionMs + 10_000)
-            return .success
-        }
-
         center.skipBackwardCommand.isEnabled = true
         center.skipBackwardCommand.preferredIntervals = [10]
-        center.skipBackwardCommand.addTarget { [weak self] _ in
-            guard let self else { return .commandFailed }
-            self.seekToMs(max(0, self.positionMs - 10_000))
-            return .success
-        }
+        remoteCommandTargets.add(center.playCommand, intent: .play, action: action)
+        remoteCommandTargets.add(center.pauseCommand, intent: .pause, action: action)
+        remoteCommandTargets.add(center.togglePlayPauseCommand, intent: .toggle, action: action)
+        remoteCommandTargets.add(center.changePlaybackPositionCommand, resolve: { event in
+            guard let event = event as? MPChangePlaybackPositionCommandEvent, event.positionTime.isFinite else { return nil }
+            return .position(event.positionTime)
+        }, action: action)
+        remoteCommandTargets.add(center.skipForwardCommand, intent: .skip(10), action: action)
+        remoteCommandTargets.add(center.skipBackwardCommand, intent: .skip(-10), action: action)
     }
 
     private func teardownMPVRemoteCommands() {
-        guard didConfigureMPVRemoteCommands else { return }
+        remoteCommandTargets.stop()
         didConfigureMPVRemoteCommands = false
-        let center = MPRemoteCommandCenter.shared()
-        center.playCommand.removeTarget(nil)
-        center.pauseCommand.removeTarget(nil)
-        center.togglePlayPauseCommand.removeTarget(nil)
-        center.changePlaybackPositionCommand.removeTarget(nil)
-        center.skipForwardCommand.removeTarget(nil)
-        center.skipBackwardCommand.removeTarget(nil)
     }
     #endif
 
@@ -1890,9 +1948,20 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     }
 
     func destroyPlayer() {
+        firstFrameReadiness.reset()
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryWatchdog.stop(event: "destroy")
 #endif
+        cancelScrubThumbnailWork()
+        loadGeneration &+= 1
+        externalProviderGeneration &+= 1
+        externalTrickplayProvider = nil
+        thumbnailSourceContext = nil
+        contentCanonicalKey = nil
+        currentStreamKey = ""
+        let generation = loadGeneration
+        let index = hybridThumbnailIndex
+        thumbnailIndexResetTask = Task { await index.reset(generation: generation) }
         NotificationCenter.default.removeObserver(self)
         pendingURL = nil
         subtitleTranslationState.reset()
@@ -1961,6 +2030,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let eofReached = getFlag("eof-reached")
         let idle = getFlag("core-idle")
         let seeking = getFlag("seeking")
+        isSeekingForWatchParty = seeking
         let bufferingCache = getFlag("paused-for-cache")
 
         isAtEndOfFile = eofReached
@@ -2610,12 +2680,20 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                 case MPV_EVENT_PROPERTY_CHANGE:
                     DispatchQueue.main.async { self.updateState() }
                 case MPV_EVENT_START_FILE:
+                    self.eventPlaylistEntryID = eventPtr.pointee.data.map {
+                        UnsafePointer<mpv_event_start_file>(OpaquePointer($0)).pointee.playlist_entry_id
+                    }
                     self.clearPlaybackError()
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
                     self.memoryWatchdog.record(event: "start_file")
 #endif
                 case MPV_EVENT_FILE_LOADED:
+                    let frameToken = self.firstFrameReadiness.token
+                    let entryID = self.eventPlaylistEntryID
                     DispatchQueue.main.async {
+                        guard self.mpv == mpv,
+                              self.watchPartyRemoteIntent == nil
+                                || self.firstFrameReadiness.matches(token: frameToken, playlistEntryID: entryID) else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
                         self.memoryWatchdog.record(event: "file_loaded")
 #endif
@@ -2629,6 +2707,25 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                         self.updateState()
                         self.resetDisplayCriteriaProbe()
                         self.scheduleDisplayCriteriaProbe()
+                    }
+                case MPV_EVENT_PLAYBACK_RESTART:
+                    // MPV completes a restart after queuing the initial video
+                    // frame even when pause=yes. FILE_LOADED / VIDEO_RECONFIG
+                    // alone only prove loading/configuration, not this stage.
+                    let frameToken = self.firstFrameReadiness.token
+                    let entryID = self.eventPlaylistEntryID
+                    DispatchQueue.main.async {
+                        guard self.mpv == mpv, !self.isApplicationBackgrounded,
+                              self.firstFrameReadiness.matches(token: frameToken, playlistEntryID: entryID) else { return }
+                        self.updateState()
+                        let size = self.videoFrameSize
+                        let videoPTS = self.readDoubleProperty("video-pts")
+                        if self.firstFrameReadiness.receiveRestart(
+                            token: frameToken, playlistEntryID: entryID,
+                            hasVideoFrame: size.width > 0 && size.height > 0 && videoPTS?.isFinite == true
+                        ) {
+                            self.onFirstFrameReady?()
+                        }
                     }
                 case MPV_EVENT_VIDEO_RECONFIG:
                     // Fires once decode starts and whenever the video params

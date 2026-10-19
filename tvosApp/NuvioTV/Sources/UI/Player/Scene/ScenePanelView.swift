@@ -4,6 +4,8 @@ struct ScenePanelView: View {
     @ObservedObject var viewModel: SceneViewModel
     let onDismiss: () -> Void
     let onPlayNextEpisode: (() -> Void)?
+    let watchPartyContent: ((FocusState<String?>.Binding) -> AnyView)?
+    let watchPartyFocusTarget: String
     
     @FocusState private var focusedTab: SceneTab?
     @FocusState private var focusedCardID: String?
@@ -11,11 +13,15 @@ struct ScenePanelView: View {
     init(
         viewModel: SceneViewModel,
         onDismiss: @escaping () -> Void,
-        onPlayNextEpisode: (() -> Void)? = nil
+        onPlayNextEpisode: (() -> Void)? = nil,
+        watchPartyContent: ((FocusState<String?>.Binding) -> AnyView)? = nil,
+        watchPartyFocusTarget: String = "party.start"
     ) {
         self.viewModel = viewModel
         self.onDismiss = onDismiss
         self.onPlayNextEpisode = onPlayNextEpisode
+        self.watchPartyContent = watchPartyContent
+        self.watchPartyFocusTarget = watchPartyFocusTarget
     }
     
     var body: some View {
@@ -37,6 +43,8 @@ struct ScenePanelView: View {
                         infoTabContent
                     case .upNext:
                         upNextTabContent
+                    case .watchParty:
+                        watchPartyContent?($focusedCardID) ?? AnyView(EmptyView())
                     }
                 }
                 .frame(height: viewModel.selectedTab == .info ? 300 : 272, alignment: .top)
@@ -66,7 +74,7 @@ struct ScenePanelView: View {
     
     private var tabHeaderBar: some View {
         HStack(spacing: 20) {
-            ForEach(viewModel.availableTabs) { tab in
+            ForEach(visibleTabs) { tab in
                 let isSelected = viewModel.selectedTab == tab
                 let isTabFocused = focusedTab == tab
                 let isFilled = isSelected || isTabFocused
@@ -103,6 +111,11 @@ struct ScenePanelView: View {
         }
         .padding(.horizontal, 60)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var visibleTabs: [SceneTab] {
+        guard watchPartyContent != nil else { return viewModel.availableTabs }
+        return viewModel.availableTabs + [.watchParty]
     }
     
     // MARK: - Scene Tab Content
@@ -435,6 +448,9 @@ struct ScenePanelView: View {
             }
         case .info:
             focusedTab = viewModel.selectedTab
+        case .watchParty:
+            focusedTab = nil
+            focusedCardID = watchPartyFocusTarget
         }
     }
 }

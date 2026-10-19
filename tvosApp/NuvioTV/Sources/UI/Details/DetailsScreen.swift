@@ -17,7 +17,7 @@ struct DetailsScreen: View {
     let type: String
     let initialPlaybackRequestID: UInt?
     let onInitialPlaybackRequestConsumed: ((UInt) -> Void)?
-    /// (streamURL, httpHeaders, meta, episodeSubtitleLine, streamSubtitles, currentEpisode, orderedEpisodes).
+    /// (streamURL, httpHeaders, meta, episodeSubtitleLine, streamSubtitles, currentEpisode, orderedEpisodes, actionSession).
     /// The last two carry series context for the player's next-episode auto-play;
     /// (streamURL, httpHeaders, meta, episodeSubtitleLine, streamSubtitles, currentEpisode, orderedEpisodes, player, cacheFileIdentity, filename, videoSize, videoHash, resumeFrom).
     /// The episode fields carry series context for the player's next-episode auto-play;
@@ -37,7 +37,8 @@ struct DetailsScreen: View {
         _ videoHash: String?,
         _ resumeFrom: Double?,
         _ startupBenchmarkToken: UUID?,
-        _ sourceID: String?
+        _ sourceID: String?,
+        _ isActionPlaybackSession: Bool
     ) -> Void
     let onBack: () -> Void
     /// Open another title (More Like This / production catalog).
@@ -137,7 +138,8 @@ struct DetailsScreen: View {
             _ videoHash: String?,
             _ resumeFrom: Double?,
             _ startupBenchmarkToken: UUID?,
-            _ sourceID: String?
+            _ sourceID: String?,
+            _ isActionPlaybackSession: Bool
         ) -> Void,
         onBack: @escaping () -> Void,
         onOpenTitle: ((String, String) -> Void)? = nil,
@@ -263,7 +265,7 @@ struct DetailsScreen: View {
                     onPlayClick: {
                         if let url = viewModel.uiState.streams.first?.url,
                            let meta = viewModel.uiState.meta {
-                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil, nil, nil)
+                            onPlayClick(url, [:], meta, "", [], nil, [], nil, nil, nil, nil, nil, nil, nil, nil, false)
                         }
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
@@ -606,7 +608,8 @@ struct DetailsScreen: View {
                     nil,
                     nil,
                     startupToken,
-                    nil
+                    nil,
+                    false
                 )
                 return
             }
@@ -678,7 +681,8 @@ struct DetailsScreen: View {
                 preStream.videoHash,
                 nil,
                 startupToken,
-                preStream.id
+                preStream.id,
+                preStream.isNotPlayable
             )
             return
         }
@@ -1081,7 +1085,7 @@ struct DetailsScreen: View {
             isStreamPickerPresented = false
             isPreparingPlayback = true
             isSmartPlaybackPending = false
-            armExternalPlayerTimeoutIfNeeded(player: player)
+            if !stream.isNotPlayable { armExternalPlayerTimeoutIfNeeded(player: player) }
             if self.startupBenchmarkToken == startupToken {
                 self.startupBenchmarkToken = nil
             }
@@ -1100,7 +1104,8 @@ struct DetailsScreen: View {
                 stream.videoHash,
                 nil,
                 startupToken,
-                stream.id
+                stream.id,
+                stream.isNotPlayable
             )
             return
         }
@@ -1113,7 +1118,7 @@ struct DetailsScreen: View {
             isStreamPickerPresented = false
             isPreparingPlayback = true
             isSmartPlaybackPending = false
-            armExternalPlayerTimeoutIfNeeded(player: player)
+            if !stream.isNotPlayable { armExternalPlayerTimeoutIfNeeded(player: player) }
             if self.startupBenchmarkToken == startupToken {
                 self.startupBenchmarkToken = nil
             }
@@ -1132,7 +1137,8 @@ struct DetailsScreen: View {
                 stream.videoHash,
                 nil,
                 startupToken,
-                stream.id
+                stream.id,
+                stream.isNotPlayable
             )
             return
         }
@@ -1185,7 +1191,7 @@ struct DetailsScreen: View {
                     isStreamPickerPresented = false
                     isPreparingPlayback = true
                     isSmartPlaybackPending = false
-                    armExternalPlayerTimeoutIfNeeded(player: player)
+                    if !stream.isNotPlayable { armExternalPlayerTimeoutIfNeeded(player: player) }
                     if self.startupBenchmarkToken == startupToken {
                         self.startupBenchmarkToken = nil
                     }
@@ -1204,7 +1210,8 @@ struct DetailsScreen: View {
                         stream.videoHash,
                         nil,
                         startupToken,
-                        stream.id
+                        stream.id,
+                        stream.isNotPlayable
                     )
                 } else {
                     cancelStartupRequest(token: startupToken)
@@ -1282,12 +1289,12 @@ struct DetailsScreen: View {
         Task {
             if let source = await YouTubeTrailerResolver.shared.resolve(for: meta) {
                 await MainActor.run {
-                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil)
+                    onPlayClick(source.videoUrl, source.requestHeaders, meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil, false)
                 }
             } else if let ytId = await preferredTrailerYouTubeId(for: meta) {
                 let youtubeUrl = "https://www.youtube.com/watch?v=\(ytId)"
                 await MainActor.run {
-                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil)
+                    onPlayClick(youtubeUrl, [:], meta, PlaybackMarkers.trailerSubtitle, [], nil, [], nil, nil, nil, nil, nil, resumeFrom, nil, nil, false)
                 }
             }
         }

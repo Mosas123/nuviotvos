@@ -168,6 +168,7 @@ let appTarget: Target = .target(
         .package(product: "LibTorrent"),
         .package(product: "MPVKit"),
         .package(product: "SwiftAssRenderer"),
+        .package(product: "Realtime"),
     ],
     settings: .settings(
         base: [
@@ -292,6 +293,7 @@ let project = Project(
         .local(path: "../Vendor/LibTorrent"),
         .local(path: "../MPVKit"),
         .package(url: "https://github.com/mihai8804858/swift-ass-renderer.git", from: "1.3.1"),
+        .package(url: "https://github.com/supabase/supabase-swift.git", .exact("2.55.4")),
     ],
     settings: .settings(
         base: projectBaseSettings,

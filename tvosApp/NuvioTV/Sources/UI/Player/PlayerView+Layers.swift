@@ -379,7 +379,20 @@ extension PlayerView {
                         viewModel.closeScene()
                         viewModel.playNextEpisode()
                     }
-                }
+                },
+                watchPartyContent: watchPartyOwner?.service != nil && !isStandalonePlaybackSession
+                    ? { focus in
+                        guard let owner = watchPartyOwner, let service = owner.service else {
+                            return AnyView(EmptyView())
+                        }
+                        return AnyView(PlayerWatchPartyPanel(
+                            viewModel: viewModel, owner: owner, service: service,
+                            focusedControlID: focus, onOpenLobby: onOpenWatchPartyLobby
+                        ))
+                    }
+                    : nil,
+                watchPartyFocusTarget: watchPartyOwner?.presentation?.mount.isCurrent == true
+                    ? "party.catchUp" : "party.lobby"
             )
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(15)
