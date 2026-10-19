@@ -697,10 +697,14 @@ struct WatchPartyLobbyView: View {
     private func roomActions(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             let hostName = room.members.first(where: { $0.id == party.hostMemberID })?.displayName
+            // Only a known guest can receive a host-stream status. An unknown
+            // member/host ID is not enough to infer guest privileges.
+            let isGuest = room.memberID != nil && party.hostMemberID != nil
+                && room.memberID != party.hostMemberID
             if let notice = WatchPartySharedSourceNotice.text(
                 hostName: hostName, stream: room.sharedStream,
-                mediaKey: party.media.key, isGuest: room.memberID != party.hostMemberID,
-                connected: room.connection == .ready
+                mediaKey: party.media.key, isGuest: isGuest,
+                connected: room.connection == .ready && room.membershipExit == nil
             ) {
                 statusRow(symbol: "antenna.radiowaves.left.and.right",
                           title: notice, tint: .white)
