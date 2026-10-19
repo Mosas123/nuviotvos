@@ -2077,6 +2077,16 @@ struct ContentView: View {
                 selectedTab = .search
             },
             onChoosePartySource: { media in
+                // The room may have changed while the sidebar button was focused.
+                // Validate the *current* authoritative media before leaving the lobby
+                // or detaching an existing player. Never search sources for stale media.
+                guard let room = watchPartyOwner.service?.session,
+                      room.connection == .ready, room.membershipExit == nil,
+                      let currentMedia = room.party?.media,
+                      (try? WatchPartyLaunchPolicy.validateSelection(media, room: currentMedia)) != nil else {
+                    watchPartyOwner.message = "The room or episode changed. Review the current room before choosing a source."
+                    return
+                }
                 creatingParty = false; choosingPartySource = true
                 watchPartyOwner.finishPlayback()
                 reopenStreamPickerOnDetails = true
