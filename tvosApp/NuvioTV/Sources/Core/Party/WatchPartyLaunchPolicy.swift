@@ -44,6 +44,22 @@ enum WatchPartyLaunchPolicy {
         return media
     }
 
+    /// Match a locally selected source against the room's accepted title identity.
+    /// Preserve a room ID only when it is an exact known identifier for this title;
+    /// never infer a match from display names, episode numbers or stream URLs.
+    static func mediaForPlayback(
+        _ meta: NuvioMeta, episode: NuvioVideo?, room: WatchPartyMedia?
+    ) throws -> WatchPartyMedia {
+        var media = try mediaForDetails(meta, episode: episode)
+        if let room {
+            let acceptedIDs = [meta.id, meta.imdbId, meta.streamId].compactMap { $0 }
+            if acceptedIDs.contains(room.metaID) {
+                media.metaID = room.metaID
+            }
+        }
+        return media
+    }
+
     static func validateSelection(_ selection: WatchPartyMedia, room: WatchPartyMedia) throws {
         try validate(selection)
         try validate(room)
