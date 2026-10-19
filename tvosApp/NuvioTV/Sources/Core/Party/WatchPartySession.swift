@@ -568,11 +568,18 @@ final class WatchPartySession {
     }
 
     private func accept(_ value: WatchPartyPlayback) {
+        let remoteTransition = value.memberID != memberID && playback?.paused != value.paused
         guard let party, validPlayback(value, for: party) != nil,
-              WatchPartyPolicy.isNewer(value, than: playback) else { return }
+              WatchPartyPolicy.isNewer(value, than: playback) else {
+            if remoteTransition { PlaybackTimelineRecorder.record(.partyStateRejected) }
+            return
+        }
         waitingCoordinator.accepted(previous: playback, next: value, mediaKey: party.media.key,
                                     presence: presence, uptime: clock.mark())
         playback = value
+        if remoteTransition {
+            PlaybackTimelineRecorder.record(value.paused ? .partyPauseAccepted : .partyPlayAccepted)
+        }
         notifyChange()
     }
 
@@ -634,8 +641,17 @@ final class WatchPartySession {
         case let .message(name, data):
             switch name {
             case "state":
-                if let value = try? JSONDecoder().decode(WatchPartyPlayback.self, from: data),
-                   value.memberID == nil || members.contains(where: { $0.id == value.memberID }) { accept(value) }
+                if let value = try? JSONDecoder().decode(WatchPartyPlayback.self, from: data) {
+                    let remoteTransition = value.memberID != memberID && playback?.paused != value.paused
+                    if remoteTransition {
+                        PlaybackTimelineRecorder.record(value.paused ? .partyPauseReceived : .partyPlayReceived)
+                    }
+                    if value.memberID == nil || members.contains(where: { $0.id == value.memberID }) {
+                        accept(value)
+                    } else if remoteTransition {
+                        PlaybackTimelineRecorder.record(.partyStateRejected)
+                    }
+                }
             case "status":
                 if let value = try? JSONDecoder().decode(WatchPartyPresence.self, from: data),
                    value.memberID != memberID, members.contains(where: { $0.id == value.memberID }) {
