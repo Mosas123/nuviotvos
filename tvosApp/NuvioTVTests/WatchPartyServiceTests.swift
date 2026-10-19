@@ -17,6 +17,7 @@ final class WatchPartyServiceTests: XCTestCase {
         return WatchPartyService(environment: environment, makeRemote: { _, _, _ in remote }, makeSession: { remote, env, context, validator in
             WatchPartySession(remote: remote, context: context, deviceID: env.identity.deviceID,
                               isCurrent: validator, makeChannel: { channel },
+                              connectionTasksEnabled: false,
                               sleep: sleep)
         })
     }

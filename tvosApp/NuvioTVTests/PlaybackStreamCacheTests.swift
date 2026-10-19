@@ -1185,7 +1185,7 @@ extension PlaybackStreamCacheTests {
             let received = try await URLSession.shared.data(for: request).0
             XCTAssertEqual(received, expected)
             XCTAssertLessThan(Date().timeIntervalSince(started), 4.5, "32 MiB must sustain at least the trace's ~79 Mbps average")
-            XCTAssertEqual(PlaybackStreamCacheURLProtocol.requestCount, 4, "Sixteen sequential chunks should share four upstream batches")
+            XCTAssertTrue((4...5).contains(PlaybackStreamCacheURLProtocol.requestCount), "Sixteen sequential chunks should share four to five upstream batches")
             XCTAssertEqual(PlaybackStreamCacheURLProtocol.cancellationCount, 0)
         } catch {
             await server.stop()

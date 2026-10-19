@@ -32,6 +32,10 @@ final class WatchPartyAppOwner: ObservableObject {
     }
 
     func attach(authManager: AuthManager, profiles: ProfileViewModel) {
+        guard WatchPartyConfiguration.isEnabled else {
+            stop()
+            return
+        }
         if self.authManager === authManager, self.profiles === profiles, service != nil { return }
         stop()
         self.authManager = authManager

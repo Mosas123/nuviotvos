@@ -274,7 +274,13 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
     case profile, home, party, search, library, settings
     case collection(CollectionHomeID)
 
-    static var allCases: [Self] { [.profile, .home, .party, .search, .library, .settings] }
+    static var allCases: [Self] {
+        if WatchPartyConfiguration.isEnabled {
+            return [.profile, .home, .party, .search, .library, .settings]
+        } else {
+            return [.profile, .home, .search, .library, .settings]
+        }
+    }
     var id: String { rawValue }
     var rawValue: String {
         switch self {
@@ -584,7 +590,7 @@ struct ContentView: View {
                 playbackPartyID = nil
                 let keepPlayer = watchPartyOwner.consumePreservePlayerAfterRoomExit()
                 if activeScreen.isPlayer, !keepPlayer {
-                    activeScreen = .main; selectedTab = .party
+                    activeScreen = .main; selectedTab = WatchPartyConfiguration.isEnabled ? .party : .home
                 }
             }
         }
@@ -601,7 +607,9 @@ struct ContentView: View {
             watchPartyOwner.resumeAfterForeground()
         }
         .onAppear {
-            watchPartyOwner.attach(authManager: authManager, profiles: profileViewModel)
+            if WatchPartyConfiguration.isEnabled {
+                watchPartyOwner.attach(authManager: authManager, profiles: profileViewModel)
+            }
             syncManager.attach(authManager: authManager, profileViewModel: profileViewModel)
             ICloudSettingsSyncManager.shared.start()
             setupPictureInPicture()
@@ -1684,6 +1692,7 @@ struct ContentView: View {
     /// Host from Details without starting a stream. The server owns room-code
     /// generation; membership and uncertain outcomes stay in WatchPartyService.
     private func createWatchPartyFromDetails(meta: NuvioMeta, episode: NuvioVideo?) {
+        guard WatchPartyConfiguration.isEnabled else { return }
         guard let service = watchPartyOwner.service, partyLaunchTask == nil else { return }
         guard authManager.isAuthenticated, !authManager.sessionNeedsReauthentication,
               profileViewModel.activeProfile != nil else {
@@ -1811,6 +1820,10 @@ struct ContentView: View {
     }
 
     private func createWatchPartyRoom(media: WatchPartyMedia) {
+        guard WatchPartyConfiguration.isEnabled else {
+            creatingParty = false
+            return
+        }
         guard creatingParty, partyLaunchTask == nil else { return }
         guard let service = watchPartyOwner.service else {
             creatingParty = false
@@ -2441,9 +2454,9 @@ struct ContentView: View {
                 }
             },
             onBack: { leaveDetails() },
-            onCreateWatchParty: { meta, episode in
+            onCreateWatchParty: WatchPartyConfiguration.isEnabled ? { meta, episode in
                 createWatchPartyFromDetails(meta: meta, episode: episode)
-            },
+            } : nil,
             onOpenTitle: { nextId, nextType in
                 detailsBackStack.append((id: contentId, type: contentType))
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -3072,7 +3085,7 @@ struct ContentView: View {
                     && UIApplication.shared.applicationState == .active
             },
             onOpenWatchPartyLobby: {
-                guard party == nil else { return }
+                guard WatchPartyConfiguration.isEnabled, party == nil else { return }
                 selectedTab = .party
                 activeScreen = .main
             },
@@ -3126,7 +3139,7 @@ struct ContentView: View {
             let keepsPiP = watchPartyOwner.owns(pip.activeCoordinator)
                 && (pip.isPictureInPictureActive || pip.isRestoringUIInProgress)
             if !keepsPiP { watchPartyOwner.finishPlayback(); playbackPartyID = nil }
-            selectedTab = .party
+            selectedTab = WatchPartyConfiguration.isEnabled ? .party : .home
             activeScreen = .main
             return
         }
@@ -3760,9 +3773,11 @@ private struct TVMainTabView: View {
             homeTabContent
                 .tabItem { Label(TVTab.home.title, systemImage: TVTab.home.symbol) }
                 .tag(TVTab.home)
-            partyTabContent
-                .tabItem { Label(TVTab.party.title, systemImage: TVTab.party.symbol) }
-                .tag(TVTab.party)
+            if WatchPartyConfiguration.isEnabled {
+                partyTabContent
+                    .tabItem { Label(TVTab.party.title, systemImage: TVTab.party.symbol) }
+                    .tag(TVTab.party)
+            }
             searchTab
                 .tabItem { Label(TVTab.search.title, systemImage: TVTab.search.symbol) }
                 .tag(TVTab.search)
@@ -3795,8 +3810,10 @@ private struct TVMainTabView: View {
             Tab(TVTab.home.title, systemImage: TVTab.home.symbol, value: TVTab.home) {
                 homeTabContent
             }
-            Tab(TVTab.party.title, systemImage: TVTab.party.symbol, value: TVTab.party) {
-                partyTabContent
+            if WatchPartyConfiguration.isEnabled {
+                Tab(TVTab.party.title, systemImage: TVTab.party.symbol, value: TVTab.party) {
+                    partyTabContent
+                }
             }
             Tab(TVTab.search.title, systemImage: TVTab.search.symbol, value: TVTab.search) {
                 searchTab

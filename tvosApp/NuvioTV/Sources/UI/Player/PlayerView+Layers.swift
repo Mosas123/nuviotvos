@@ -380,7 +380,7 @@ extension PlayerView {
                         viewModel.playNextEpisode()
                     }
                 },
-                watchPartyContent: watchPartyOwner?.service != nil && !isStandalonePlaybackSession
+                watchPartyContent: WatchPartyConfiguration.isEnabled && watchPartyOwner?.service != nil && !isStandalonePlaybackSession
                     ? { focus, tabFocus in
                         guard let owner = watchPartyOwner, let service = owner.service else {
                             return AnyView(EmptyView())

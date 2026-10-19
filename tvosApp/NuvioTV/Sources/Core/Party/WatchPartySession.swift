@@ -503,7 +503,10 @@ final class WatchPartySession {
                 do { try await sleep(WatchPartyWaitingCoordinator.tickNanoseconds) } catch { return }
                 guard let self, self.active(epoch), self.connectionID == attempt, !Task.isCancelled else { return }
                 guard self.connection == .ready, let party = self.party,
-                      let memberID = self.memberID, let playback = self.playback else { continue }
+                      let memberID = self.memberID, let playback = self.playback else {
+                    await Task.yield()
+                    continue
+                }
                 let decision = self.waitingCoordinator.decision(party: party, memberID: memberID,
                                                               members: self.members, presence: self.presence,
                                                               playback: playback, connected: self.channel?.isConnected == true,
@@ -624,6 +627,7 @@ final class WatchPartySession {
     }
 
     private func startHeartbeat(epoch: UUID) {
+        guard connectionTasksEnabled else { return }
         let sleep = self.sleep
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {

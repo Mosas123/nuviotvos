@@ -736,7 +736,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         if let cancellation {
             guard !cancellation.isCancelled, activeThumbnailCancellation === cancellation else { return false }
         }
-        return thumbnailSourceContext?.generation == generation
+        if let thumbnailSourceContext {
+            guard thumbnailSourceContext.generation == generation else { return false }
+        }
+        return true
     }
 
     private func cancelScrubThumbnailWork() {
