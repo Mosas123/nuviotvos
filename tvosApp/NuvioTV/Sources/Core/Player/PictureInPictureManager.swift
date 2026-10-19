@@ -486,6 +486,7 @@ extension PictureInPictureManager: @preconcurrency AVPictureInPictureControllerD
             guard let self, let pip, self.sessionGeneration == generation,
                   self.pipController === pip else { return }
             self.restoreRequest.acceptUIResult(success, for: token)
+            guard self.sessionGeneration == generation, self.pipController === pip else { return }
             // AVKit may report didStop before an asynchronous UI acknowledgement.
             if !self.restoreRequest.isPending, !self.pipStartState.isInProgress {
                 self.isRestoringUI = false
