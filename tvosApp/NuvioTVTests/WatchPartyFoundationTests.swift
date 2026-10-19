@@ -9,6 +9,21 @@ final class WatchPartyFoundationTests: XCTestCase {
                            rate: rate, at: at, mediaKey: mediaKey, waiting: waiting)
     }
 
+    func testStreamSharingPolicyRejectsUnsafeTransportAndMalformedHeaders() {
+        XCTAssertFalse(WatchPartyStreamPolicy.isShareableURL("http://localhost/movie"))
+        XCTAssertFalse(WatchPartyStreamPolicy.isShareableURL("http://127.0.0.1/movie"))
+        XCTAssertFalse(WatchPartyStreamPolicy.isShareableURL("file:///private/video.mp4"))
+        XCTAssertFalse(WatchPartyStreamPolicy.isShareableURL("http://user:password@example.test/movie"))
+        XCTAssertTrue(WatchPartyStreamPolicy.isShareableURL("https://stream.example.test/movie"))
+        let valid = WatchPartyStream(mediaKey: "movie|tt1||", url: "https://stream.example.test/movie")
+        XCTAssertNoThrow(try WatchPartyStreamPolicy.validate(valid))
+        let malformed = WatchPartyStream(
+            mediaKey: "movie|tt1||", url: "https://stream.example.test/movie",
+            headers: ["Bad Header": "value"]
+        )
+        XCTAssertThrowsError(try WatchPartyStreamPolicy.validate(malformed))
+    }
+
     func testRoomReturnFocusAlwaysTargetsAvailableAction() {
         func focus(_ hasRoom: Bool, _ ended: Bool, _ ready: Bool,
                    _ player: Bool, _ busy: Bool = false) -> String? {
