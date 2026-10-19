@@ -92,14 +92,20 @@ extension WatchPartyStream {
     }
 }
 
-/// Display-only notice. Never include URL, query, headers or source metadata.
+/// Presentation-only guest status. Never expose URL, query, headers or source metadata.
+/// Realtime stream events are not persisted in room snapshots. An absent stream
+/// is not proof that the host never shared; it may have been sent before joining
+/// or cleared when the connection was lost.
 enum WatchPartySharedSourceNotice {
     static func text(hostName: String?, stream: WatchPartyStream?, mediaKey: String,
                      isGuest: Bool, connected: Bool) -> String? {
-        guard isGuest, connected, let stream, stream.mediaKey == mediaKey else { return nil }
+        guard isGuest, connected else { return nil }
         let raw = hostName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let name = raw.isEmpty ? "The host" : String(raw.prefix(48))
-        return "\(name) shared a source (Beta). Direct playback from the host's link is not available on Apple TV yet."
+        if let stream, stream.mediaKey == mediaKey {
+            return "\(name) shared a source (Beta). Direct playback from the host's link is not available on Apple TV yet."
+        }
+        return "No shared source available right now. If \(name) already shared a link, ask them to share it again. Or choose your own source."
     }
 }
 
