@@ -9,6 +9,66 @@ final class WatchPartyFoundationTests: XCTestCase {
                            rate: rate, at: at, mediaKey: mediaKey, waiting: waiting)
     }
 
+    func testExactMediaReviewAndSourceIdentity() throws {
+        let movie = WatchPartyMedia(type: "movie", metaID: "tt1", metaType: "movie", title: "Movie")
+        let other = WatchPartyMedia(type: "movie", metaID: "tt2", metaType: "movie", title: "Movie")
+        let episode1 = WatchPartyMedia(type: "series", metaID: "ttS", metaType: "series",
+                                       season: 1, episode: 1, title: "Series")
+        let episode2 = WatchPartyMedia(type: "series", metaID: "ttS", metaType: "series",
+                                       season: 1, episode: 2, title: "Series")
+        XCTAssertNoThrow(try WatchPartyLaunchPolicy.validateSelection(movie, room: movie))
+        XCTAssertThrowsError(try WatchPartyLaunchPolicy.validateSelection(other, room: movie))
+        XCTAssertThrowsError(try WatchPartyLaunchPolicy.validateSelection(episode2, room: episode1))
+        XCTAssertTrue(WatchPartyMediaReviewPolicy.changed(from: episode1.key, to: episode2.key))
+        XCTAssertFalse(WatchPartyMediaReviewPolicy.changed(from: nil, to: episode2.key))
+        XCTAssertTrue(WatchPartyMediaReviewPolicy.needsConfirmation(
+            previewKey: movie.key, joinedKey: other.key
+        ))
+    }
+
+    func testRoomFocusPrioritizesConnectionAndContentReview() {
+        func target(_ hasRoom: Bool, _ ended: Bool, _ ready: Bool,
+                    _ attached: Bool, _ busy: Bool = false, _ review: Bool = false) -> String? {
+            WatchPartyRoomFocusPolicy.initialAction(
+                hasRoom: hasRoom, membershipEnded: ended,
+                connectionReady: ready, playerAttached: attached,
+                busy: busy, needsMediaReview: review
+            )
+        }
+        XCTAssertEqual(target(false, false, false, false), "room-code")
+        XCTAssertEqual(target(true, false, true, false), "choose-source")
+        XCTAssertEqual(target(true, false, true, true), "catch-up")
+        XCTAssertEqual(target(true, false, true, false, false, true), "review-room")
+        XCTAssertEqual(target(true, false, false, false, false, true), "reconnect")
+        XCTAssertEqual(target(true, true, true, false, false, true), "leave")
+        XCTAssertNil(target(true, false, true, false, true))
+    }
+
+    func testSharedSourceNoticeDoesNotExposePrivateLinkOrHeaders() {
+        let stream = WatchPartyStream(
+            mediaKey: "movie|tt1||",
+            url: "https://stream.example.test/play?token=SECRET_URL_TOKEN",
+            headers: ["Authorization": "Bearer SECRET_HEADER_TOKEN"],
+            name: "SECRET_SOURCE_NAME"
+        )
+        let notice = WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: stream, mediaKey: "movie|tt1||",
+            isGuest: true, connected: true
+        )
+        XCTAssertTrue(notice?.contains("Alex") == true)
+        for secret in ["SECRET_URL_TOKEN", "SECRET_HEADER_TOKEN", "SECRET_SOURCE_NAME"] {
+            XCTAssertFalse(notice?.contains(secret) == true)
+        }
+        XCTAssertNil(WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: stream, mediaKey: "movie|different||",
+            isGuest: true, connected: true
+        ))
+        XCTAssertNil(WatchPartySharedSourceNotice.text(
+            hostName: "Alex", stream: stream, mediaKey: "movie|tt1||",
+            isGuest: false, connected: true
+        ))
+    }
+
     func testTimelineRatePauseDurationAndClockSkewMatchAndroid() {
         XCTAssertEqual(WatchPartyPolicy.expectedPosition(playback(rate: 1.5), nowMs: 1_002_000), 13_000)
         XCTAssertEqual(WatchPartyPolicy.expectedPosition(playback(paused: true), nowMs: 1_500_000), 10_000)
