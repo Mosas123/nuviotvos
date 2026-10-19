@@ -3258,11 +3258,11 @@ private struct TVMainTabView: View {
 
     private func collectionTabTitle(_ destination: CollectionHomeDestination) -> String {
         let duplicates = collectionDestinations.filter {
-            $0.folder.title.caseInsensitiveCompare(destination.folder.title) == .orderedSame
+            $0.sidebarTitle.caseInsensitiveCompare(destination.sidebarTitle) == .orderedSame
         }.count
         return duplicates > 1
-            ? "\(destination.folder.title) • \(destination.collectionTitle)"
-            : destination.folder.title
+            ? "\(destination.sidebarTitle) • \(destination.collectionTitle)"
+            : destination.sidebarTitle
     }
 
     private func refreshCollectionDestinations() {

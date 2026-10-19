@@ -4329,6 +4329,7 @@ enum CollectionFolderViewMode: String, CaseIterable, Hashable {
 struct NuvioCollection: Decodable, Identifiable, Equatable {
     let id: String
     let title: String
+    let templateID: String?
     var pinToTop: Bool
     /// Tabs vs Rows when browsing a folder inside this collection.
     var viewMode: CollectionFolderViewMode
@@ -4336,7 +4337,7 @@ struct NuvioCollection: Decodable, Identifiable, Equatable {
     var folders: [NuvioCollectionFolder]
 
     enum CodingKeys: String, CodingKey {
-        case id, title, pinToTop, folders, viewMode, showAllTab
+        case id, title, templateID, pinToTop, folders, viewMode, showAllTab
         case pin_to_top, view_mode, show_all_tab
     }
 
@@ -4344,6 +4345,7 @@ struct NuvioCollection: Decodable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         title = try c.decode(String.self, forKey: .title)
+        templateID = try c.decodeIfPresent(String.self, forKey: .templateID)
         pinToTop = try c.decodeIfPresent(Bool.self, forKey: .pinToTop)
             ?? c.decodeIfPresent(Bool.self, forKey: .pin_to_top)
             ?? false
