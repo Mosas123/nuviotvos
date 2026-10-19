@@ -209,14 +209,6 @@ struct DetailsScreen: View {
                         pendingEpisode = nil
                         startStreamFlow(streamId: viewModel.uiState.meta?.streamId ?? id, type: viewModel.uiState.meta?.type ?? type, reload: viewModel.uiState.streams.isEmpty)
                     },
-                    onHostWatchParty: onCreateWatchParty == nil ? nil : {
-                        guard let meta = viewModel.uiState.meta else { return }
-                        if meta.isSeries {
-                            isWatchPartyEpisodePickerPresented = true
-                        } else {
-                            onCreateWatchParty?(meta, nil)
-                        }
-                    },
                     onPlayManually: {
                         // Hold-to-play-manually: always open the picker even when Auto Select is on.
                         pendingEpisodeSubtitle = ""
@@ -227,6 +219,14 @@ struct DetailsScreen: View {
                             reload: viewModel.uiState.streams.isEmpty,
                             forceManualPicker: true
                         )
+                    },
+                    onHostWatchParty: onCreateWatchParty == nil ? nil : {
+                        guard let meta = viewModel.uiState.meta else { return }
+                        if meta.isSeries {
+                            isWatchPartyEpisodePickerPresented = true
+                        } else {
+                            onCreateWatchParty?(meta, nil)
+                        }
                     },
                     onEpisodeSelected: { video in
                         pendingEpisodeSubtitle = "S\(video.season) · E\(video.episode) · \(video.title)"
