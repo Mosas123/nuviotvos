@@ -2,6 +2,75 @@ import XCTest
 @testable import NuvioTV
 
 final class WatchPartyFoundationTests: XCTestCase {
+
+    func testRealtimeEnvelopeDeliversPlaybackFieldsWithoutChangingRoomTime() throws {
+        for paused in [true, false] {
+            let expected = playback(seq: 42, memberID: "android-host", paused: paused,
+                                    positionMs: 480_455, rate: 1, at: 1_792_448_033_432)
+            let domain = try JSONEncoder().encode(expected)
+            let body = try JSONSerialization.jsonObject(with: domain)
+            let envelope = try JSONSerialization.data(withJSONObject: [
+                "type": "broadcast", "event": "state", "payload": body
+            ])
+            // The old adapter forwarded this envelope directly and decoding failed.
+            XCTAssertThrowsError(try JSONDecoder().decode(WatchPartyPlayback.self, from: envelope))
+            let extracted = try WatchPartyChannelContract.broadcastPayload(
+                from: envelope, expectedEvent: "state"
+            )
+            XCTAssertEqual(try JSONDecoder().decode(WatchPartyPlayback.self, from: extracted), expected)
+        }
+    }
+
+    func testRealtimeEnvelopePreservesEveryEventBodyIncludingStreamRevocation() throws {
+        for event in WatchPartyChannelContract.events {
+            let body: [String: Any] = ["member_id": "host", "stream": NSNull()]
+            let envelope = try JSONSerialization.data(withJSONObject: [
+                "type": "broadcast", "event": event, "payload": body,
+                "meta": ["id": "transport-only"]
+            ])
+            let data = try WatchPartyChannelContract.broadcastPayload(from: envelope, expectedEvent: event)
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(decoded["member_id"] as? String, "host")
+            XCTAssertTrue(decoded["stream"] is NSNull)
+            XCTAssertNil(decoded["meta"])
+            XCTAssertNil(decoded["event"])
+        }
+    }
+
+    func testRealtimeEnvelopeRejectsMismatchedEventsAndMalformedBodies() throws {
+        let invalid: [Any] = [
+            ["type": "broadcast", "event": "status", "payload": [:]],
+            ["type": "presence", "event": "state", "payload": [:]],
+            ["event": "state", "payload": [:]],
+            ["type": "broadcast", "payload": [:]],
+            ["type": "broadcast", "event": "state"],
+            ["type": "broadcast", "event": "state", "payload": NSNull()],
+            ["type": "broadcast", "event": "state", "payload": []],
+            ["type": "broadcast", "event": "state", "payload": "invalid"],
+            ["seq": 1, "paused": true, "position_ms": 0, "at": 0],
+            []
+        ]
+        for object in invalid {
+            let data = try JSONSerialization.data(withJSONObject: object)
+            XCTAssertThrowsError(try WatchPartyChannelContract.broadcastPayload(
+                from: data, expectedEvent: "state"
+            ))
+        }
+        let unknown = Data(#"{"type":"broadcast","event":"unknown","payload":{}}"#.utf8)
+        XCTAssertThrowsError(try WatchPartyChannelContract.broadcastPayload(
+            from: unknown, expectedEvent: "unknown"
+        ))
+        XCTAssertThrowsError(try WatchPartyChannelContract.broadcastPayload(
+            from: Data("invalid-json".utf8), expectedEvent: "state"
+        ))
+    }
+
+    func testRealtimeEnvelopeDoesNotBypassPlaybackValidation() throws {
+        let data = Data(#"{"type":"broadcast","event":"state","payload":{"seq":1,"paused":false,"position_ms":0,"at":0,"rate":0}}"#.utf8)
+        let payload = try WatchPartyChannelContract.broadcastPayload(from: data, expectedEvent: "state")
+        XCTAssertThrowsError(try JSONDecoder().decode(WatchPartyPlayback.self, from: payload))
+    }
+
     private func playback(seq: Int64 = 1, memberID: String? = "a", paused: Bool = false,
                           positionMs: Int64 = 10_000, rate: Float = 1, at: Int64 = 1_000_000,
                           mediaKey: String? = "movie|tt1||", waiting: Bool = false) -> WatchPartyPlayback {
