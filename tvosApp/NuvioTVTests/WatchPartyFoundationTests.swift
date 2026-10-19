@@ -40,6 +40,18 @@ final class WatchPartyFoundationTests: XCTestCase {
         XCTAssertEqual(focus(true, true, false, false), "leave")
         XCTAssertEqual(focus(true, true, true, true), "leave")
         XCTAssertNil(focus(true, false, true, false, true))
+        XCTAssertEqual(WatchPartyRoomFocusPolicy.initialAction(
+            hasRoom: true, membershipEnded: false, connectionReady: true,
+            playerAttached: false, busy: false, needsMediaReview: true
+        ), "review-room")
+        XCTAssertEqual(WatchPartyRoomFocusPolicy.initialAction(
+            hasRoom: true, membershipEnded: false, connectionReady: false,
+            playerAttached: false, busy: false, needsMediaReview: true
+        ), "reconnect")
+        XCTAssertEqual(WatchPartyRoomFocusPolicy.initialAction(
+            hasRoom: true, membershipEnded: true, connectionReady: true,
+            playerAttached: false, busy: false, needsMediaReview: true
+        ), "leave")
     }
 
     func testGuestSharedSourceNoticeNeverExposesURLOrHeaders() {
