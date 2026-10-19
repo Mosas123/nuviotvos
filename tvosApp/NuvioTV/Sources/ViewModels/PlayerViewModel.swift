@@ -3666,10 +3666,13 @@ class PlayerViewModel: ObservableObject {
     /// Coalesces high-frequency scrub updates into one decode at a time while
     /// showing fast feedback while moving, then refining the settled target.
     func requestScrubThumbnail(at seconds: Double) {
-        guard (isScrubbing || isHoldingSeek || pendingSeekDelta != 0 || isTimelineFocused),
+        let selectedBackend = activeEngineKind
+        guard let selectedProvider = scrubThumbnailProvider,
+              (isScrubbing || isHoldingSeek || pendingSeekDelta != 0 || isTimelineFocused),
               isSeekPreviewEnabled,
-              activeEngineKind == .aether,
-              scrubThumbnailProvider?.supportsScrubThumbnails == true else {
+              selectedBackend == .aether || selectedBackend == .mpv,
+              sessionCoordinator.activeBackend == selectedBackend,
+              selectedProvider.supportsScrubThumbnails else {
             scrubThumbnail = nil
             scrubThumbnailTargetSeconds = nil
             return
@@ -3696,12 +3699,12 @@ class PlayerViewModel: ObservableObject {
         guard scrubThumbnailTask == nil else { return }
         let generation = scrubThumbnailGeneration
         scrubThumbnailTaskInteractionToken = interactionToken
-        scrubThumbnailTask = Task { @MainActor [weak self] in
+        scrubThumbnailTask = Task { @MainActor [weak self, selectedProvider] in
+            guard let self else { return }
             defer {
                 // A reset may have installed a newer task after canceling this
                 // one. Only its owning generation may clear the handle.
-                if let self,
-                   self.scrubThumbnailGeneration == generation,
+                if self.scrubThumbnailGeneration == generation,
                    self.scrubThumbnailTaskInteractionToken == interactionToken {
                     self.scrubThumbnailTask = nil
                     self.scrubThumbnailTaskInteractionToken = nil
@@ -3711,14 +3714,13 @@ class PlayerViewModel: ObservableObject {
             var failedAttempts = 0
             var lastDecodeTime = Date.distantPast
             while !Task.isCancelled {
-                guard let self,
-                      let target = self.pendingScrubThumbnailSeconds else { break }
+                guard let target = self.pendingScrubThumbnailSeconds else { break }
                 self.pendingScrubThumbnailSeconds = nil
                 if lastAttemptTarget != target {
                     failedAttempts = 0
                     lastAttemptTarget = target
                 }
-                let cached = await self.scrubThumbnailProvider?.cachedScrubThumbnail(
+                let cached = await selectedProvider.cachedScrubThumbnail(
                     atSeconds: target,
                     duration: self.playbackDuration
                 )
@@ -3726,9 +3728,11 @@ class PlayerViewModel: ObservableObject {
                       self.scrubThumbnailGeneration == generation,
                       self.scrubThumbnailTaskInteractionToken == interactionToken,
                       (self.isScrubbing || self.isHoldingSeek || self.pendingSeekDelta != 0 || self.isTimelineFocused),
-                      self.activeEngineKind == .aether,
+                      self.activeEngineKind == selectedBackend,
+                      self.sessionCoordinator.activeBackend == selectedBackend,
                       self.isSeekPreviewEnabled,
-                      self.scrubThumbnailProvider?.supportsScrubThumbnails == true else { return }
+                      self.scrubThumbnailProvider === selectedProvider,
+                      selectedProvider.supportsScrubThumbnails else { return }
 
                 if let cached {
                     self.scrubThumbnail = cached
@@ -3752,7 +3756,7 @@ class PlayerViewModel: ObservableObject {
                         }
                     }
 
-                    image = await self.scrubThumbnailProvider?.scrubThumbnail(
+                    image = await selectedProvider.scrubThumbnail(
                         atSeconds: target, maxWidth: 360, precise: false
                     )
                     lastDecodeTime = Date()
@@ -3762,9 +3766,11 @@ class PlayerViewModel: ObservableObject {
                       self.scrubThumbnailGeneration == generation,
                       self.scrubThumbnailTaskInteractionToken == interactionToken,
                       (self.isScrubbing || self.isHoldingSeek || self.pendingSeekDelta != 0 || self.isTimelineFocused),
-                      self.activeEngineKind == .aether,
+                      self.activeEngineKind == selectedBackend,
+                      self.sessionCoordinator.activeBackend == selectedBackend,
                       self.isSeekPreviewEnabled,
-                      self.scrubThumbnailProvider?.supportsScrubThumbnails == true else { return }
+                      self.scrubThumbnailProvider === selectedProvider,
+                      selectedProvider.supportsScrubThumbnails else { return }
 
                 // Completed fast frames provide progressive feedback
                 if let image {
@@ -3781,16 +3787,18 @@ class PlayerViewModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 160_000_000)
                 guard !Task.isCancelled else { return }
                 if self.pendingScrubThumbnailSeconds != nil { continue }
-                let refined = await self.scrubThumbnailProvider?.scrubThumbnail(
+                let refined = await selectedProvider.scrubThumbnail(
                     atSeconds: target, maxWidth: 480, precise: true
                 )
                 guard !Task.isCancelled,
                       self.scrubThumbnailGeneration == generation,
                       self.scrubThumbnailTaskInteractionToken == interactionToken,
                       (self.isScrubbing || self.isHoldingSeek || self.pendingSeekDelta != 0 || self.isTimelineFocused),
-                      self.activeEngineKind == .aether,
+                      self.activeEngineKind == selectedBackend,
+                      self.sessionCoordinator.activeBackend == selectedBackend,
                       self.isSeekPreviewEnabled,
-                      self.scrubThumbnailProvider?.supportsScrubThumbnails == true else { return }
+                      self.scrubThumbnailProvider === selectedProvider,
+                      selectedProvider.supportsScrubThumbnails else { return }
                 if self.pendingScrubThumbnailSeconds != nil { continue }
                 if let refined {
                     self.scrubThumbnail = refined

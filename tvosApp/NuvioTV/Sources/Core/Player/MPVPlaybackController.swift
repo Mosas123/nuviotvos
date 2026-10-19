@@ -8,6 +8,7 @@ import Libmpv
 import Metal
 import QuartzCore
 import Combine
+import AetherEngine
 
 struct MPVHTTPHeaderOptions: Equatable {
     let userAgent: String
@@ -367,6 +368,152 @@ struct MPVLoadConfiguration: Equatable {
     }
 }
 
+struct PlaybackThumbnailSourceContext: Sendable, Equatable {
+    let contextID = UUID()
+    let generation: UInt64
+    let playbackURL: URL?
+    let headerSourceURL: URL?
+    let requestHeaders: [String: String]
+    let isLive: Bool
+    let isKnownHLS: Bool
+    let streamKey: String
+}
+
+/// Request-wide cancellation plus one replaceable bounded-probe cancellation. A timed-out cache
+/// stage can finish and a fresh source stage can still run; superseded work cancels both.
+final class PlaybackThumbnailRequestCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private let request = ProbeCancellation()
+    private var stage: ProbeCancellation?
+
+    var isCancelled: Bool { request.isCancelled }
+
+    func beginStage() -> ProbeCancellation? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !request.isCancelled else { return nil }
+        let cancellation = ProbeCancellation()
+        stage = cancellation
+        return cancellation
+    }
+
+    func finishStage(_ cancellation: ProbeCancellation) {
+        lock.lock()
+        if stage === cancellation { stage = nil }
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        request.cancel()
+        stage?.cancel()
+        stage = nil
+        lock.unlock()
+    }
+}
+
+/// Shared bounded disk-cache and original-source fallback used by both playback backends.
+/// Callers retain their own request/generation checks and image index.
+enum PlaybackThumbnailSourceFallback {
+    private static let cacheLimits = ProbeLimits(
+        maxInputBytes: 32 * 1024 * 1024, maxPackets: 1_024,
+        maxPacketBytes: 8 * 1024 * 1024, timeBudget: 1)
+    private static let sourceLimits = ProbeLimits(
+        maxInputBytes: 64 * 1024 * 1024, maxPackets: 2_048,
+        maxPacketBytes: 8 * 1024 * 1024, timeBudget: 2)
+
+    @MainActor
+    static func boundedSnapshot(
+        sourceContext: PlaybackThumbnailSourceContext,
+        atSeconds seconds: Double,
+        maxWidth: Int,
+        cancellation: PlaybackThumbnailRequestCancellation,
+        isCurrent: @MainActor () -> Bool
+    ) async -> BoundedStillFrame? {
+        guard seconds.isFinite, maxWidth > 0, !sourceContext.isLive, !sourceContext.isKnownHLS,
+              isCurrent(), let playbackURL = sourceContext.playbackURL else { return nil }
+
+        let descriptor = await PlaybackStreamCacheManager.shared.thumbnailSource(for: playbackURL)
+        guard isCurrent(), !cancellation.isCancelled else { return nil }
+        let originURL = descriptor?.remoteURL ?? sourceContext.headerSourceURL ?? playbackURL
+        guard !isKnownHLSURL(originURL), supportsIndependentPreview(originURL) else { return nil }
+
+        if let descriptor {
+            let reader = PlaybackStreamCacheIOReader(source: descriptor)
+            guard let stage = cancellation.beginStage() else {
+                reader.close()
+                return nil
+            }
+            let extractor = FrameExtractor(reader: reader)
+            let still = await boundedSnapshot(
+                extractor, seconds: seconds, maxWidth: maxWidth, limits: cacheLimits, cancellation: stage)
+            cancellation.finishStage(stage)
+            reader.close()
+            guard isCurrent(), !cancellation.isCancelled else { return nil }
+            if isAccurate(still, requestedSeconds: seconds) { return still }
+        } else if isCacheProxyURL(playbackURL) {
+            // A loopback cache URL is usable only while its exact active server descriptor exists.
+            return nil
+        }
+
+        guard isCurrent(), !cancellation.isCancelled,
+              let stage = cancellation.beginStage() else { return nil }
+        let extractor = FrameExtractor(url: originURL, httpHeaders: descriptor?.originalHeaders ?? sourceContext.requestHeaders)
+        let still = await boundedSnapshot(
+            extractor, seconds: seconds, maxWidth: maxWidth, limits: sourceLimits, cancellation: stage)
+        cancellation.finishStage(stage)
+        guard isCurrent(), !cancellation.isCancelled,
+              isAccurate(still, requestedSeconds: seconds) else { return nil }
+        return still
+    }
+
+    @MainActor
+    private static func boundedSnapshot(
+        _ extractor: FrameExtractor,
+        seconds: Double,
+        maxWidth: Int,
+        limits: ProbeLimits,
+        cancellation: ProbeCancellation
+    ) async -> BoundedStillFrame? {
+        let width = CGFloat(maxWidth)
+        let result = await extractor.boundedSnapshot(
+            at: seconds,
+            maxSize: CGSize(width: width, height: width),
+            limits: limits,
+            cancellation: cancellation,
+            relativeToPresentationStart: true
+        )
+        await extractor.shutdown()
+        return result
+    }
+
+    static func isAccurate(_ still: BoundedStillFrame?, requestedSeconds: Double) -> Bool {
+        guard let actualSeconds = still?.actualSeconds, actualSeconds.isFinite,
+              requestedSeconds.isFinite else { return false }
+        return abs(actualSeconds - requestedSeconds) <= HybridSeekThumbnailPolicy.maximumPreviewTimeError
+    }
+
+    static func isKnownHLSURL(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return ["m3u8", "m3u"].contains(url.pathExtension.lowercased())
+            || url.absoluteString.localizedCaseInsensitiveContains(".m3u8")
+            || url.host?.localizedCaseInsensitiveContains("googlevideo.com") == true
+    }
+
+    static func isCacheProxyURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased(),
+              ["127.0.0.1", "localhost", "::1"].contains(host) else { return false }
+        return url.path.hasPrefix("/stream/")
+    }
+
+    private static func supportsIndependentPreview(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              ["file", "http", "https"].contains(scheme),
+              !isCacheProxyURL(url), !isKnownHLSURL(url) else { return false }
+        return !["iso", "img", "udf"].contains(url.pathExtension.lowercased())
+    }
+}
+
 // MARK: - MPV Player View Controller (tvOS)
 //
 // Self-contained libmpv host. Ported from the iOS bridge, with the Kotlin/
@@ -410,17 +557,190 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         maxWidth: Int = 360,
         precise: Bool = true
     ) async -> CGImage? {
+        let generation = loadGeneration
+        let sourceContext = thumbnailSourceContext
+        let previousTask = activeThumbnailTask
+        let requestID = beginScrubThumbnailRequest()
+        let providerGeneration = externalProviderGeneration
+        let cancellation = PlaybackThumbnailRequestCancellation()
+        activeThumbnailCancellation = cancellation
+        let duration = durationMs > 0 ? Double(durationMs) / 1000.0 : 3600.0
+        let work: Task<CGImage?, Never> = Task { @MainActor [weak self, previousTask] in
+            _ = await previousTask?.value
+            guard let self,
+                  self.isCurrentScrubThumbnailRequest(
+                    requestID, generation: generation, providerGeneration: providerGeneration,
+                    cancellation: cancellation) else { return nil }
+            return await withTaskCancellationHandler {
+                await self.generateScrubThumbnail(
+                    atSeconds: seconds,
+                    maxWidth: maxWidth,
+                    duration: duration,
+                    generation: generation,
+                    requestID: requestID,
+                    providerGeneration: providerGeneration,
+                    sourceContext: sourceContext,
+                    cancellation: cancellation
+                )
+            } onCancel: {
+                cancellation.cancel()
+            }
+        }
+        activeThumbnailTask = work
+        activeThumbnailTaskRequestID = requestID
+        let result = await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            cancellation.cancel()
+            work.cancel()
+        }
+        if activeThumbnailTaskRequestID == requestID {
+            activeThumbnailTask = nil
+            activeThumbnailTaskRequestID = nil
+        }
+        if thumbnailRequestSequence == requestID,
+           activeThumbnailCancellation === cancellation {
+            activeThumbnailCancellation = nil
+        }
+        return result
+    }
+
+    private func generateScrubThumbnail(
+        atSeconds seconds: Double,
+        maxWidth: Int,
+        duration: Double,
+        generation: UInt64,
+        requestID: UInt64,
+        providerGeneration: UInt64,
+        sourceContext: PlaybackThumbnailSourceContext?,
+        cancellation: PlaybackThumbnailRequestCancellation
+    ) async -> CGImage? {
+        guard seconds.isFinite, maxWidth > 0,
+              isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation) else { return nil }
         if let external = externalTrickplayProvider {
-            if let image = await external.thumbnail(at: seconds) {
+            let image = await external.thumbnail(at: seconds)
+            guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                                 providerGeneration: providerGeneration,
+                                                 cancellation: cancellation) else { return nil }
+            if let image {
                 return image
             }
         }
-        let dur = Double(durationMs) / 1000.0
-        return await hybridThumbnailIndex.lookup(
+        let cached = await hybridThumbnailIndex.lookup(
             seconds: seconds,
-            duration: dur > 0 ? dur : 3600.0,
-            generation: loadGeneration
+            duration: duration,
+            generation: generation
         )
+        guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation) else { return nil }
+        if let cached { return cached }
+        guard let sourceContext,
+              sourceContext.generation == generation else { return nil }
+        let still = await PlaybackThumbnailSourceFallback.boundedSnapshot(
+            sourceContext: sourceContext,
+            atSeconds: seconds,
+            maxWidth: maxWidth,
+            cancellation: cancellation,
+            isCurrent: {
+                self.isCurrentScrubThumbnailRequest(
+                    requestID, generation: generation, providerGeneration: providerGeneration,
+                    cancellation: cancellation)
+            })
+        guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation) else { return nil }
+        return await storePreviewIfCurrent(
+            still, requestedSeconds: seconds, generation: generation,
+            requestID: requestID, providerGeneration: providerGeneration, cancellation: cancellation)
+    }
+
+    private func storePreviewIfCurrent(
+        _ still: BoundedStillFrame?,
+        requestedSeconds: Double,
+        generation: UInt64,
+        requestID: UInt64,
+        providerGeneration: UInt64,
+        cancellation: PlaybackThumbnailRequestCancellation
+    ) async -> CGImage? {
+        guard let still,
+              let actualSeconds = still.actualSeconds,
+              actualSeconds.isFinite,
+              abs(actualSeconds - requestedSeconds) <= HybridSeekThumbnailPolicy.maximumPreviewTimeError,
+              isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation) else { return nil }
+        await hybridThumbnailIndex.store(
+            still.image, seconds: actualSeconds, kind: .fine, generation: generation)
+        guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation) else { return nil }
+        return still.image
+    }
+
+    private func beginScrubThumbnailRequest() -> UInt64 {
+        thumbnailRequestSequence &+= 1
+        activeThumbnailTask?.cancel()
+        activeThumbnailCancellation?.cancel()
+        activeThumbnailCancellation = nil
+        return thumbnailRequestSequence
+    }
+
+    private func isCurrentScrubThumbnailRequest(
+        _ requestID: UInt64,
+        generation: UInt64,
+        providerGeneration: UInt64,
+        cancellation: PlaybackThumbnailRequestCancellation? = nil
+    ) -> Bool {
+        guard !Task.isCancelled,
+              thumbnailRequestSequence == requestID,
+              loadGeneration == generation,
+              externalProviderGeneration == providerGeneration else { return false }
+        if let cancellation {
+            guard !cancellation.isCancelled, activeThumbnailCancellation === cancellation else { return false }
+        }
+        return thumbnailSourceContext?.generation == generation
+    }
+
+    private func cancelScrubThumbnailWork() {
+        thumbnailRequestSequence &+= 1
+        activeThumbnailTask?.cancel()
+        activeThumbnailCancellation?.cancel()
+        activeThumbnailCancellation = nil
+    }
+
+    private func resetScrubThumbnailSource(
+        playbackURL: URL?,
+        headerSourceURL: URL? = nil,
+        headers: [String: String],
+        isLive: Bool,
+        streamKey: String,
+        canonicalMediaKey: String?,
+        isKnownHLS: Bool = false
+    ) {
+        cancelScrubThumbnailWork()
+        loadGeneration &+= 1
+        externalProviderGeneration &+= 1
+        externalTrickplayProvider = nil
+        contentCanonicalKey = canonicalMediaKey
+        currentStreamKey = streamKey
+        let generation = loadGeneration
+        thumbnailSourceContext = PlaybackThumbnailSourceContext(
+            generation: generation,
+            playbackURL: playbackURL,
+            headerSourceURL: headerSourceURL,
+            requestHeaders: headers,
+            isLive: isLive,
+            isKnownHLS: isLive || isKnownHLS
+                || PlaybackThumbnailSourceFallback.isKnownHLSURL(playbackURL)
+                || PlaybackThumbnailSourceFallback.isKnownHLSURL(headerSourceURL),
+            streamKey: streamKey
+        )
+        let index = hybridThumbnailIndex
+        let resetTask = Task { await index.reset(generation: generation, streamKey: streamKey) }
+        thumbnailIndexResetTask = resetTask
     }
 
     func prepareScrubThumbnailExtractor() {
@@ -918,15 +1238,14 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         currentAspectMode = request.aspectMode
         PlaybackAudioSession.activateMoviePlayback()
 
-        loadGeneration &+= 1
-        let gen = loadGeneration
-        self.externalTrickplayProvider = nil
         let key = request.canonicalMediaKey ?? request.cacheFileIdentity?.cacheKey ?? TrickplayDiskCache.streamKey(for: request.videoURL.absoluteString)
-        self.contentCanonicalKey = request.canonicalMediaKey
-        self.currentStreamKey = key
-        Task {
-            await hybridThumbnailIndex.reset(generation: gen, streamKey: key)
-        }
+        resetScrubThumbnailSource(
+            playbackURL: request.videoURL,
+            headers: request.httpHeaders,
+            isLive: request.isLiveStream,
+            streamKey: key,
+            canonicalMediaKey: request.canonicalMediaKey,
+            isKnownHLS: request.streamDescription == PlaybackMarkers.trailerSubtitle)
 
         #if os(tvOS) || os(iOS)
         currentMediaArtwork = nil
@@ -1609,6 +1928,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
         memoryWatchdog.stop(event: "deinit")
 #endif
+        activeThumbnailTask?.cancel()
+        activeThumbnailCancellation?.cancel()
         NotificationCenter.default.removeObserver(self)
         if let ctx = mpv {
             mpv = nil

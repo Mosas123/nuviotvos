@@ -2458,7 +2458,19 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var softwareFrameExtractor: FrameExtractor?
     private var didPrewarmSoftwareFrameExtractor = false
     private var didLogSoftwareThumbnailResult = false
+    private var softwareFrameExtractorCleanupTask: Task<Void, Never>?
+    private var softwareFrameExtractorCleanupGeneration: UInt64 = 0
     private let hybridThumbnailIndex = HybridSeekThumbnailIndex()
+    private var thumbnailSourceContext: PlaybackThumbnailSourceContext?
+    private var thumbnailIndexResetTask: Task<Void, Never>?
+    private var externalTrickplayProvider: (any TrickplayProviding)?
+    private var thumbnailRequestSequence: UInt64 = 0
+    private var activeThumbnailCancellation: PlaybackThumbnailRequestCancellation?
+    private var activeThumbnailTask: Task<CGImage?, Never>?
+    private var activeThumbnailTaskRequestID: UInt64?
+    private var externalProviderGeneration: UInt64 = 0
+    private var engineAuxiliaryCleanupTask: Task<Void, Never>?
+    private var engineAuxiliaryCleanupRequestID: UInt64 = 0
     var coarseThumbnailTask: Task<Void, Never>?
     private var coarseThumbnailTaskToken: UInt64 = 0
     private var coarseSampleTimes: [Double] = []
@@ -2565,6 +2577,75 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             || (!isRemoteStream && engine.playbackBackend == .software)
     }
 
+    static func shouldUseBoundedProgressiveScrubPreview(
+        requestIsLive: Bool,
+        engineIsLive: Bool,
+        route: VideoRoute,
+        isKnownHLS: Bool,
+        sourceURL: URL?,
+        sourceContainerFormat: String?
+    ) -> Bool {
+        guard !requestIsLive, !engineIsLive, route != .remoteBypass, !isKnownHLS,
+              let sourceURL,
+              let scheme = sourceURL.scheme?.lowercased(),
+              ["file", "http", "https"].contains(scheme) else { return false }
+        let fileExtension = sourceURL.pathExtension.lowercased()
+        guard !["iso", "img", "udf"].contains(fileExtension) else { return false }
+        guard !PlaybackThumbnailSourceFallback.isKnownHLSURL(sourceURL) else { return false }
+
+        let knownVideoExtensions: Set<String> = [
+            "3gp", "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "m2ts", "mts", "ts", "webm"
+        ]
+        if knownVideoExtensions.contains(fileExtension) { return true }
+
+        // Suffixless direct-download URLs are common. Use the already-loaded demuxer identity to
+        // admit known progressive containers while leaving unknown manifest-like sources legacy.
+        let knownContainers: Set<String> = [
+            "asf", "avi", "flv", "matroska", "mov", "mpeg", "mpegts", "mp4", "ogg", "webm"
+        ]
+        let containers = (sourceContainerFormat ?? "").lowercased().split(separator: ",")
+        return containers.contains { knownContainers.contains(String($0).trimmingCharacters(in: .whitespaces)) }
+    }
+
+    static func acceptsBoundedScrubFrame(_ frame: ScrubFrame?, at seconds: Double) -> Bool {
+        guard let frame, seconds.isFinite, frame.actualSeconds.isFinite,
+              abs(frame.actualSeconds - seconds) <= HybridSeekThumbnailPolicy.maximumPreviewTimeError else { return false }
+        return frame.validRange?.contains(seconds) ?? true
+    }
+
+    @MainActor
+    static func boundedProgressiveScrubFrame(
+        at seconds: Double,
+        resident: @MainActor () async -> ScrubFrame?,
+        ownsSource: @MainActor () -> Bool,
+        cleanup: @MainActor () async -> Void,
+        isCurrent: @MainActor () -> Bool,
+        fallback: @MainActor () async -> BoundedStillFrame?
+    ) async -> BoundedStillFrame? {
+        let frame = await resident()
+        // A source replacement owns the engine's new auxiliary contexts; the old request must not close them.
+        guard ownsSource() else { return nil }
+        await cleanup()
+        // Superseded requests on the same source still drain their decoder, then stop before publication/fallback.
+        guard isCurrent() else { return nil }
+        if acceptsBoundedScrubFrame(frame, at: seconds), let frame {
+            return BoundedStillFrame(image: frame.image, actualSeconds: frame.actualSeconds)
+        }
+        return await fallback()
+    }
+
+    private func usesBoundedProgressiveScrubPreview(_ context: PlaybackThumbnailSourceContext?) -> Bool {
+        guard let context, context.generation == loadGeneration, !isAwaitingEngineLoad else { return false }
+        return Self.shouldUseBoundedProgressiveScrubPreview(
+            requestIsLive: context.isLive,
+            engineIsLive: engine.isLive,
+            route: engine.videoRoute,
+            isKnownHLS: context.isKnownHLS,
+            sourceURL: context.headerSourceURL ?? context.playbackURL,
+            sourceContainerFormat: engine.sourceContainerFormat
+        )
+    }
+
     private func getOrCreateFrameExtractor() -> FrameExtractor? {
         if let softwareFrameExtractor {
             return softwareFrameExtractor
@@ -2582,6 +2663,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     /// Lazily opens the retained extractor so the first visible scrub
     /// request does not pay the demuxer-open cost.
     func prepareScrubThumbnailExtractor() {
+        guard !isAwaitingEngineLoad else { return }
+        if usesBoundedProgressiveScrubPreview(thumbnailSourceContext) { return }
         guard isLocalPlaybackCache || (!isRemoteStream && engine.playbackBackend == .software) else { return }
         guard engine.playbackPhase == .paused, !isTransportPlaying else { return }
         guard !didPrewarmSoftwareFrameExtractor else { return }
@@ -2595,11 +2678,24 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func cachedScrubThumbnail(atSeconds seconds: Double, duration: Double) async -> CGImage? {
-        await hybridThumbnailIndex.lookup(
+        let generation = loadGeneration
+        let requestID = beginScrubThumbnailRequest()
+        let providerGeneration = externalProviderGeneration
+        guard !isAwaitingEngineLoad else { return nil }
+        if let externalTrickplayProvider {
+            let image = await externalTrickplayProvider.thumbnail(at: seconds)
+            guard isCurrentScrubThumbnailRequest(
+                requestID, generation: generation, providerGeneration: providerGeneration) else { return nil }
+            if let image { return image }
+        }
+        let image = await hybridThumbnailIndex.lookup(
             seconds: seconds,
             duration: duration,
-            generation: loadGeneration
+            generation: generation
         )
+        guard isCurrentScrubThumbnailRequest(
+            requestID, generation: generation, providerGeneration: providerGeneration) else { return nil }
+        return image
     }
 
     func scrubThumbnail(
@@ -2608,43 +2704,234 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         precise: Bool = true
     ) async -> CGImage? {
         let generation = loadGeneration
+        let sourceContext = thumbnailSourceContext
+        let previousTask = activeThumbnailTask
+        let cleanupTask = softwareFrameExtractorCleanupTask
+        let cleanupGeneration = softwareFrameExtractorCleanupGeneration
+        let engineCleanupTask = engineAuxiliaryCleanupTask
+        let engineCleanupRequestID = engineAuxiliaryCleanupRequestID
+        let requestID = beginScrubThumbnailRequest()
+        let providerGeneration = externalProviderGeneration
+        let cancellation = PlaybackThumbnailRequestCancellation()
+        activeThumbnailCancellation = cancellation
+        let work: Task<CGImage?, Never> = Task {
+            @MainActor [weak self, previousTask, cleanupTask, engineCleanupTask] in
+            _ = await previousTask?.value
+            _ = await cleanupTask?.value
+            _ = await engineCleanupTask?.value
+            guard let self,
+                  self.isCurrentScrubThumbnailRequest(
+                    requestID, generation: generation, providerGeneration: providerGeneration,
+                    cancellation: cancellation) else { return nil }
+            if self.softwareFrameExtractorCleanupGeneration == cleanupGeneration {
+                self.softwareFrameExtractorCleanupTask = nil
+            }
+            if self.engineAuxiliaryCleanupRequestID == engineCleanupRequestID {
+                self.engineAuxiliaryCleanupTask = nil
+            }
+            return await withTaskCancellationHandler {
+                await self.generateScrubThumbnail(
+                    atSeconds: seconds,
+                    maxWidth: maxWidth,
+                    precise: precise,
+                    generation: generation,
+                    requestID: requestID,
+                    providerGeneration: providerGeneration,
+                    sourceContext: sourceContext,
+                    cancellation: cancellation
+                )
+            } onCancel: {
+                cancellation.cancel()
+            }
+        }
+        activeThumbnailTask = work
+        activeThumbnailTaskRequestID = requestID
+        let result = await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            cancellation.cancel()
+            work.cancel()
+        }
+        if activeThumbnailTaskRequestID == requestID {
+            activeThumbnailTask = nil
+            activeThumbnailTaskRequestID = nil
+        }
+        if thumbnailRequestSequence == requestID,
+           activeThumbnailCancellation === cancellation {
+            activeThumbnailCancellation = nil
+        }
+        return result
+    }
+
+    private func generateScrubThumbnail(
+        atSeconds seconds: Double,
+        maxWidth: Int,
+        precise: Bool,
+        generation: UInt64,
+        requestID: UInt64,
+        providerGeneration: UInt64,
+        sourceContext: PlaybackThumbnailSourceContext?,
+        cancellation: PlaybackThumbnailRequestCancellation
+    ) async -> CGImage? {
+        guard !isAwaitingEngineLoad,
+              isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                            providerGeneration: providerGeneration,
+                                            cancellation: cancellation) else { return nil }
+        if let external = externalTrickplayProvider {
+            let externalImage = await external.thumbnail(at: seconds)
+            guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                                 providerGeneration: providerGeneration,
+                                                 cancellation: cancellation) else { return nil }
+            if let externalImage { return externalImage }
+        }
+        let cached = await hybridThumbnailIndex.lookup(
+            seconds: seconds,
+            duration: durationMs > 0 ? Double(durationMs) / 1000.0 : 3600.0,
+            generation: generation
+        )
+        guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation) else { return nil }
+        if let cached { return cached }
+        if usesBoundedProgressiveScrubPreview(sourceContext) {
+            let still = await Self.boundedProgressiveScrubFrame(
+                at: seconds,
+                resident: {
+                    await engine.scrubPreviewFrame(
+                        atSeconds: seconds,
+                        refined: true,
+                        maxWidth: maxWidth,
+                        isCancelled: { cancellation.isCancelled })
+                },
+                ownsSource: {
+                    loadGeneration == generation
+                        && thumbnailSourceContext == sourceContext
+                        && !isAwaitingEngineLoad
+                },
+                cleanup: {
+                    await engine.closeAuxiliaryScrubExtractorsAndWait()
+                },
+                isCurrent: {
+                    isCurrentScrubThumbnailRequest(
+                        requestID, generation: generation, providerGeneration: providerGeneration,
+                        cancellation: cancellation)
+                },
+                fallback: {
+                    guard let sourceContext else { return nil }
+                    return await PlaybackThumbnailSourceFallback.boundedSnapshot(
+                        sourceContext: sourceContext,
+                        atSeconds: seconds,
+                        maxWidth: maxWidth,
+                        cancellation: cancellation,
+                        isCurrent: {
+                            self.isCurrentScrubThumbnailRequest(
+                                requestID, generation: generation, providerGeneration: providerGeneration,
+                                cancellation: cancellation)
+                        })
+                })
+            guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                                 providerGeneration: providerGeneration,
+                                                 cancellation: cancellation),
+                  let still, let actual = still.actualSeconds, actual.isFinite else { return nil }
+            await hybridThumbnailIndex.store(
+                still.image, seconds: actual, kind: .fine, generation: generation)
+            guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                                 providerGeneration: providerGeneration,
+                                                 cancellation: cancellation) else { return nil }
+            return still.image
+        }
+
+        return await generateLegacyScrubThumbnail(
+            atSeconds: seconds, maxWidth: maxWidth, precise: precise,
+            generation: generation, requestID: requestID,
+            providerGeneration: providerGeneration, cancellation: cancellation)
+    }
+
+    private func generateLegacyScrubThumbnail(
+        atSeconds seconds: Double,
+        maxWidth: Int,
+        precise: Bool,
+        generation: UInt64,
+        requestID: UInt64,
+        providerGeneration: UInt64,
+        cancellation: PlaybackThumbnailRequestCancellation
+    ) async -> CGImage? {
         if engine.supportsCacheBackedStills {
-            let image = await engine.scrubThumbnail(
-                atSeconds: seconds, maxWidth: maxWidth, precise: precise
-            )
-            guard loadGeneration == generation else { return nil }
+            let image = await engine.scrubThumbnail(atSeconds: seconds, maxWidth: maxWidth, precise: precise)
+            guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                                 providerGeneration: providerGeneration,
+                                                 cancellation: cancellation) else { return nil }
             if let image {
                 await hybridThumbnailIndex.store(
-                    image, seconds: seconds, kind: precise ? .fine : .coarse, generation: generation
-                )
+                    image, seconds: seconds, kind: precise ? .fine : .coarse, generation: generation)
+                guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                                     providerGeneration: providerGeneration,
+                                                     cancellation: cancellation) else { return nil }
                 return image
             }
-            // If cache-backed still wasn't resident in SegmentCache, allow fallback to
-            // FrameExtractor when running against the local hybrid disk cache or local files.
             guard isLocalPlaybackCache || !isRemoteStream else { return nil }
         }
 
-        // Allow frame extractor on local/cached streams or software decoding.
-        guard isLocalPlaybackCache || (!isRemoteStream && engine.playbackBackend == .software) else { return nil }
-        guard loadGeneration == generation else { return nil }
-        guard let extractor = getOrCreateFrameExtractor() else { return nil }
+        guard isLocalPlaybackCache || (!isRemoteStream && engine.playbackBackend == .software),
+              isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation),
+              let extractor = getOrCreateFrameExtractor() else { return nil }
         let image: CGImage?
         if precise {
             image = await extractor.preciseThumbnail(at: seconds, maxWidth: maxWidth)
         } else {
             image = await extractor.thumbnail(at: seconds, maxWidth: maxWidth)
         }
-        guard loadGeneration == generation, softwareFrameExtractor != nil else { return nil }
+        guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                             providerGeneration: providerGeneration,
+                                             cancellation: cancellation),
+              softwareFrameExtractor != nil else { return nil }
         if image == nil, !didLogSoftwareThumbnailResult {
             print("[Aether] Scrub thumbnail fallback extraction produced nil at \(seconds)s")
             didLogSoftwareThumbnailResult = true
         }
         if let image {
             await hybridThumbnailIndex.store(
-                image, seconds: seconds, kind: precise ? .fine : .coarse, generation: generation
-            )
+                image, seconds: seconds, kind: precise ? .fine : .coarse, generation: generation)
+            guard isCurrentScrubThumbnailRequest(requestID, generation: generation,
+                                                 providerGeneration: providerGeneration,
+                                                 cancellation: cancellation) else { return nil }
         }
         return image
+    }
+
+    private func beginScrubThumbnailRequest() -> UInt64 {
+        thumbnailRequestSequence &+= 1
+        activeThumbnailTask?.cancel()
+        activeThumbnailCancellation?.cancel()
+        activeThumbnailCancellation = nil
+        return thumbnailRequestSequence
+    }
+
+    private func isCurrentScrubThumbnailRequest(
+        _ requestID: UInt64,
+        generation: UInt64,
+        providerGeneration: UInt64,
+        cancellation: PlaybackThumbnailRequestCancellation? = nil
+    ) -> Bool {
+        guard !Task.isCancelled,
+              !isAwaitingEngineLoad,
+              thumbnailRequestSequence == requestID,
+              loadGeneration == generation,
+              externalProviderGeneration == providerGeneration,
+              thumbnailSourceContext?.generation == generation else { return false }
+        if let cancellation {
+            guard !cancellation.isCancelled, activeThumbnailCancellation === cancellation else { return false }
+        }
+        return true
+    }
+
+    private func cancelScrubThumbnailWork() {
+        thumbnailRequestSequence &+= 1
+        activeThumbnailTask?.cancel()
+        activeThumbnailCancellation?.cancel()
+        activeThumbnailCancellation = nil
     }
 
     private func resetSoftwareFrameExtractor() {
@@ -2652,7 +2939,16 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         softwareFrameExtractor = nil
         didPrewarmSoftwareFrameExtractor = false
         guard let extractor else { return }
-        Task { await extractor.shutdown() }
+        softwareFrameExtractorCleanupGeneration &+= 1
+        let cleanupGeneration = softwareFrameExtractorCleanupGeneration
+        let previousCleanup = softwareFrameExtractorCleanupTask
+        softwareFrameExtractorCleanupTask = Task { [weak self] in
+            await previousCleanup?.value
+            await extractor.shutdown()
+            guard let self,
+                  self.softwareFrameExtractorCleanupGeneration == cleanupGeneration else { return }
+            self.softwareFrameExtractorCleanupTask = nil
+        }
     }
 
     private func resetHybridThumbnailState(generation: UInt64, streamKey: String = "") {
@@ -2666,11 +2962,25 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         coarseResumeNotBefore = Date().addingTimeInterval(3)
         coarseThumbnailUnavailable = false
         coarseThumbnailComplete = false
-        Task { await hybridThumbnailIndex.reset(generation: generation, streamKey: streamKey) }
+        let index = hybridThumbnailIndex
+        let resetTask = Task { await index.reset(generation: generation, streamKey: streamKey) }
+        thumbnailIndexResetTask = resetTask
     }
 
     func setExternalTrickplayProvider(_ provider: (any TrickplayProviding)?) {
-        Task { await hybridThumbnailIndex.setExternalTrickplayProvider(provider) }
+        cancelScrubThumbnailWork()
+        externalProviderGeneration &+= 1
+        let providerGeneration = externalProviderGeneration
+        let generation = loadGeneration
+        externalTrickplayProvider = provider
+        let resetTask = thumbnailIndexResetTask
+        Task { [weak self] in
+            await resetTask?.value
+            guard let self,
+                  self.loadGeneration == generation,
+                  self.externalProviderGeneration == providerGeneration else { return }
+            await self.hybridThumbnailIndex.setExternalTrickplayProvider(provider)
+        }
     }
 
     /// Passively harvests stills into the local trickplay cache during normal playback.
@@ -2727,6 +3037,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     /// extractor is retained so its next foreground request supersedes the
     /// canceled coarse decode.
     func suspendCoarseThumbnailWork() {
+        cancelScrubThumbnailWork()
         coarseThumbnailTaskToken &+= 1
         coarseThumbnailTask?.cancel()
         coarseThumbnailTask = nil
@@ -2736,8 +3047,30 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     /// Release paused-only thumbnail decoders as soon as playback actually resumes,
     /// including engine-driven resumes that do not pass through playPlayback().
     private func releaseAuxiliaryThumbnailWorkForPlayback() {
+        cancelScrubThumbnailWork()
         suspendCoarseThumbnailWork()
-        engine.closeAuxiliaryScrubExtractors()
+        let generation = loadGeneration
+        let sourceContext = thumbnailSourceContext
+        let cleanupEngine = engine
+        engineAuxiliaryCleanupRequestID &+= 1
+        let cleanupRequestID = engineAuxiliaryCleanupRequestID
+        let previousCleanup = engineAuxiliaryCleanupTask
+        engineAuxiliaryCleanupTask = Task { @MainActor [weak self, cleanupEngine, previousCleanup] in
+            _ = await previousCleanup?.value
+            guard let self, self.engineAuxiliaryCleanupRequestID == cleanupRequestID else { return }
+            guard self.loadGeneration == generation, !self.isAwaitingEngineLoad else {
+                self.engineAuxiliaryCleanupTask = nil
+                return
+            }
+            guard !Task.isCancelled, self.thumbnailSourceContext == sourceContext else {
+                self.engineAuxiliaryCleanupTask = nil
+                return
+            }
+            await cleanupEngine.closeAuxiliaryScrubExtractorsAndWait()
+            if self.engineAuxiliaryCleanupRequestID == cleanupRequestID {
+                self.engineAuxiliaryCleanupTask = nil
+            }
+        }
         didPrewarmSoftwareFrameExtractor = false
         if let extractor = softwareFrameExtractor {
             Task { await extractor.closeAuxiliaryContext() }
@@ -2752,6 +3085,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func advanceCoarseThumbnailIfNeeded(duration: Double) {
+        guard !isAwaitingEngineLoad else { return }
+        if usesBoundedProgressiveScrubPreview(thumbnailSourceContext) { return }
         guard !isRemoteStream || isLocalPlaybackCache else { return }
         guard engine.playbackPhase == .paused, !isTransportPlaying else { return }
         guard duration >= HybridSeekThumbnailPolicy.coarseIntervalSeconds,
@@ -3150,10 +3485,21 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     deinit {
         foregroundReloadTask?.cancel()
+        activeThumbnailTask?.cancel()
+        activeThumbnailCancellation?.cancel()
+        coarseThumbnailTask?.cancel()
+        if let extractor = softwareFrameExtractor {
+            Task { await extractor.shutdown() }
+        }
         NotificationCenter.default.removeObserver(self)
     }
 
     @objc private func appWillResignActive() {
+        if !engine.pictureInPictureActive {
+            let mark = lifecycleReloadToken
+            onWillSuspendPlayback?()
+            guard lifecycleReloadToken == mark else { return }
+        }
         screensaverDebugLog("[ScreensaverDebug][AetherController] appWillResignActive: state=\(engine.state), isPlayerPlaying=\(isPlayerPlaying), lastKnownPos=\(lastKnownPositionMs)ms, clock=\(engine.clock.currentTime)")
         if !engine.pictureInPictureActive {
             foregroundReloadTask?.cancel()
@@ -3780,6 +4126,12 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     // MARK: Load
 
     func load(_ request: PlaybackLoadRequest, generation: UInt64) {
+        cancelScrubThumbnailWork()
+        thumbnailSourceContext = nil
+        externalProviderGeneration &+= 1
+        externalTrickplayProvider = nil
+        teardownRemoteCommands()
+        remoteCommandsAllowed = true
         diagnosticPlayIntent = request.autoplay ? "play" : "pause"
         lastDiagnosticSnapshotUptime = 0
         let currentEngineGeneration = max(
@@ -3801,6 +4153,11 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         resetAISubtitleStartupHold()
         loadGeneration = generation
         let isRemote = PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
+        let isRemoteHLS = request.videoURL.pathExtension.lowercased() == "m3u8"
+            || request.videoURL.absoluteString.contains(".m3u8")
+            || request.videoURL.absoluteString.contains("manifest.googlevideo.com")
+            || request.videoURL.host?.contains("googlevideo.com") == true
+            || request.streamDescription == PlaybackMarkers.trailerSubtitle
         // The hybrid cache is a local HTTP range server on 127.0.0.1.
         // Holding the source connection open (AE#377) avoids AVIOReader repeatedly
         // terminating and renegotiating range requests every 8–16 MB, preventing
@@ -3813,7 +4170,18 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             ?? TrickplayDiskCache.streamKey(for: request.videoURL.absoluteString)
         self.currentStreamKey = streamKey
         self.contentCanonicalKey = request.canonicalMediaKey ?? streamKey
+        thumbnailSourceContext = PlaybackThumbnailSourceContext(
+            generation: generation,
+            playbackURL: request.videoURL,
+            headerSourceURL: request.httpHeaderSourceURL,
+            requestHeaders: request.httpHeaders,
+            isLive: request.isLiveStream,
+            isKnownHLS: isRemoteHLS
+                || PlaybackThumbnailSourceFallback.isKnownHLSURL(request.httpHeaderSourceURL),
+            streamKey: streamKey
+        )
         resetHybridThumbnailState(generation: generation, streamKey: streamKey)
+        resetSoftwareFrameExtractor()
         if let trickplayURL = request.trickplayURL {
             Task { [weak self, generation] in
                 if let provider = await TrickplayResolver.shared.fetchStoryboard(from: trickplayURL) {
@@ -4029,6 +4397,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func playPlayback() {
+        cancelScrubThumbnailWork()
         diagnosticPlayIntent = "play"
         screensaverDebugLog("[ScreensaverDebug][AetherController] playPlayback() called: state=\(engine.state), clock=\(engine.clock.currentTime)")
         if foregroundReloadTask != nil {
