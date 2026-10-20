@@ -430,10 +430,14 @@ struct PosterCard: View {
             .overlay(alignment: effectiveLandscape ? .topTrailing : .top) {
                 continueBadge
             }
-            .overlay(alignment: .topTrailing) {
+            .overlay(alignment: .bottomTrailing) {
                 if let collectionOrigin, !continueIsUpNext {
                     CollectionOriginBadge(origin: collectionOrigin)
-                        .padding(10)
+                        .padding(.trailing, 22)
+                        // The progress bar occupies the bottom 16...24 points.
+                        // Leave a 10-point gap above it, or use the bottom inset
+                        // directly when there is no progress bar.
+                        .padding(.bottom, continueProgress != nil ? 34 : 16)
                 }
             }
             .overlay(alignment: .topTrailing) {
