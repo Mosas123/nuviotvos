@@ -319,6 +319,20 @@ enum TVTab: Hashable, Identifiable, CaseIterable {
 
 /// Main content view - entry point for the app with screen routing
 struct ContentView: View {
+    private struct PartyDetailsDestination {
+        let screen: TVScreen
+        let tab: TVTab
+        let backStack: [(id: String, type: String)]
+        let returnDestination: DetailsReturnDestination
+        let collectionContext: CollectionPlaybackContext?
+    }
+
+    private struct PartyDetailsOrigin {
+        let context: WatchPartyPlaybackContext
+        let media: WatchPartyMedia
+        let destination: PartyDetailsDestination
+    }
+
     @Environment(\.scenePhase) private var scenePhase
     @State private var activeScreen: TVScreen = .login
     @State private var playbackPartyID: UUID?
@@ -327,6 +341,7 @@ struct ContentView: View {
     @State private var choosingPartySource = false
     @State private var partyLaunchTask: Task<Void, Never>?
     @State private var partyLaunchID = UUID()
+    @State private var partyDetailsOrigin: PartyDetailsOrigin?
     @State private var resolvedInitialScreen = false
     /// `nil` until tvOS has actually backgrounded the app, so the initial
     /// `.active` callback is never treated as a resume.
@@ -595,6 +610,7 @@ struct ContentView: View {
             }
         }
         .onReceive(authManager.contextWillChange.merge(with: profileViewModel.contextWillChange)) { _ in
+            partyDetailsOrigin = nil
             partyLaunchID = UUID()
             partyLaunchTask?.cancel(); partyLaunchTask = nil
             creatingParty = false; choosingPartySource = false
@@ -1692,7 +1708,7 @@ struct ContentView: View {
     /// Host from Details without starting a stream. The server owns room-code
     /// generation; membership and uncertain outcomes stay in WatchPartyService.
     private func createWatchPartyFromDetails(meta: NuvioMeta, episode: NuvioVideo?) {
-        guard WatchPartyConfiguration.isEnabled else { return }
+        guard WatchPartyConfiguration.isEnabled, case .details = activeScreen else { return }
         guard let service = watchPartyOwner.service, partyLaunchTask == nil else { return }
         guard authManager.isAuthenticated, !authManager.sessionNeedsReauthentication,
               profileViewModel.activeProfile != nil else {
@@ -1719,6 +1735,12 @@ struct ContentView: View {
             return
         }
         watchPartyOwner.message = nil
+        let destination = PartyDetailsDestination(
+            screen: activeScreen, tab: selectedTab, backStack: detailsBackStack,
+            returnDestination: detailsReturnDestination, collectionContext: detailsCollectionContext
+        )
+        let detailsGeneration = detailsDidDisappearGeneration
+        partyDetailsOrigin = nil
         let mark = UUID()
         partyLaunchID = mark
         partyLaunchTask = Task { @MainActor in
@@ -1726,7 +1748,10 @@ struct ContentView: View {
             do {
                 try await service.create(media: media, playback: nil)
                 guard !Task.isCancelled, partyLaunchID == mark,
-                      watchPartyOwner.service === service else { return }
+                      watchPartyOwner.service === service,
+                      activeScreen == destination.screen,
+                      detailsDidDisappearGeneration == detailsGeneration else { return }
+                rememberPartyDetailsOrigin(destination, media: media, service: service)
                 creatingParty = false
                 choosingPartySource = false
                 partyLaunchTask = nil
@@ -1734,12 +1759,50 @@ struct ContentView: View {
                 activeScreen = .main
             } catch {
                 guard !Task.isCancelled, partyLaunchID == mark,
-                      watchPartyOwner.service === service else { return }
+                      watchPartyOwner.service === service,
+                      activeScreen == destination.screen,
+                      detailsDidDisappearGeneration == detailsGeneration else { return }
+                rememberPartyDetailsOrigin(destination, media: media, service: service)
                 watchPartyOwner.message = "Watch Party could not create the room. Check the room status before retrying."
                 partyLaunchTask = nil
                 selectedTab = .party
                 activeScreen = .main
             }
+        }
+    }
+
+    private func rememberPartyDetailsOrigin(_ destination: PartyDetailsDestination,
+                                            media: WatchPartyMedia, service: WatchPartyService) {
+        guard watchPartyOwner.service === service,
+              let context = service.session?.playbackContext,
+              service.isCurrent(context.request), context.mediaKey == media.key else { return }
+        partyDetailsOrigin = PartyDetailsOrigin(context: context, media: media, destination: destination)
+    }
+
+    private var partyDetailsBackdrop: WatchPartyMedia? {
+        guard let origin = partyDetailsOrigin, let service = watchPartyOwner.service,
+              service.isCurrent(origin.context.request),
+              let current = service.session?.playbackContext,
+              WatchPartyDetailsPresentationPolicy.sameMembership(origin.context, current) else { return nil }
+        return origin.media
+    }
+
+    private func didExitWatchPartyRoom(_ context: WatchPartyPlaybackContext) {
+        guard let origin = partyDetailsOrigin,
+              WatchPartyDetailsPresentationPolicy.sameMembership(origin.context, context) else { return }
+        partyDetailsOrigin = nil
+        guard let service = watchPartyOwner.service, service.isCurrent(context.request),
+              service.session?.party == nil, activeScreen == .main, selectedTab == .party else { return }
+        creatingParty = false; choosingPartySource = false
+        pendingDetailsPlaybackRequestID = nil
+        reopenStreamPickerOnDetails = false
+        reopenStreamPickerEpisode = nil
+        detailsBackStack = origin.destination.backStack
+        detailsReturnDestination = origin.destination.returnDestination
+        detailsCollectionContext = origin.destination.collectionContext
+        selectedTab = origin.destination.tab
+        withAnimation(.easeInOut(duration: 0.24)) {
+            activeScreen = origin.destination.screen
         }
     }
 
@@ -2218,7 +2281,10 @@ struct ContentView: View {
             authManager: authManager,
             syncManager: syncManager,
             watchPartyOwner: watchPartyOwner,
+            partyDetailsMedia: partyDetailsBackdrop,
+            onPartyRoomExited: didExitWatchPartyRoom,
             onCreateParty: {
+                partyDetailsOrigin = nil
                 creatingParty = true; choosingPartySource = false
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
@@ -3540,6 +3606,8 @@ private struct TVMainTabView: View {
     let authManager: AuthManager
     let syncManager: NuvioSyncManager
     @ObservedObject var watchPartyOwner: WatchPartyAppOwner
+    var partyDetailsMedia: WatchPartyMedia? = nil
+    var onPartyRoomExited: (WatchPartyPlaybackContext) -> Void = { _ in }
     let onCreateParty: () -> Void
     let onChoosePartySource: (WatchPartyMedia) -> Void
     let partyIsChoosing: Bool
@@ -3805,7 +3873,8 @@ private struct TVMainTabView: View {
                 canUseAccount: isAuthenticated && !sessionNeedsReauthentication && activeProfile != nil,
                 isChoosing: partyIsChoosing, onCreate: onCreateParty,
                 onChooseSource: onChoosePartySource, onCancelSelection: onCancelPartySelection,
-                onOpenProfile: onSwitchProfile)
+                onOpenProfile: onSwitchProfile,
+                detailsMedia: partyDetailsMedia, onRoomExited: onPartyRoomExited)
         } else {
             Text("Sign in and choose a profile to use Watch Party.")
         }

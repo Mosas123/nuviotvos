@@ -12,6 +12,8 @@ struct WatchPartyLobbyView: View {
     let onChooseSource: (WatchPartyMedia) -> Void
     let onCancelSelection: () -> Void
     let onOpenProfile: () -> Void
+    var detailsMedia: WatchPartyMedia? = nil
+    var onRoomExited: (WatchPartyPlaybackContext) -> Void = { _ in }
 
     @State private var code = ""
     @State private var roomCodeIsEditing = false
@@ -59,7 +61,7 @@ struct WatchPartyLobbyView: View {
         }
         .background {
             if canUseAccount, let media = service.session?.party?.media {
-                roomBackdrop(media)
+                roomBackdrop(WatchPartyDetailsPresentationPolicy.artwork(for: media, fallback: detailsMedia))
             } else {
                 Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
             }
@@ -158,9 +160,7 @@ struct WatchPartyLobbyView: View {
         }
         .confirmationDialog("End this room for everyone?", isPresented: $endingRoom) {
             Button("End room", role: .destructive) {
-                onCancelSelection()
-                owner.finishPlayback()
-                run { try await service.leave(endForEveryone: true) }
+                leaveRoom(endForEveryone: true)
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -541,7 +541,7 @@ struct WatchPartyLobbyView: View {
 
     private func roomSummaryCard(_ room: WatchPartySession, party: WatchPartyInfo) -> some View {
         VStack(alignment: .leading, spacing: 24) {
-            roomMediaLogo(party.media)
+            roomMediaLogo(WatchPartyDetailsPresentationPolicy.artwork(for: party.media, fallback: detailsMedia))
 
             if let episode = episodeDescription(party.media) {
                 Text(episode)
@@ -814,9 +814,7 @@ struct WatchPartyLobbyView: View {
                 }
 
                 Button {
-                    onCancelSelection()
-                    owner.finishPlayback()
-                    run { try await service.leave() }
+                    leaveRoom()
                 } label: {
                     secondaryActionLabel(
                         symbol: "rectangle.portrait.and.arrow.right",
@@ -1163,6 +1161,19 @@ struct WatchPartyLobbyView: View {
         case .signInRequired: return "Sign in again to use Watch Party."
         case .unavailable: return "Watch Party is unavailable on this server."
         case .network, .none: return "The room request failed. Check your connection and room status before trying again."
+        }
+    }
+
+    private func leaveRoom(endForEveryone: Bool = false) {
+        guard !service.busy, operation == nil,
+              let context = service.session?.playbackContext else { return }
+        onCancelSelection()
+        owner.finishPlayback()
+        run {
+            try await service.leave(endForEveryone: endForEveryone)
+            guard !Task.isCancelled, service.isCurrent(context.request),
+                  service.session?.party == nil else { return }
+            onRoomExited(context)
         }
     }
 
