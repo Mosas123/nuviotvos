@@ -1217,8 +1217,9 @@ class PlayerViewModel: ObservableObject {
         if name.hasPrefix("now:") || name.hasPrefix("live:") || name.hasPrefix("[live]") || name.hasPrefix("(live)") {
             return true
         }
-        if let urlString = url?.absoluteString.lowercased() {
-            if urlString.contains("/live/") || urlString.contains("/iptv/") || urlString.contains("live.m3u8") {
+        // Only the resource path is a live hint. Hostnames, tokens and fragments are not.
+        if let path = url?.path.lowercased() {
+            if path.contains("/live/") || path.contains("/iptv/") || path.contains("live.m3u8") {
                 return true
             }
         }
@@ -2785,21 +2786,17 @@ class PlayerViewModel: ObservableObject {
         let rawDuration = Double(c.durationMs) / 1000.0
         let latestTime = PlayerTime(current: rawCurrent, duration: rawDuration)
 
-        // Dynamically detect live streams (streams without finite duration when active frames are decoding).
-        if !isLiveStream,
-           c.isPlayerPlaying,
-           !c.isPlayerLoading,
-           !c.isPlayerEnded,
-           !isAwaitingStreamStart,
-           c.durationMs <= 0,
-           time.duration <= 0 {
-            isLiveStream = true
-        } else if isLiveStream,
-                  let activeMeta,
-                  !Self.isLiveStream(meta: activeMeta, url: activeStreamURL.flatMap(URL.init(string:))),
-                  c.durationMs > 0,
-                  c.hasCoherentTimeSample {
-            isLiveStream = false
+        // An unavailable duration is unknown, not evidence of a live stream.
+        // Keep recognized channel/source hints, including a URL resolved after load.
+        if let activeMeta {
+            let sourceIsLive = Self.isLiveStream(
+                meta: activeMeta, url: activeStreamURL.flatMap(URL.init(string:))
+            )
+            if sourceIsLive {
+                if !isLiveStream { isLiveStream = true }
+            } else if isLiveStream, c.durationMs > 0, c.hasCoherentTimeSample {
+                isLiveStream = false
+            }
         }
 
         let isPreSeekSettlingSample: Bool = {

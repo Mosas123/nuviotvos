@@ -120,7 +120,8 @@ final class ActionPlaybackSessionTests: XCTestCase {
     }
 
     @MainActor
-    private func makeModel(isAction: Bool = true) -> PlayerViewModel {
+    private func makeModel(isAction: Bool = true, playbackMeta: NuvioMeta? = nil,
+                           playbackURL: URL? = nil, resumeFrom: Double? = 600) -> PlayerViewModel {
         let coordinator = PlaybackSessionCoordinator(
             engineSettingProvider: { "MPVKit" },
             loadDispatcher: { _, _, _ in }
@@ -131,13 +132,13 @@ final class ActionPlaybackSessionTests: XCTestCase {
             return nil
         }
         model.load(
-            url: URL(fileURLWithPath: "/tmp/action-confirmation.mp4"),
-            meta: meta,
+            url: playbackURL ?? URL(fileURLWithPath: "/tmp/action-confirmation.mp4"),
+            meta: playbackMeta ?? meta,
             subtitle: "S1 · E1 · One",
-            resumeFrom: 600,
+            resumeFrom: resumeFrom,
             playbackOrigin: .details,
             sourceID: "action-source",
-            currentEpisode: episode,
+            currentEpisode: (playbackMeta ?? meta).isSeries ? episode : nil,
             isActionPlaybackSession: isAction
         )
         return model
@@ -161,6 +162,105 @@ final class ActionPlaybackSessionTests: XCTestCase {
         XCTAssertFalse(WatchedStore.contains(meta: meta), file: file, line: line)
         XCTAssertFalse(WatchedStore.containsEpisode(meta: meta, season: 1, episode: 1), file: file, line: line)
         XCTAssertEqual(LastPlaybackStreamStore.load(metaId: meta.id, season: 1, episode: 1)?.url, savedURL, file: file, line: line)
+    }
+
+    @MainActor
+    func testMovieDurationRemainsUnknownUntilFiniteInsteadOfBecomingLive() {
+        let movie = NuvioMeta(id: "tt-vod-duration", name: "Movie", type: "movie")
+        let model = makeModel(playbackMeta: movie, resumeFrom: nil)
+        defer { model.shutdown() }
+        let engine = sample(duration: 0, position: 1_000)
+        engine.hasCoherentTimeSample = false
+
+        for _ in 0..<6 { model.pollForTesting(using: engine) }
+        XCTAssertTrue(model.hasRenderedFirstFrame)
+        XCTAssertEqual(model.status, .playing)
+        XCTAssertFalse(model.isLiveStream, "Playing frames with unknown duration do not prove that a movie is live")
+        XCTAssertEqual(model.time.duration, 0)
+
+        engine.durationMs = 3_600_000
+        engine.positionMs = 5_000
+        engine.hasCoherentTimeSample = true
+        for _ in 0..<2 { model.pollForTesting(using: engine) }
+        XCTAssertFalse(model.isLiveStream)
+        XCTAssertEqual(model.time.duration, 3_600)
+    }
+
+    @MainActor
+    func testRecognizedLiveChannelStaysLiveWithUnknownOrFiniteDuration() {
+        let channel = NuvioMeta(id: "channel:news", name: "News", type: "channel")
+        let model = makeModel(playbackMeta: channel, resumeFrom: nil)
+        defer { model.shutdown() }
+        let engine = sample(duration: 0, position: 1_000)
+        for _ in 0..<6 { model.pollForTesting(using: engine) }
+        XCTAssertTrue(model.isLiveStream)
+        engine.durationMs = 600_000
+        engine.positionMs = 5_000
+        for _ in 0..<2 { model.pollForTesting(using: engine) }
+        XCTAssertTrue(model.isLiveStream, "A positive duration must not override an explicit channel identity")
+    }
+
+    @MainActor
+    func testMovieURLHostQueryAndFragmentDoNotActAsLiveResourceHints() throws {
+        let movie = NuvioMeta(id: "tt-vod-url", name: "Movie", type: "movie")
+        for value in [
+            "https://live.m3u8.example.test/vod/movie.mp4",
+            "https://video.example.test/vod/movie.mp4?label=/live/",
+            "https://video.example.test/vod/movie.mp4#live.m3u8"
+        ] {
+            let model = makeModel(playbackMeta: movie,
+                                  playbackURL: try XCTUnwrap(URL(string: value)), resumeFrom: nil)
+            defer { model.shutdown() }
+            XCTAssertFalse(model.isLiveStream, "Only the resource path may supply a URL hint")
+            let engine = sample(duration: 0, position: 1_000)
+            for _ in 0..<6 { model.pollForTesting(using: engine) }
+            XCTAssertFalse(model.isLiveStream, "Polling must not promote this source merely because duration is unknown")
+        }
+    }
+
+    @MainActor
+    func testLiveResourcePathsRemainRecognizedForMovieTypedAddons() throws {
+        let movieTypedChannel = NuvioMeta(id: "addon-news", name: "News", type: "movie")
+        for value in [
+            "https://video.example.test/live/news.m3u8",
+            "https://video.example.test/iptv/news.m3u8",
+            "https://video.example.test/news/live.m3u8"
+        ] {
+            let model = makeModel(playbackMeta: movieTypedChannel,
+                                  playbackURL: try XCTUnwrap(URL(string: value)), resumeFrom: nil)
+            defer { model.shutdown() }
+            XCTAssertTrue(model.isLiveStream, "Keep source-path hints for addons that use generic metadata types")
+        }
+    }
+
+    @MainActor
+    func testLiveIDAndNameHintsRemainRecognizedWithGenericMetadataTypes() {
+        for item in [
+            NuvioMeta(id: "iptv:news", name: "News", type: "movie"),
+            NuvioMeta(id: "addon-news", name: "[Live] News", type: "series")
+        ] {
+            let model = makeModel(playbackMeta: item, resumeFrom: nil)
+            defer { model.shutdown() }
+            XCTAssertTrue(model.isLiveStream)
+        }
+    }
+
+    @MainActor
+    func testKnownLiveHintWaitsForFiniteTimelineBeforeClearingAfterMetadataRefresh() {
+        let hinted = NuvioMeta(id: "addon-news", name: "[Live] News", type: "movie")
+        let model = makeModel(playbackMeta: hinted, resumeFrom: nil)
+        defer { model.shutdown() }
+        let engine = sample(duration: 0, position: 1_000)
+        for _ in 0..<6 { model.pollForTesting(using: engine) }
+        XCTAssertTrue(model.isLiveStream)
+
+        model.activeMeta = NuvioMeta(id: "addon-news", name: "News", type: "movie")
+        model.pollForTesting(using: engine)
+        XCTAssertTrue(model.isLiveStream, "Missing duration must not erase an already recognized live hint")
+        engine.durationMs = 600_000
+        engine.hasCoherentTimeSample = true
+        model.pollForTesting(using: engine)
+        XCTAssertFalse(model.isLiveStream, "A coherent finite timeline may resolve the removed hint")
     }
 
     @MainActor
