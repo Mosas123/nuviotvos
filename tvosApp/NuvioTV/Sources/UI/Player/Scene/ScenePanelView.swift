@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ScenePanelView: View {
     @ObservedObject var viewModel: SceneViewModel
+    var isAdvancing: Bool = false
     let onDismiss: () -> Void
     let onPlayNextEpisode: (() -> Void)?
     let watchPartyContent: ((FocusState<String?>.Binding, FocusState<SceneTab?>.Binding) -> AnyView)?
@@ -12,12 +13,14 @@ struct ScenePanelView: View {
     
     init(
         viewModel: SceneViewModel,
+        isAdvancing: Bool = false,
         onDismiss: @escaping () -> Void,
         onPlayNextEpisode: (() -> Void)? = nil,
         watchPartyContent: ((FocusState<String?>.Binding, FocusState<SceneTab?>.Binding) -> AnyView)? = nil,
         watchPartyFocusTarget: String = "party.start"
     ) {
         self.viewModel = viewModel
+        self.isAdvancing = isAdvancing
         self.onDismiss = onDismiss
         self.onPlayNextEpisode = onPlayNextEpisode
         self.watchPartyContent = watchPartyContent
@@ -338,7 +341,11 @@ struct ScenePanelView: View {
         
         VStack(alignment: .leading, spacing: 0) {
             if let next = viewModel.nextEpisode {
+                let isPlayable = EpisodeReleasePolicy.hasAired(next.released)
+                let airDateText = EpisodeReleasePolicy.airDateText(for: next.released).map { "Airs \($0)" } ?? "Upcoming"
+                
                 Button(action: {
+                    guard isPlayable else { return }
                     onPlayNextEpisode?()
                 }) {
                     HStack(spacing: 24) {
@@ -358,7 +365,7 @@ struct ScenePanelView: View {
                                 }
                             }
                             
-                            Image(systemName: "play.fill")
+                            Image(systemName: isPlayable ? "play.fill" : "calendar")
                                 .font(.system(size: 30))
                                 .foregroundColor(.white)
                                 .padding(16)
@@ -376,7 +383,11 @@ struct ScenePanelView: View {
                                 .foregroundColor(isNextFocused ? .black : .white)
                                 .lineLimit(1)
                             
-                            if let overview = next.overview, !overview.isEmpty {
+                            if !isPlayable {
+                                Text(airDateText)
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundColor(isNextFocused ? Color.black.opacity(0.7) : Color.white.opacity(0.7))
+                            } else if let overview = next.overview, !overview.isEmpty {
                                 Text(overview)
                                     .font(.system(size: 16, weight: .regular))
                                     .foregroundColor(isNextFocused ? Color.black.opacity(0.7) : Color.white.opacity(0.7))
@@ -384,17 +395,25 @@ struct ScenePanelView: View {
                             }
                             
                             HStack(spacing: 8) {
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 14))
-                                Text("Play Next Episode")
-                                    .font(.system(size: 16, weight: .semibold))
+                                if isAdvancing {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: isNextFocused && isPlayable ? .black : .white))
+                                        .scaleEffect(0.8)
+                                    Text(L10n.string("player_starting", fallback: "Starting…"))
+                                        .font(.system(size: 16, weight: .semibold))
+                                } else {
+                                    Image(systemName: isPlayable ? "play.fill" : "calendar")
+                                        .font(.system(size: 14))
+                                    Text(isPlayable ? L10n.string("tvos_play_next_episode", fallback: "Play Next Episode") : L10n.string("player_not_yet", fallback: "Not Yet"))
+                                        .font(.system(size: 16, weight: .semibold))
+                                }
                             }
-                            .foregroundColor(.white)
+                            .foregroundColor(isNextFocused && isPlayable ? .black : .white)
                             .padding(.horizontal, 18)
                             .padding(.vertical, 10)
                             .background(
                                 Capsule()
-                                    .fill(isNextFocused ? Color.black : Color.white.opacity(0.2))
+                                    .fill(isNextFocused && isPlayable ? Color.white : Color.white.opacity(0.2))
                             )
                             .padding(.top, 4)
                         }

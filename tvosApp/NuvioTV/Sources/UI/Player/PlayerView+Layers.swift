@@ -423,6 +423,7 @@ extension PlayerView {
         if viewModel.showScenePanel {
             ScenePanelView(
                 viewModel: viewModel.sceneViewModel,
+                isAdvancing: viewModel.isAdvancingEpisode,
                 onDismiss: {
                     withAnimation(.playerControls) {
                         viewModel.closeScene()
@@ -430,6 +431,7 @@ extension PlayerView {
                     }
                 },
                 onPlayNextEpisode: {
+                    guard !isWakingFromBackground else { return }
                     withAnimation(.playerControls) {
                         viewModel.closeScene()
                         viewModel.playNextEpisode()
