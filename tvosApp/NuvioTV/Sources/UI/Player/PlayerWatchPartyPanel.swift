@@ -434,9 +434,12 @@ struct PlayerWatchPartyPanel: View {
     }
 
     private func safeAvatarURL(_ rawValue: String?) -> URL? {
-        guard let rawValue, rawValue.count <= 512,
-              rawValue.hasPrefix(AuthConfig.currentConfiguration.normalizedBackendURL + "/storage/v1/object/public/avatars/"),
-              let url = URL(string: rawValue), url.scheme?.lowercased() == "https", url.host != nil else { return nil }
+        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              rawValue.count <= 2048,
+              let url = URL(string: rawValue),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              url.host != nil else { return nil }
         return url
     }
 
