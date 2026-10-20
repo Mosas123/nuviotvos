@@ -369,6 +369,8 @@ class PlayerViewModel: ObservableObject {
     private var didShutdown = false
     private(set) var watchPartyPlayerBridge: WatchPartyPlayerBridge?
     private var watchPartyAdmittedMedia: WatchPartyMedia?
+    // A received host link is scoped to this player, never a reusable own-source link.
+    private var usesWatchPartySharedSource = false
     private var watchPartyTransportIntentRevision: UInt64 = 0
     private var watchPartyLifecycle = PlayerLifecycleAdmission()
     private var watchPartyControls: WatchPartyControlRouter?
@@ -6471,6 +6473,8 @@ class PlayerViewModel: ObservableObject {
         saveProgress(force: false, isPeriodicHeartbeat: true)
     }
 
+    func markWatchPartySharedSource() { usesWatchPartySharedSource = true }
+
     func saveProgress(
         force: Bool,
         eventAction: TraktScrobbleAction? = nil,
@@ -6565,7 +6569,7 @@ class PlayerViewModel: ObservableObject {
         let episode = resolvedEpisodeNumbers?.episode
         let completesPlayback = shouldMarkAsWatched(at: progressTime)
         print("[ContinueWatching][Player] completesPlayback=\(completesPlayback) (ep=\(epString))")
-        if !completesPlayback {
+        if !completesPlayback && !usesWatchPartySharedSource {
             LastPlaybackStreamStore.save(
                 metaId: activeMeta.id,
                 url: activeStreamURL,
@@ -6574,7 +6578,7 @@ class PlayerViewModel: ObservableObject {
                 episode: episode,
                 profileId: WatchedStore.activeProfileId
             )
-        } else {
+        } else if completesPlayback {
             LastPlaybackStreamStore.remove(
                 metaId: activeMeta.id,
                 season: season,

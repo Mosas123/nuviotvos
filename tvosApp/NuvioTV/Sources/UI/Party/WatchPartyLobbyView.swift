@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// Private rooms; every participant explicitly selects their own compatible source.
-/// Received shared-stream links are deliberately not resolved or played by this MVP.
+/// Private rooms; playback starts only after an explicit local source selection.
 @MainActor
 struct WatchPartyLobbyView: View {
     @ObservedObject var owner: WatchPartyAppOwner
     @ObservedObject var service: WatchPartyService
+    var onChooseSharedSource: (WatchPartyStream) -> Void = { _ in }
     let canUseAccount: Bool
     let isChoosing: Bool
     let onCreate: () -> Void
@@ -203,7 +203,7 @@ struct WatchPartyLobbyView: View {
                     .font(.system(size: 46, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
 
-                Text("Watch together in a private room. Everyone chooses their own source.")
+                Text("Watch together in a private room. Choose your own source or a compatible link shared by the host.")
                     .font(.system(size: 22, weight: .regular))
                     .foregroundStyle(.white.opacity(0.72))
                     .fixedSize(horizontal: false, vertical: true)
@@ -739,6 +739,22 @@ struct WatchPartyLobbyView: View {
                 statusRow(symbol: "antenna.radiowaves.left.and.right",
                           title: notice, tint: .white)
             }
+            if isGuest, let stream = room.sharedStream, stream.mediaKey == party.media.key,
+               !needsMediaReview, room.connection == .ready, room.membershipExit == nil {
+                Button {
+                    onChooseSharedSource(stream)
+                } label: {
+                    secondaryActionLabel(
+                        symbol: "play.fill",
+                        title: "Use host's source · BETA",
+                        isFocused: focusedAction == "use-host-source"
+                    )
+                }
+                .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
+                .focused($focusedAction, equals: "use-host-source")
+                .disabled(service.busy || operation != nil || isChoosing)
+            }
             if isGuest, room.sharedStream == nil, !needsMediaReview,
                room.connection == .ready, room.membershipExit == nil {
                 Button {
@@ -966,7 +982,7 @@ struct WatchPartyLobbyView: View {
     private var footerNote: some View {
         HStack(spacing: 10) {
             Image(systemName: "info.circle")
-            Text("This first version doesn't include episode changes, autoplay, or shared links.")
+            Text("Episode changes and autoplay aren't included. Shared links depend on provider compatibility and aren't stored with the room.")
         }
         .font(.system(size: 16, weight: .medium))
         .foregroundStyle(.white.opacity(0.5))
@@ -1229,7 +1245,7 @@ private struct WatchPartyLobbyInvitation: View {
                         .font(.system(size: 37, weight: .bold, design: .monospaced))
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
-                    Text("Or enter this code in Watch Party. Each guest chooses their own source.")
+                    Text("Or enter this code in Watch Party. Each guest selects a source before playback.")
                         .font(.system(size: 18))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
