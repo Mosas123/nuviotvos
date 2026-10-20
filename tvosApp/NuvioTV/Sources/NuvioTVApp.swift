@@ -362,6 +362,7 @@ struct ContentView: View {
     /// Series context for the current playback, captured at play time so the
     /// player can offer/auto-play the next episode. Empty for movies/trailers.
     @State private var playbackEpisodes: [NuvioVideo] = []
+    @State private var partySourceNavigationRevision: UInt = 0
     @State private var playbackCurrentEpisode: NuvioVideo?
     @State private var playbackIsActionPlaybackSession = false
     @State private var playbackOrigin: PlaybackOrigin = .main
@@ -548,6 +549,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: selectedTab) { _, tab in
+            partySourceNavigationRevision &+= 1
             if isPreparingProfile, tab != .home {
                 liftProfileGate(generation: profileGateGeneration)
             }
@@ -1866,6 +1868,70 @@ struct ContentView: View {
         }
     }
 
+    private func chooseWatchPartySharedSource(_ stream: WatchPartyStream) {
+        guard WatchPartyConfiguration.isEnabled, activeScreen == .main, selectedTab == .party,
+              partyLaunchTask == nil, let service = watchPartyOwner.service,
+              !service.busy, let room = service.session,
+              let context = room.playbackContext, let media = room.party?.media,
+              let memberID = room.memberID, let hostID = room.party?.hostMemberID,
+              memberID != hostID, service.isCurrent(context.request) else { return }
+        let selection: WatchPartySharedStreamSelection
+        do { selection = try room.selectSharedStream(stream) }
+        catch {
+            watchPartyOwner.message = "The shared source changed or is unavailable. Ask the host to share again, or choose your own source."
+            return
+        }
+        watchPartyOwner.message = nil
+        let mark = UUID()
+        let navigationRevision = partySourceNavigationRevision
+        partyLaunchID = mark
+        partyLaunchTask = Task { @MainActor in
+            defer { if partyLaunchID == mark { partyLaunchTask = nil } }
+            // Revalidate the accepted membership and exact source revision after metadata loading.
+            // There is no source-URL probe, automatic playback, resend or persistence here.
+            let isCurrent = {
+                !Task.isCancelled && partyLaunchID == mark && activeScreen == .main
+                    && partySourceNavigationRevision == navigationRevision
+                    && selectedTab == .party && watchPartyOwner.service === service
+                    && service.session === room && service.isCurrent(context.request)
+                    && room.playbackContext == context
+                    && room.isCurrentSharedStreamSelection(selection)
+            }
+            do {
+                let target = try await WatchPartySharedPlaybackResolver.resolve(
+                    stream: selection.candidate.metadata, room: media, isCurrent: isCurrent,
+                    loadMetadata: { id, type in
+                        try await CinemetaCatalogRepository().getMetadata(id: id, type: type)
+                    }
+                )
+                guard isCurrent() else { return }
+                let presentation = try watchPartyOwner.preparePlayback(media: media)
+                presentation.mount.viewModel.markWatchPartySharedSource()
+                creatingParty = false; choosingPartySource = false
+                playbackIsActionPlaybackSession = false
+                playbackEpisodes = []; playbackCurrentEpisode = target.episode
+                reopenStreamPickerOnDetails = false; reopenStreamPickerEpisode = nil
+                pendingDetailsPlaybackRequestID = nil
+                let subtitle = target.episode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? ""
+                presentBuiltInPlayer(
+                    url: target.url, meta: target.meta, subtitle: subtitle,
+                    httpHeaders: target.stream.headers, externalSubtitles: [], resumeFrom: nil,
+                    origin: .main, filename: target.stream.filename, videoSize: target.stream.videoSize,
+                    party: presentation
+                )
+            } catch {
+                guard isCurrent() else { return }
+                if error as? WatchPartySharedPlaybackError == .unsupportedResponseHeaders {
+                    watchPartyOwner.message = "This shared source needs unsupported response headers. Choose your own source."
+                } else if error as? WatchPartySharedPlaybackError == .missingEpisode {
+                    watchPartyOwner.message = "The room's exact episode is unavailable in your catalog. Choose your own source."
+                } else {
+                    watchPartyOwner.message = "The shared source could not be prepared for this title or episode. Ask the host to share again, or choose your own source."
+                }
+            }
+        }
+    }
+
     private func presentBuiltInPlayer(
         url: URL,
         meta: NuvioMeta,
@@ -2250,6 +2316,7 @@ struct ContentView: View {
                 }
                 openDetailsRoot(id: media.metaID, type: media.metaType)
             },
+            onChoosePartySharedSource: chooseWatchPartySharedSource,
             partyIsChoosing: creatingParty || choosingPartySource,
             onCancelPartySelection: {
                 creatingParty = false; choosingPartySource = false
@@ -3542,6 +3609,7 @@ private struct TVMainTabView: View {
     @ObservedObject var watchPartyOwner: WatchPartyAppOwner
     let onCreateParty: () -> Void
     let onChoosePartySource: (WatchPartyMedia) -> Void
+    var onChoosePartySharedSource: (WatchPartyStream) -> Void = { _ in }
     let partyIsChoosing: Bool
     let onCancelPartySelection: () -> Void
     let onSwitchProfile: () -> Void
@@ -3802,6 +3870,7 @@ private struct TVMainTabView: View {
     private var partyTabContent: some View {
         if let service = watchPartyOwner.service {
             WatchPartyLobbyView(owner: watchPartyOwner, service: service,
+                onChooseSharedSource: onChoosePartySharedSource,
                 canUseAccount: isAuthenticated && !sessionNeedsReauthentication && activeProfile != nil,
                 isChoosing: partyIsChoosing, onCreate: onCreateParty,
                 onChooseSource: onChoosePartySource, onCancelSelection: onCancelPartySelection,

@@ -62,7 +62,7 @@ final class WatchPartyAppOwner: ObservableObject {
     /// Explicit privacy gate (e.g. who's-watching on return) may revoke the same profile, too.
     func invalidateContext() { service?.invalidateContext() }
 
-    /// Only after an explicit, own-source choice for this exact accepted room/media.
+    /// Only after an explicit local source choice for this exact accepted room/media.
     func preparePlayback(media: WatchPartyMedia) throws -> Presentation {
         guard let service, let room = service.session, room.connection == .ready,
               let context = room.playbackContext, context.mediaKey == media.key,
