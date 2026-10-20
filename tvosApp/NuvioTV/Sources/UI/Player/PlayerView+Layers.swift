@@ -270,20 +270,75 @@ extension PlayerView {
     @ViewBuilder
     var playerToastLayer: some View {
         if let toast = viewModel.playerToast {
+            let hasAvatar = toast.avatarURL != nil || toast.initials != nil
             VStack {
-                Text(toast)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 14)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.top, 48)
+                HStack(spacing: 12) {
+                    if hasAvatar {
+                        toastAvatar(toast)
+                    }
+                    Text(toast.message)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+                .padding(.leading, hasAvatar ? 12 : 28)
+                .padding(.trailing, 28)
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
+                .padding(.top, 48)
                 Spacer()
             }
             .transition(.opacity)
             .allowsHitTesting(false)
             .zIndex(6)
         }
+    }
+
+    @ViewBuilder
+    private func toastAvatar(_ toast: PlayerToastItem) -> some View {
+        let size: CGFloat = 34
+        if let rawURL = toast.avatarURL,
+           let url = URL(string: rawURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+           url.scheme?.lowercased() == "https", url.host != nil {
+            AsyncImage(url: url) { phase in
+                if case .success(let image) = phase {
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    toastFallbackAvatar(toast, size: size)
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(Circle())
+            .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 1))
+        } else {
+            toastFallbackAvatar(toast, size: size)
+        }
+    }
+
+    private func toastFallbackAvatar(_ toast: PlayerToastItem, size: CGFloat) -> some View {
+        let bg = toastAvatarColor(toast.avatarColor)
+        let initial = toast.initials?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Text(initial?.isEmpty == false ? String(initial!.prefix(1)) : "?")
+            .font(.system(size: size * 0.45, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(bg, in: Circle())
+            .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 1))
+    }
+
+    private func toastAvatarColor(_ value: String?) -> Color {
+        guard let value,
+              value.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil,
+              let hex = UInt64(String(value.dropFirst()), radix: 16) else {
+            return Color(red: 0.18, green: 0.34, blue: 0.54)
+        }
+        return Color(
+            red: Double((hex >> 16) & 0xff) / 255,
+            green: Double((hex >> 8) & 0xff) / 255,
+            blue: Double(hex & 0xff) / 255
+        )
     }
 
     @ViewBuilder

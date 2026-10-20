@@ -114,6 +114,13 @@ struct WatchPartyMember: Codable, Equatable, Sendable {
     }
 }
 
+struct WatchPartyNotice: Equatable, Sendable {
+    var message: String
+    var avatarURL: String? = nil
+    var avatarColor: String? = nil
+    var initials: String? = nil
+}
+
 enum WatchPartyMemberStatus: String, Codable, Sendable {
     case browsing, loading, buffering, ready, behind
 }

@@ -18,8 +18,15 @@ protocol WatchPartyPlaybackRoom: AnyObject {
     func nowMs() -> Int64
     func observeChanges(_ callback: @escaping @MainActor () -> Void) -> UUID
     func removeChangeObserver(_ id: UUID)
+    func observeNotices(_ callback: @escaping @MainActor (WatchPartyNotice) -> Void) -> UUID
+    func removeNoticeObserver(_ id: UUID)
     func publish(paused: Bool, positionMs: Int64, rate: Float, waiting: Bool) async throws
     func setPresence(status: WatchPartyMemberStatus, mediaKey: String?, behindMs: Int64?) async throws
+}
+
+extension WatchPartyPlaybackRoom {
+    func observeNotices(_ callback: @escaping @MainActor (WatchPartyNotice) -> Void) -> UUID { UUID() }
+    func removeNoticeObserver(_ id: UUID) {}
 }
 
 extension WatchPartySession: WatchPartyPlaybackRoom {
@@ -43,6 +50,7 @@ enum WatchPartyPlaybackBindingError: Error, Equatable {
 final class WatchPartyPlaybackBinding {
     var onError: (@MainActor (Error) -> Void)?
     var onNeedsMedia: (@MainActor (String) -> Void)?
+    var onNotice: (@MainActor (WatchPartyNotice) -> Void)?
     private(set) var isBehind = false
     private(set) var behindMs: Int64?
 
@@ -55,6 +63,7 @@ final class WatchPartyPlaybackBinding {
     private let mediaKey: String
     private var state: WatchPartyBindingRoomState
     private var observerID: UUID?
+    private var noticeObserverID: UUID?
     private var stopped = false
     private var suspended = false
     private var revision = UUID()
@@ -105,6 +114,7 @@ final class WatchPartyPlaybackBinding {
         self.state = state
         roomID = state.roomID; memberID = state.memberID; mediaKey = state.mediaKey
         observerID = room.observeChanges { [weak self] in self?.roomChanged() }
+        noticeObserverID = room.observeNotices { [weak self] in self?.onNotice?($0) }
         bridge.onSample = { [weak self] in self?.observed($0) }
         if let sample = bridge.sample { observed(sample) }
     }
@@ -123,6 +133,8 @@ final class WatchPartyPlaybackBinding {
         revision = UUID()
         if let observerID { room.removeChangeObserver(observerID) }
         observerID = nil
+        if let noticeObserverID { room.removeNoticeObserver(noticeObserverID) }
+        noticeObserverID = nil
         worker?.cancel(); worker = nil
         presenceWorker?.cancel(); presenceWorker = nil
         bridge.stop()

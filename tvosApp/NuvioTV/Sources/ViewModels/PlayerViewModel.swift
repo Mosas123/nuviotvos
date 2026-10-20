@@ -118,6 +118,24 @@ final class PlaybackClock: ObservableObject {
     @Published var wheelAngle: Double = 0
 }
 
+struct PlayerToastItem: Equatable, Sendable, ExpressibleByStringLiteral {
+    var message: String
+    var avatarURL: String? = nil
+    var avatarColor: String? = nil
+    var initials: String? = nil
+
+    init(message: String, avatarURL: String? = nil, avatarColor: String? = nil, initials: String? = nil) {
+        self.message = message
+        self.avatarURL = avatarURL
+        self.avatarColor = avatarColor
+        self.initials = initials
+    }
+
+    init(stringLiteral value: String) {
+        self.init(message: value)
+    }
+}
+
 // MARK: - PlayerViewModel (Aether + MPV)
 //
 // Default backend is AetherEngine (hardware or software decode). MPVKit is the
@@ -558,7 +576,7 @@ class PlayerViewModel: ObservableObject {
     /// Current step-by-step loading progress message shown in the loading overlay.
     @Published private(set) var loadingStepMessage: String = L10n.string("player_loading_preparing", fallback: "Preparing stream…")
     /// Brief on-screen notice ("Source failed — trying another").
-    @Published var playerToast: String?
+    @Published var playerToast: PlayerToastItem?
     /// URLs that failed to load/play this session (watchdog, mpv error, slate).
     private var failedStreamURLs: Set<String> = []
     private var currentLoadStarted = false
@@ -2443,16 +2461,31 @@ class PlayerViewModel: ObservableObject {
         }
     }
 
-    private func showPlayerToast(_ message: String) {
-        playerToast = message
+    func showPlayerToast(
+        _ message: String,
+        avatarURL: String? = nil,
+        avatarColor: String? = nil,
+        initials: String? = nil
+    ) {
+        let item = PlayerToastItem(message: message, avatarURL: avatarURL, avatarColor: avatarColor, initials: initials)
+        playerToast = item
         toastClearTask?.cancel()
         toastClearTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_800_000_000)
             guard !Task.isCancelled, let self else { return }
-            if self.playerToast == message {
+            if self.playerToast == item {
                 self.playerToast = nil
             }
         }
+    }
+
+    func showPlayerToast(_ notice: WatchPartyNotice) {
+        showPlayerToast(
+            notice.message,
+            avatarURL: notice.avatarURL,
+            avatarColor: notice.avatarColor,
+            initials: notice.initials
+        )
     }
 
     static func shouldShowAISubtitleOutcome(subtitle: String, isLiveStream: Bool) -> Bool {
@@ -3606,6 +3639,9 @@ class PlayerViewModel: ObservableObject {
                                   isCurrent: @escaping @MainActor () -> Bool) throws {
         guard watchPartyPlayerBridge != nil, watchPartyControls == nil else {
             throw WatchPartyPlaybackBindingError.alreadyBound
+        }
+        binding.onNotice = { [weak self] notice in
+            self?.showPlayerToast(notice)
         }
         watchPartyControls = WatchPartyControlRouter(isCurrent: isCurrent,
             currentStamp: { [weak self] in self?.watchPartyPlayerStamp() },

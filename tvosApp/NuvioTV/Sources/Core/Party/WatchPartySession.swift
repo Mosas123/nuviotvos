@@ -91,6 +91,7 @@ final class WatchPartySession {
     private var persistenceDeadline: TimeInterval?
     private var localPresence: WatchPartyPresence?
     private var changeObservers: [UUID: @MainActor () -> Void] = [:]
+    private var noticeObservers: [UUID: @MainActor (WatchPartyNotice) -> Void] = [:]
     private var streamConsentNonce: UUID?
     private var sharedStreamRevision = UUID()
     // Android-compatible manual state_request; not durable room storage.
@@ -128,6 +129,42 @@ final class WatchPartySession {
     }
 
     func removeChangeObserver(_ id: UUID) { changeObservers.removeValue(forKey: id) }
+
+    @discardableResult
+    func observeNotices(_ callback: @escaping @MainActor (WatchPartyNotice) -> Void) -> UUID {
+        let id = UUID()
+        noticeObservers[id] = callback
+        return id
+    }
+
+    func removeNoticeObserver(_ id: UUID) { noticeObservers.removeValue(forKey: id) }
+
+    private func notifyNotice(_ message: String, member: WatchPartyMember? = nil) {
+        let initials = member.flatMap {
+            let trimmed = $0.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : String(trimmed.prefix(1)).uppercased()
+        }
+        let notice = WatchPartyNotice(
+            message: message,
+            avatarURL: member?.avatarURL,
+            avatarColor: member?.avatarColor,
+            initials: initials
+        )
+        let callbacks = noticeObservers
+        for (id, callback) in callbacks where noticeObservers[id] != nil { callback(notice) }
+    }
+
+    static func formatNoticeTime(millis: Int64) -> String {
+        let totalSeconds = max(0, millis / 1000)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        } else {
+            return String(format: "%d:%02d", minutes, seconds)
+        }
+    }
 
     private func notifyChange() {
         let callbacks = changeObservers
@@ -692,9 +729,26 @@ final class WatchPartySession {
         }
         waitingCoordinator.accepted(previous: playback, next: value, mediaKey: party.media.key,
                                     presence: presence, uptime: clock.mark())
+        let previous = playback
         playback = value
         if remoteTransition {
             PlaybackTimelineRecorder.record(value.paused ? .partyPauseAccepted : .partyPlayAccepted)
+        }
+        if let action = WatchPartyPolicy.action(previous: previous, next: value),
+           let senderID = value.memberID ?? (party.hostOnly ? party.hostMemberID : nil),
+           senderID != memberID {
+            let member = members.first(where: { $0.id == senderID })
+            let name = member?.displayName ?? "Someone"
+            switch action {
+            case .paused:
+                notifyNotice("\(name) paused", member: member)
+            case .resumed:
+                notifyNotice("\(name) resumed", member: member)
+            case .seeked:
+                notifyNotice("\(name) skipped to \(Self.formatNoticeTime(millis: value.positionMs))", member: member)
+            case .speed:
+                break
+            }
         }
         notifyChange()
     }
@@ -719,6 +773,12 @@ final class WatchPartySession {
               snapshot.members.contains(where: { $0.id == memberID }) else { throw WatchPartySessionError.invalidSnapshot }
         let mediaChanged = info.media.key != party?.media.key
         if mediaChanged || info.hostMemberID != party?.hostMemberID { clearSharedStream() }
+        if !members.isEmpty {
+            let newMembers = snapshot.members.filter { sm in !self.members.contains { $0.id == sm.id } }
+            for newMember in newMembers where newMember.id != memberID {
+                notifyNotice("\(newMember.displayName) joined the watch party", member: newMember)
+            }
+        }
         party = info; members = snapshot.members
         presence = presence.filter { key, _ in members.contains { $0.id == key } }
         waitingCoordinator.retainMembers(Set(members.map(\.id)))
@@ -786,14 +846,21 @@ final class WatchPartySession {
                 }
             case "ended":
                 let reason = try? JSONDecoder().decode(DeparturePayload.self, from: data)
+                notifyNotice("The watch party has ended", member: nil)
                 if reason?.reason == "disabled" { finishMembership(.unavailable, failure: .unavailable) }
                 else { finishMembership(.ended, failure: .ended) }
             case "member_left":
                 guard let departure = try? JSONDecoder().decode(DeparturePayload.self, from: data),
                       let departed = departure.memberID else { return }
                 if departed == memberID {
+                    notifyNotice("You were removed from the watch party", member: nil)
                     finishMembership(departure.reason == "removed" ? .removed : .membershipLost, failure: .removed)
-                } else { lost(epoch: epoch, attempt: attempt) }
+                } else {
+                    let member = members.first(where: { $0.id == departed })
+                    let name = member?.displayName ?? "Someone"
+                    notifyNotice("\(name) left the watch party", member: member)
+                    lost(epoch: epoch, attempt: attempt)
+                }
             case "control", "member_joined", "media":
                 // Treat server notifications as invalidations, not authoritative permission/media payloads.
                 // Reconcile once through RPC before reopening the send gate.

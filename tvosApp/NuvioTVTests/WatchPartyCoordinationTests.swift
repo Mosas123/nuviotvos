@@ -594,6 +594,40 @@ final class WatchPartyCoordinationTests: XCTestCase {
             rendered: old.rendered, failed: old.failed)
     }
 
+    func testRemotePlaybackAndMemberChangesEmitNotices() async throws {
+        let remote = Remote(), channel = Channel()
+        let session = makeSession(remote, channel: channel, uptime: { 0 },
+                                  sleep: { _ in try await Task.sleep(nanoseconds: 3_600_000_000_000) })
+        defer { session.stop() }
+        var notices: [WatchPartyNotice] = []
+        let observerID = session.observeNotices { notices.append($0) }
+        defer { session.removeNoticeObserver(observerID) }
+
+        try await session.start(snapshot: remote.snapshot)
+        XCTAssertEqual(notices, [], "Initial snapshot should not emit notices")
+
+        // Remote member pauses
+        channel.receive?(.message(name: "state", payload: Data(#"{"seq":2,"member_id":"other","paused":true,"position_ms":1000,"at":20000,"media_key":"movie|tt1||","waiting":false}"#.utf8)))
+        XCTAssertEqual(notices.last?.message, "Other paused")
+        XCTAssertEqual(notices.last?.avatarURL, "https://example.com/avatar.jpg")
+        XCTAssertEqual(notices.last?.avatarColor, "#FF5500")
+        XCTAssertEqual(notices.last?.initials, "O")
+
+        // Remote member resumes
+        channel.receive?(.message(name: "state", payload: Data(#"{"seq":3,"member_id":"other","paused":false,"position_ms":1000,"at":20000,"media_key":"movie|tt1||","waiting":false}"#.utf8)))
+        XCTAssertEqual(notices.last?.message, "Other resumed")
+        XCTAssertEqual(notices.last?.avatarURL, "https://example.com/avatar.jpg")
+        XCTAssertEqual(notices.last?.avatarColor, "#FF5500")
+        XCTAssertEqual(notices.last?.initials, "O")
+
+        // Remote member leaves
+        channel.receive?(.message(name: "member_left", payload: Data(#"{"member_id":"other","reason":"left"}"#.utf8)))
+        XCTAssertEqual(notices.last?.message, "Other left the watch party")
+        XCTAssertEqual(notices.last?.avatarURL, "https://example.com/avatar.jpg")
+        XCTAssertEqual(notices.last?.avatarColor, "#FF5500")
+        XCTAssertEqual(notices.last?.initials, "O")
+    }
+
     private func makePlaybackBinding(room: PlaybackRoom, positionMs: Int64,
                                      durationMs: Int64 = 100_000, seeking: Bool = false,
                                      sampleRate: Float = 1,
@@ -747,11 +781,15 @@ final class WatchPartyCoordinationTests: XCTestCase {
         var failClockCall: Int?
         var onClock: ((Int) -> Void)?
         var hostMemberID = "me"
+        var members = [
+            WatchPartyMember(id: "me", displayName: "Me"),
+            WatchPartyMember(id: "other", displayName: "Other", avatarURL: "https://example.com/avatar.jpg", avatarColor: "#FF5500")
+        ]
         var snapshot: WatchPartySnapshot {
             let media = WatchPartyMedia(type: "movie", metaID: "tt1", metaType: "movie")
             let state = WatchPartyPlayback(seq: 1, memberID: "me", paused: false, positionMs: 1_000, at: 20_000, mediaKey: media.key)
             return WatchPartySnapshot(party: WatchPartyInfo(id: "room", code: "ABC234", hostMemberID: hostMemberID, media: media, playback: state),
-                                      members: [WatchPartyMember(id: "me", displayName: "Me"), WatchPartyMember(id: "other", displayName: "Other")], memberID: "me")
+                                      members: members, memberID: "me")
         }
         func heartbeat(partyID: String, deviceID: String) async throws -> WatchPartySnapshot { snapshot }
         func clock() async throws -> Int64 {
