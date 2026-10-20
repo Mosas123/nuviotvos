@@ -458,8 +458,9 @@ final class WatchPartyPlaybackBinding {
         guard !localBusy, worker == nil else { throw WatchPartyPlaybackBindingError.busy }
         if case .catchUp = intent {
             guard onApplied == nil else { throw WatchPartyPlaybackBindingError.forbidden }
-            isBehind = false; behindMs = nil; lastApplied = nil
-            reconcile()
+            isBehind = false; behindMs = nil
+            // An explicit catch-up may retry a failed player correction; samples alone may not.
+            retrySynchronization()
             return
         }
         let mark = revision
