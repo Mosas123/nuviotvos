@@ -349,6 +349,119 @@ final class WatchPartyCoordinationTests: XCTestCase {
         XCTAssertEqual(pauseCount, 0)
     }
 
+    func testCommittedSeekRefreshesScrubSampleWithoutStartingRemoteCorrection() async throws {
+        let issued = expectation(description: "Explicit seek issued")
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "me",
+                                playbackPositionMs: 0)
+        let player = makePlaybackBinding(room: room, positionMs: 1_000, loading: true,
+            issueSeek: { target, _ in
+                XCTAssertEqual(target, 2_000, "Fresh sample must not launch correction to room position first")
+                issued.fulfill()
+            })
+        defer { player.binding.stop() }
+        let old = try XCTUnwrap(player.bridge.sample)
+        let fresh = refreshedSeekSample(old, positionMs: 1_000, loading: false)
+        let task = Task { try await player.binding.perform(.seek(2_000), refreshSample: { fresh }) }
+        defer { task.cancel() }
+        await fulfillment(of: [issued], timeout: 1)
+        for _ in 0..<100 {
+            if player.bridge.awaitsSeekSample { break }
+            await Task.yield()
+        }
+        XCTAssertTrue(player.bridge.awaitsSeekSample)
+        XCTAssertTrue(room.published.isEmpty, "Issuing the seek is not a confirmed position")
+        player.bridge.observe(refreshedSeekSample(fresh, positionMs: 2_000, loading: false))
+        try await task.value
+        XCTAssertEqual(player.seekTargets.values, [2_000])
+        XCTAssertEqual(room.published.count, 1)
+        XCTAssertEqual(room.published.first?.positionMs, 2_000)
+    }
+
+    func testFreshSampleDoesNotMakeAnActiveGestureSeekReady() async throws {
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "me", playbackPositionMs: 0)
+        let player = makePlaybackBinding(room: room, positionMs: 0, loading: true)
+        defer { player.binding.stop() }
+        let fresh = try XCTUnwrap(player.bridge.sample)
+        do {
+            try await player.binding.perform(.seek(2_000), refreshSample: { fresh })
+            XCTFail("An ongoing gesture must remain blocked")
+        } catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady) }
+        XCTAssertTrue(player.seekTargets.values.isEmpty)
+        XCTAssertTrue(room.published.isEmpty)
+    }
+
+    func testFreshSampleStillRequiresKnownDuration() async throws {
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "me", playbackPositionMs: 0)
+        let player = makePlaybackBinding(room: room, positionMs: 0, durationMs: 0, loading: true)
+        defer { player.binding.stop() }
+        let old = try XCTUnwrap(player.bridge.sample)
+        let fresh = refreshedSeekSample(old, positionMs: 0, loading: false)
+        do {
+            try await player.binding.perform(.seek(2_000), refreshSample: { fresh })
+            XCTFail("Unknown duration must not authorize a seek")
+        } catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady) }
+        XCTAssertTrue(player.seekTargets.values.isEmpty)
+        XCTAssertTrue(room.published.isEmpty)
+    }
+
+    func testFreshSampleCannotAdoptAnotherLoad() async throws {
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "me", playbackPositionMs: 0)
+        let player = makePlaybackBinding(room: room, positionMs: 0, loading: true)
+        defer { player.binding.stop() }
+        let old = try XCTUnwrap(player.bridge.sample)
+        let stamp = WatchPartyPlayerStamp(generation: old.stamp.generation + 1,
+                                         engineID: old.stamp.engineID, mediaKey: old.stamp.mediaKey)
+        let fresh = refreshedSeekSample(old, positionMs: 0, loading: false, stamp: stamp)
+        do {
+            try await player.binding.perform(.seek(2_000), refreshSample: { fresh })
+            XCTFail("A source replacement must not be adopted by the pending gesture")
+        } catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .staleOperation) }
+        XCTAssertEqual(player.bridge.sample, old)
+        XCTAssertTrue(player.seekTargets.values.isEmpty)
+        XCTAssertTrue(room.published.isEmpty)
+    }
+
+    func testContextLossDuringFreshSampleReadRejectsSeek() async throws {
+        var current = true
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "me", playbackPositionMs: 0)
+        let player = makePlaybackBinding(room: room, positionMs: 0, loading: true, isCurrent: { current })
+        defer { player.binding.stop() }
+        let old = try XCTUnwrap(player.bridge.sample)
+        let fresh = refreshedSeekSample(old, positionMs: 0, loading: false)
+        do {
+            try await player.binding.perform(.seek(2_000), refreshSample: {
+                current = false
+                return fresh
+            })
+            XCTFail("Context revoked during refresh must reject the gesture")
+        } catch { XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .staleOperation) }
+        XCTAssertTrue(player.seekTargets.values.isEmpty)
+        XCTAssertTrue(room.published.isEmpty)
+    }
+
+    func testPauseDoesNotReadSeekRefreshProvider() async throws {
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "me", playbackPositionMs: 0)
+        let player = makePlaybackBinding(room: room, positionMs: 0, durationMs: 0,
+                                        seeking: true, loading: true, coherent: false)
+        defer { player.binding.stop() }
+        try await player.binding.perform(.pause, refreshSample: {
+            XCTFail("Pause must remain independent of seek readiness")
+            return nil
+        })
+        XCTAssertEqual(room.published.count, 1)
+        XCTAssertTrue(room.published[0].paused)
+    }
+
+    private func refreshedSeekSample(
+        _ old: WatchPartyPlayerSample, positionMs: Int64, loading: Bool,
+        stamp: WatchPartyPlayerStamp? = nil
+    ) -> WatchPartyPlayerSample {
+        WatchPartyPlayerSample(stamp: stamp ?? old.stamp, positionMs: positionMs,
+            durationMs: old.durationMs, rate: old.rate, paused: old.paused,
+            loading: loading, coherent: old.coherent, seeking: old.seeking,
+            rendered: old.rendered, failed: old.failed)
+    }
+
     private func makePlaybackBinding(room: PlaybackRoom, positionMs: Int64,
                                      durationMs: Int64 = 100_000, seeking: Bool = false,
                                      sampleRate: Float = 1,
