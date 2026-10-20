@@ -2803,7 +2803,11 @@ class PlayerViewModel: ObservableObject {
             let sourceIsLive = Self.isLiveStream(
                 meta: activeMeta, url: activeStreamURL.flatMap(URL.init(string:))
             )
-            if isLiveStream != sourceIsLive { isLiveStream = sourceIsLive }
+            if sourceIsLive {
+                if !isLiveStream { isLiveStream = true }
+            } else if isLiveStream, c.durationMs > 0, c.hasCoherentTimeSample {
+                isLiveStream = false
+            }
         }
 
         let isPreSeekSettlingSample: Bool = {

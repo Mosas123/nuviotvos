@@ -246,6 +246,24 @@ final class ActionPlaybackSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testKnownLiveHintWaitsForFiniteTimelineBeforeClearingAfterMetadataRefresh() {
+        let hinted = NuvioMeta(id: "addon-news", name: "[Live] News", type: "movie")
+        let model = makeModel(playbackMeta: hinted, resumeFrom: nil)
+        defer { model.shutdown() }
+        let engine = sample(duration: 0, position: 1_000)
+        for _ in 0..<6 { model.pollForTesting(using: engine) }
+        XCTAssertTrue(model.isLiveStream)
+
+        model.activeMeta = NuvioMeta(id: "addon-news", name: "News", type: "movie")
+        model.pollForTesting(using: engine)
+        XCTAssertTrue(model.isLiveStream, "Missing duration must not erase an already recognized live hint")
+        engine.durationMs = 600_000
+        engine.hasCoherentTimeSample = true
+        model.pollForTesting(using: engine)
+        XCTAssertFalse(model.isLiveStream, "A coherent finite timeline may resolve the removed hint")
+    }
+
+    @MainActor
     func testShortActionPlaysAndEndsWithoutReplacementRecovery() async {
         let model = makeModel()
         defer { model.shutdown() }
