@@ -3,6 +3,138 @@ import XCTest
 
 @MainActor
 final class WatchPartyCoordinationTests: XCTestCase {
+    func testCatchUpRetriesFailedCorrectionWithoutEchoAndRequiresSeekReceipt() async throws {
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "other",
+                                playbackPositionMs: 20_000)
+        let failed = expectation(description: "Initial correction failed")
+        let retryIssued = expectation(description: "Explicit catch-up issued a new seek")
+        var attempts = 0
+        let player = makePlaybackBinding(room: room, positionMs: 0, issueSeek: { _, _ in
+            attempts += 1
+            if attempts == 1 { throw WatchPartyPlayerBridgeError.timedOut }
+            retryIssued.fulfill()
+        })
+        defer { player.binding.stop() }
+        player.binding.onError = { error in
+            XCTAssertEqual(error as? WatchPartyPlayerBridgeError, .timedOut)
+            failed.fulfill()
+        }
+        await fulfillment(of: [failed], timeout: 1)
+        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
+        XCTAssertFalse(player.binding.isSynchronizing)
+
+        let stamp = try XCTUnwrap(player.bridge.sample?.stamp)
+        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 100_000,
+                                                      rate: 1, paused: true, loading: false, coherent: true,
+                                                      seeking: false))
+        XCTAssertFalse(player.binding.isSynchronizing, "A healthy sample must not automatically retry a failed correction")
+        XCTAssertEqual(player.seekTargets.values, [20_000])
+
+        try await player.binding.perform(.catchUp)
+        await fulfillment(of: [retryIssued], timeout: 1)
+        for _ in 0..<100 where !player.bridge.awaitsSeekSample { await Task.yield() }
+        XCTAssertTrue(player.bridge.awaitsSeekSample, "Catch-up still needs a sample after the seek returns")
+        XCTAssertTrue(player.binding.isSynchronizing)
+        XCTAssertEqual(player.seekTargets.values, [20_000, 20_000])
+        XCTAssertTrue(room.published.isEmpty, "Catch-up must not publish a guest command to a host-only room")
+        do {
+            try await player.binding.perform(.catchUp)
+            XCTFail("A second catch-up must not overlap the active correction")
+        } catch {
+            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .busy)
+        }
+        XCTAssertEqual(player.seekTargets.values.count, 2)
+
+        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 20_000, durationMs: 100_000,
+                                                      rate: 1, paused: true, loading: false, coherent: true,
+                                                      seeking: false))
+        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
+        XCTAssertFalse(player.binding.isSynchronizing)
+        XCTAssertEqual(player.transports.values.last?.paused, false)
+        XCTAssertTrue(room.published.isEmpty, "Recovery applies room state without echo")
+    }
+
+    func testFailedCatchUpRelatchesUntilAnotherExplicitRecovery() async throws {
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "other",
+                                playbackPositionMs: 20_000)
+        let firstFailure = expectation(description: "Initial correction failed")
+        let retryFailure = expectation(description: "Explicit catch-up failed")
+        let player = makePlaybackBinding(room: room, positionMs: 0,
+                                         issueSeek: { _, _ in throw WatchPartyPlayerBridgeError.timedOut })
+        defer { player.binding.stop() }
+        var failures = 0
+        player.binding.onError = { error in
+            XCTAssertEqual(error as? WatchPartyPlayerBridgeError, .timedOut)
+            failures += 1
+            if failures == 1 { firstFailure.fulfill() }
+            else if failures == 2 { retryFailure.fulfill() }
+            else { XCTFail("A failure must not start an automatic retry loop") }
+        }
+        await fulfillment(of: [firstFailure], timeout: 1)
+        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
+        XCTAssertFalse(player.binding.isSynchronizing)
+        let stamp = try XCTUnwrap(player.bridge.sample?.stamp)
+        let healthy = WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 100_000,
+                                             rate: 1, paused: true, loading: false, coherent: true,
+                                             seeking: false)
+        player.bridge.observe(healthy)
+        XCTAssertFalse(player.binding.isSynchronizing)
+        try await player.binding.perform(.catchUp)
+        await fulfillment(of: [retryFailure], timeout: 1)
+        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
+        XCTAssertFalse(player.binding.isSynchronizing)
+        for _ in 0..<3 { player.bridge.observe(healthy) }
+        XCTAssertFalse(player.binding.isSynchronizing, "Another failure must block sample-driven retries again")
+        XCTAssertEqual(player.seekTargets.values, [20_000, 20_000])
+        XCTAssertEqual(failures, 2)
+        XCTAssertTrue(room.published.isEmpty)
+    }
+
+    func testCatchUpRecoveryRetainsReadinessSuspensionAndContextGuards() async throws {
+        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "other",
+                                playbackPositionMs: 20_000)
+        let failed = expectation(description: "Initial correction failed")
+        var contextCurrent = true
+        let player = makePlaybackBinding(room: room, positionMs: 0,
+                                         isCurrent: { contextCurrent },
+                                         issueSeek: { _, _ in throw WatchPartyPlayerBridgeError.timedOut })
+        defer { player.binding.stop() }
+        player.binding.onError = { _ in failed.fulfill() }
+        await fulfillment(of: [failed], timeout: 1)
+        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
+        XCTAssertFalse(player.binding.isSynchronizing)
+        let stamp = try XCTUnwrap(player.bridge.sample?.stamp)
+        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 0,
+                                                      rate: 1, paused: true, loading: false, coherent: true,
+                                                      seeking: false))
+        do {
+            try await player.binding.perform(.catchUp)
+            XCTFail("An explicit recovery must not bypass unknown duration")
+        } catch {
+            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady)
+        }
+        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 100_000,
+                                                      rate: 1, paused: true, loading: false, coherent: true,
+                                                      seeking: false))
+        XCTAssertFalse(player.binding.isSynchronizing, "Rejected recovery must leave the automatic retry latch intact")
+        player.binding.setSuspended(true)
+        do {
+            try await player.binding.perform(.catchUp)
+            XCTFail("A suspended player must not recover")
+        } catch {
+            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady)
+        }
+        contextCurrent = false
+        do {
+            try await player.binding.perform(.catchUp)
+            XCTFail("A stale membership must not recover")
+        } catch {
+            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady)
+        }
+        XCTAssertEqual(player.seekTargets.values, [20_000])
+        XCTAssertTrue(room.published.isEmpty)
+    }
+
     func testSessionTickPausesForBufferingAndResumesWhenReady() async throws {
         let ticks = Gate(), remote = Remote(), channel = Channel()
         var uptime: TimeInterval = 0
@@ -347,138 +479,6 @@ final class WatchPartyCoordinationTests: XCTestCase {
         try await Task.sleep(nanoseconds: 10_000_000)
 
         XCTAssertEqual(pauseCount, 0)
-    }
-
-    func testCatchUpRetriesFailedCorrectionWithoutEchoAndRequiresSeekReceipt() async throws {
-        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "other",
-                                playbackPositionMs: 20_000)
-        let failed = expectation(description: "Initial correction failed")
-        let retryIssued = expectation(description: "Explicit catch-up issued a new seek")
-        var attempts = 0
-        let player = makePlaybackBinding(room: room, positionMs: 0, issueSeek: { _, _ in
-            attempts += 1
-            if attempts == 1 { throw WatchPartyPlayerBridgeError.timedOut }
-            retryIssued.fulfill()
-        })
-        defer { player.binding.stop() }
-        player.binding.onError = { error in
-            XCTAssertEqual(error as? WatchPartyPlayerBridgeError, .timedOut)
-            failed.fulfill()
-        }
-        await fulfillment(of: [failed], timeout: 1)
-        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
-        XCTAssertFalse(player.binding.isSynchronizing)
-
-        let stamp = try XCTUnwrap(player.bridge.sample?.stamp)
-        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 100_000,
-                                                      rate: 1, paused: true, loading: false, coherent: true,
-                                                      seeking: false))
-        XCTAssertFalse(player.binding.isSynchronizing, "A healthy sample must not automatically retry a failed correction")
-        XCTAssertEqual(player.seekTargets.values, [20_000])
-
-        try await player.binding.perform(.catchUp)
-        await fulfillment(of: [retryIssued], timeout: 1)
-        for _ in 0..<100 where !player.bridge.awaitsSeekSample { await Task.yield() }
-        XCTAssertTrue(player.bridge.awaitsSeekSample, "Catch-up still needs a sample after the seek returns")
-        XCTAssertTrue(player.binding.isSynchronizing)
-        XCTAssertEqual(player.seekTargets.values, [20_000, 20_000])
-        XCTAssertTrue(room.published.isEmpty, "Catch-up must not publish a guest command to a host-only room")
-        do {
-            try await player.binding.perform(.catchUp)
-            XCTFail("A second catch-up must not overlap the active correction")
-        } catch {
-            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .busy)
-        }
-        XCTAssertEqual(player.seekTargets.values.count, 2)
-
-        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 20_000, durationMs: 100_000,
-                                                      rate: 1, paused: true, loading: false, coherent: true,
-                                                      seeking: false))
-        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
-        XCTAssertFalse(player.binding.isSynchronizing)
-        XCTAssertEqual(player.transports.values.last?.paused, false)
-        XCTAssertTrue(room.published.isEmpty, "Recovery applies room state without echo")
-    }
-
-    func testFailedCatchUpRelatchesUntilAnotherExplicitRecovery() async throws {
-        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "other",
-                                playbackPositionMs: 20_000)
-        let firstFailure = expectation(description: "Initial correction failed")
-        let retryFailure = expectation(description: "Explicit catch-up failed")
-        let player = makePlaybackBinding(room: room, positionMs: 0,
-                                         issueSeek: { _, _ in throw WatchPartyPlayerBridgeError.timedOut })
-        defer { player.binding.stop() }
-        var failures = 0
-        player.binding.onError = { error in
-            XCTAssertEqual(error as? WatchPartyPlayerBridgeError, .timedOut)
-            failures += 1
-            if failures == 1 { firstFailure.fulfill() }
-            else if failures == 2 { retryFailure.fulfill() }
-            else { XCTFail("A failure must not start an automatic retry loop") }
-        }
-        await fulfillment(of: [firstFailure], timeout: 1)
-        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
-        XCTAssertFalse(player.binding.isSynchronizing)
-        let stamp = try XCTUnwrap(player.bridge.sample?.stamp)
-        let healthy = WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 100_000,
-                                             rate: 1, paused: true, loading: false, coherent: true,
-                                             seeking: false)
-        player.bridge.observe(healthy)
-        XCTAssertFalse(player.binding.isSynchronizing)
-        try await player.binding.perform(.catchUp)
-        await fulfillment(of: [retryFailure], timeout: 1)
-        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
-        XCTAssertFalse(player.binding.isSynchronizing)
-        for _ in 0..<3 { player.bridge.observe(healthy) }
-        XCTAssertFalse(player.binding.isSynchronizing, "Another failure must block sample-driven retries again")
-        XCTAssertEqual(player.seekTargets.values, [20_000, 20_000])
-        XCTAssertEqual(failures, 2)
-        XCTAssertTrue(room.published.isEmpty)
-    }
-
-    func testCatchUpRecoveryRetainsReadinessSuspensionAndContextGuards() async throws {
-        let room = PlaybackRoom(hostOnly: true, memberID: "me", hostMemberID: "other",
-                                playbackPositionMs: 20_000)
-        let failed = expectation(description: "Initial correction failed")
-        var contextCurrent = true
-        let player = makePlaybackBinding(room: room, positionMs: 0,
-                                         isCurrent: { contextCurrent },
-                                         issueSeek: { _, _ in throw WatchPartyPlayerBridgeError.timedOut })
-        defer { player.binding.stop() }
-        player.binding.onError = { _ in failed.fulfill() }
-        await fulfillment(of: [failed], timeout: 1)
-        for _ in 0..<100 where player.binding.isSynchronizing { await Task.yield() }
-        XCTAssertFalse(player.binding.isSynchronizing)
-        let stamp = try XCTUnwrap(player.bridge.sample?.stamp)
-        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 0,
-                                                      rate: 1, paused: true, loading: false, coherent: true,
-                                                      seeking: false))
-        do {
-            try await player.binding.perform(.catchUp)
-            XCTFail("An explicit recovery must not bypass unknown duration")
-        } catch {
-            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady)
-        }
-        player.bridge.observe(WatchPartyPlayerSample(stamp: stamp, positionMs: 0, durationMs: 100_000,
-                                                      rate: 1, paused: true, loading: false, coherent: true,
-                                                      seeking: false))
-        XCTAssertFalse(player.binding.isSynchronizing, "Rejected recovery must leave the automatic retry latch intact")
-        player.binding.setSuspended(true)
-        do {
-            try await player.binding.perform(.catchUp)
-            XCTFail("A suspended player must not recover")
-        } catch {
-            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady)
-        }
-        contextCurrent = false
-        do {
-            try await player.binding.perform(.catchUp)
-            XCTFail("A stale membership must not recover")
-        } catch {
-            XCTAssertEqual(error as? WatchPartyPlaybackBindingError, .notReady)
-        }
-        XCTAssertEqual(player.seekTargets.values, [20_000])
-        XCTAssertTrue(room.published.isEmpty)
     }
 
     private func makePlaybackBinding(room: PlaybackRoom, positionMs: Int64,
