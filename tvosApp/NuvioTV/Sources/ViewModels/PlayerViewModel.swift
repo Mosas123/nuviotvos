@@ -2716,19 +2716,8 @@ class PlayerViewModel: ObservableObject {
         )
 
         // Reuse this refresh; Party never starts its own engine polling loop.
-        if let bridge = watchPartyPlayerBridge, let stamp = watchPartyPlayerStamp() {
-            bridge.observe(WatchPartyPlayerSample(
-                stamp: stamp, positionMs: c.positionMs, durationMs: c.durationMs,
-                rate: c.currentSpeed, paused: !c.isTransportPlaying,
-                loading: !hasPresentedCurrentLoad || c.isPlayerLoading || isSwitchingSource
-                    || isReloadingStream || isFailingOver || isAwaitingStreamStart
-                    || isScrubbing || isHoldingSeek || pendingSeekDelta != 0,
-                coherent: c.hasCoherentTimeSample && c.currentErrorMessage.isEmpty
-                    && !c.isPlayerEnded && !isLiveStream,
-                seeking: sampledEngineKind == .mpv && playerController.isSeekingForWatchParty,
-                rendered: hasPresentedCurrentLoad && hasRenderedFirstFrame,
-                failed: !c.currentErrorMessage.isEmpty || sessionCoordinator.lastLoadError != nil
-            ))
+        if let bridge = watchPartyPlayerBridge, let sample = watchPartySampleForCurrentState() {
+            bridge.observe(sample)
             // A binding's synchronous callback can invalidate or replace the source.
             guard activeEngineKind == sampledEngineKind,
                   sessionCoordinator.loadGeneration == sampledLoadGeneration,
@@ -3570,6 +3559,29 @@ class PlayerViewModel: ObservableObject {
         PictureInPictureManager.shared.refreshController(for: sessionCoordinator)
     }
 
+    /// Read current engine properties and UI admission flags without starting another
+    /// poll or issuing playback commands. The binding validates the exact stamp.
+    private func watchPartySampleForCurrentState() -> WatchPartyPlayerSample? {
+        guard !didShutdown, let stamp = watchPartyPlayerStamp() else { return nil }
+        let controller = engine
+        let kind = activeEngineKind
+        let presented = currentLoadPresentationIsConfirmed(
+            engineKind: kind, generation: sessionCoordinator.loadGeneration
+        )
+        return WatchPartyPlayerSample(
+            stamp: stamp, positionMs: controller.positionMs, durationMs: controller.durationMs,
+            rate: controller.currentSpeed, paused: !controller.isTransportPlaying,
+            loading: !presented || controller.isPlayerLoading || isSwitchingSource
+                || isReloadingStream || isFailingOver || isAwaitingStreamStart
+                || isScrubbing || isHoldingSeek || pendingSeekDelta != 0,
+            coherent: controller.hasCoherentTimeSample && controller.currentErrorMessage.isEmpty
+                && !controller.isPlayerEnded && !isLiveStream,
+            seeking: kind == .mpv && playerController.isSeekingForWatchParty,
+            rendered: presented && hasRenderedFirstFrame,
+            failed: !controller.currentErrorMessage.isEmpty || sessionCoordinator.lastLoadError != nil
+        )
+    }
+
     func attachWatchPartyControls(binding: WatchPartyPlaybackBinding,
                                   isCurrent: @escaping @MainActor () -> Bool) throws {
         guard watchPartyPlayerBridge != nil, watchPartyControls == nil else {
@@ -3577,9 +3589,10 @@ class PlayerViewModel: ObservableObject {
         }
         watchPartyControls = WatchPartyControlRouter(isCurrent: isCurrent,
             currentStamp: { [weak self] in self?.watchPartyPlayerStamp() },
-            canonicalRate: { [weak binding] in binding?.canonicalRate }, perform: { [weak binding] intent, applied in
+            canonicalRate: { [weak binding] in binding?.canonicalRate }, perform: { [weak self, weak binding] intent, applied in
             guard let binding else { throw WatchPartyPlaybackBindingError.notReady }
-            try await binding.perform(intent, onApplied: applied)
+            try await binding.perform(intent, onApplied: applied,
+                refreshSample: { [weak self] in self?.watchPartySampleForCurrentState() })
         }, suspend: { [weak binding] in binding?.setSuspended($0) }, onError: { [weak self] error in
             self?.showPlayerToast((error as? WatchPartyPlaybackBindingError) == .busy
                 ? "Watch Party is synchronizing" : "Watch Party control unavailable")
