@@ -379,7 +379,7 @@ struct DetailsScreen: View {
                     streamsRevision: viewModel.uiState.streamsRevision,
                     isLoading: viewModel.uiState.isLoadingStreams,
                     emptyReason: viewModel.uiState.streamsEmptyReason,
-                    includeDebrid: DebridResolver(store: ProfileSettings.current).isEnabled || TorrentSettings.isEnabled(),
+                    includeDebrid: true,
                     isResolvingDebrid: isResolvingDebrid,
                     initialAvailabilityMessage: streamPickerAvailabilityMessage,
                     onSelect: { stream, player in
@@ -7758,7 +7758,7 @@ private struct TvStreamPickerOverlay: View {
     let isLoading: Bool
     let emptyReason: StreamsEmptyStateReason?
     /// Whether torrent-only streams should be listed (Debrid or local P2P is enabled).
-    let includeDebrid: Bool
+    var includeDebrid: Bool = true
     /// A torrent stream is being turned into a playable link right now.
     let isResolvingDebrid: Bool
     var initialAvailabilityMessage: String? = nil
@@ -7802,6 +7802,8 @@ private struct TvStreamPickerOverlay: View {
     @State private var didPresentInitialAvailabilityMessage = false
     @State private var episodeRatings: [NuvioExternalRating] = []
     @State private var ratingOrderRevision: UInt64 = 0
+    @State private var showingP2PConsent = false
+    @State private var pendingTorrentSelection: (stream: NuvioStream, player: ExternalPlayer?)? = nil
 
 
     private let filterAllKey = "filter::all"
@@ -7814,7 +7816,7 @@ private struct TvStreamPickerOverlay: View {
     }
 
     private var showsCachedOnlyFilter: Bool {
-        includeDebrid && SmartPlaybackSelector.effectiveCachedOnly(true, contentType: meta.type)
+        DebridResolver(store: ProfileSettings.current).isEnabled && SmartPlaybackSelector.effectiveCachedOnly(true, contentType: meta.type)
     }
 
     /// Inputs that may change the visible stream list (not focus).
@@ -8005,6 +8007,27 @@ private struct TvStreamPickerOverlay: View {
         } message: {
             Text(unavailableAlertMessage ?? "")
         }
+        .alert(
+            L10n.string("tvos_settings_p2p_consent_title", fallback: "P2P Torrent Streaming"),
+            isPresented: $showingP2PConsent
+        ) {
+            Button(L10n.string("tvos_settings_p2p_consent_enable", fallback: "Enable P2P")) {
+                TorrentSettings.setConsentAccepted(true)
+                TorrentSettings.setEnabled(true)
+                if let pending = pendingTorrentSelection {
+                    pendingTorrentSelection = nil
+                    onSelect(pending.stream, pending.player)
+                }
+            }
+            Button(L10n.string("tvos_settings_p2p_consent_cancel", fallback: "Cancel"), role: .cancel) {
+                pendingTorrentSelection = nil
+            }
+        } message: {
+            Text(L10n.string(
+                "tvos_settings_p2p_consent_message",
+                fallback: "P2P connects directly to other peers. Your public IP address may be visible to them, and your device may upload data. Enable this only for content you have the legal right to access."
+            ))
+        }
     }
 
     /// Rendering always uses the cached list. A progressive source revision may
@@ -8032,6 +8055,13 @@ private struct TvStreamPickerOverlay: View {
 
     private func select(_ stream: NuvioStream, player: ExternalPlayer?) {
         guard let reason = stream.unavailabilityReason else {
+            let hasDebrid = DebridResolver(store: ProfileSettings.current).isEnabled
+            let hasP2P = TorrentSettings.isEnabled()
+            if stream.isTorrentStream && !hasDebrid && !hasP2P {
+                pendingTorrentSelection = (stream, player)
+                showingP2PConsent = true
+                return
+            }
             onSelect(stream, player)
             return
         }
