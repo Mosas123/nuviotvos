@@ -1317,8 +1317,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         pendingIsLiveStream = request.isLiveStream
         pendingCacheProfile = request.cacheProfile
         pendingURL = request.videoURL.absoluteString
-        currentMediaTitle = request.streamName
-        currentMediaArtist = request.streamDescription
+        currentMediaTitle = request.nowPlayingTitle ?? request.streamName
+        currentMediaArtist = request.nowPlayingTitle != nil ? request.nowPlayingSubtitle : request.streamDescription
         currentAspectMode = request.aspectMode
         PlaybackAudioSession.activateMoviePlayback()
 

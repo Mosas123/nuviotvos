@@ -1044,6 +1044,8 @@ class PlayerViewModel: ObservableObject {
                         streamName: title.isEmpty ? nil : title,
                         streamDescription: PlaybackMarkers.trailerSubtitle,
                         artworkURL: self.resolveArtworkURL(for: meta, episode: nil, isTrailer: true),
+                        nowPlayingTitle: title.isEmpty ? nil : title,
+                        nowPlayingSubtitle: "Trailer",
                         startupBenchmarkToken: startupToken
                     )
                     self.sessionCoordinator.load(request)
@@ -1118,6 +1120,7 @@ class PlayerViewModel: ObservableObject {
         let isAnime = activeMeta?.isAnime == true
             || NuvioMeta.isAnimeStream(filename: filename, streamName: streamName, streamDescription: streamDescription)
         let resolvedArtwork = artworkURL ?? resolveArtworkURL(for: activeMeta, episode: currentEpisodeVideo, isTrailer: isTrailerPlaybackSession)
+        let nowPlaying = resolveNowPlayingLabels(for: activeMeta, episode: currentEpisodeVideo, isTrailer: isTrailerPlaybackSession)
         let request = PlaybackLoadRequest(
             videoURL: url,
             audioURL: nil,
@@ -1149,6 +1152,8 @@ class PlayerViewModel: ObservableObject {
             cacheFileIdentity: cacheFileIdentity ?? activeCacheFileIdentity,
             trickplayURL: activeTrickplayURL,
             artworkURL: resolvedArtwork,
+            nowPlayingTitle: nowPlaying.title,
+            nowPlayingSubtitle: nowPlaying.subtitle,
             startupBenchmarkToken: startupBenchmarkToken
         )
         sessionCoordinator.load(
@@ -1231,6 +1236,22 @@ class PlayerViewModel: ObservableObject {
     /// Resolves the remote artwork URL for Now Playing identity card.
     /// Prefers the episode thumbnail for series episodes, falling back to show backdrop/poster.
     /// Prefers movie poster, falling back to movie backdrop for movies.
+    /// System Now Playing labels: the show/movie name, with the episode
+    /// ("S1, E3 · Title") or year underneath. Stream card names are addon
+    /// labels (e.g. "⚡ [TB] 1080p") and must not leak into the Remote app.
+    func resolveNowPlayingLabels(for meta: NuvioMeta?, episode: NuvioVideo?, isTrailer: Bool) -> (title: String?, subtitle: String?) {
+        guard let meta else { return (nil, nil) }
+        let name = meta.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return (nil, nil) }
+        if isTrailer { return (name, "Trailer") }
+        if let episode, !isStandalonePlaybackSession {
+            let code = "S\(episode.season), E\(episode.episode)"
+            let episodeTitle = episode.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (name, episodeTitle.isEmpty ? code : "\(code) · \(episodeTitle)")
+        }
+        return (name, meta.year.map(String.init))
+    }
+
     func resolveArtworkURL(for meta: NuvioMeta?, episode: NuvioVideo?, isTrailer: Bool) -> URL? {
         guard let meta else { return nil }
         if !isTrailer, let thumb = episode?.thumbnail?.trimmingCharacters(in: .whitespacesAndNewlines), !thumb.isEmpty {

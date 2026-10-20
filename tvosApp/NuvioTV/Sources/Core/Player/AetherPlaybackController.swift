@@ -4228,10 +4228,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         )
         #if os(tvOS) || os(iOS)
         var nowPlaying: [String: Any] = [:]
-        if let title = request.streamName, !title.isEmpty {
+        if let title = request.nowPlayingTitle ?? request.streamName, !title.isEmpty {
             nowPlaying[MPMediaItemPropertyTitle] = title
         }
-        if let subtitle = request.streamDescription, !subtitle.isEmpty {
+        if let subtitle = request.nowPlayingTitle != nil ? request.nowPlayingSubtitle : request.streamDescription, !subtitle.isEmpty {
             nowPlaying[MPMediaItemPropertyArtist] = subtitle
         }
         nowPlaying[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.video.rawValue
