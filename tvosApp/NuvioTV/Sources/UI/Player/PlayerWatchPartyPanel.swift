@@ -113,7 +113,8 @@ struct PlayerWatchPartyPanel: View {
             VStack(alignment: .leading, spacing: 14) {
                 statusLine("Connection", value: connectionText(room.connection))
                 statusLine("Playback control", value: party.hostOnly ? "Host only" : "Shared")
-                statusLine("Your role", value: room.memberID == party.hostMemberID ? "Host" : "Guest")
+                statusLine("Your role", value:
+                    room.memberID != nil && room.memberID == party.hostMemberID ? "Host" : "Guest")
                 statusLine("Host source", value: owner.locallySharedStreamRoomID == party.id
                     ? "Sent · BETA" : room.sharedStream == nil ? "Not available" : "Available · BETA")
             }
@@ -263,6 +264,9 @@ struct PlayerWatchPartyMenu: View {
             pendingStreamShare = nil
         }
         .onChange(of: service.session?.party?.id) { _, _ in
+            // A confirmation for one private room must not carry into another.
+            pendingStreamShare = nil
+            showingStreamWarning = false
             focus = "firstRoomAction"
         }
         .focusSection()
@@ -333,7 +337,8 @@ struct PlayerWatchPartyMenu: View {
     }
 
     private func activeRoom(room: WatchPartySession, party: WatchPartyInfo) -> some View {
-        let isHost = room.memberID == party.hostMemberID
+        let isHost = room.memberID != nil && party.hostMemberID != nil
+            && room.memberID == party.hostMemberID
         return VStack(alignment: .leading, spacing: 22) {
             Text("\(isHost ? "HOST" : "GUEST") · \(party.media.title)")
                 .font(.system(size: 22, weight: .semibold))
