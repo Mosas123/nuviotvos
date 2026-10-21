@@ -4716,7 +4716,7 @@ struct TVHomeView: View {
     @State private var isBannerDismissed = false
 
     @State private var localTitlesSection: TVHomeSection?
-    @State private var jellyfinSection: TVHomeSection?
+    @State private var jellyfinSections: [TVHomeSection] = []
     @State private var isLoading = true
     @State private var profileGateFailedLoadIdentity: TVHomeContentIdentity?
     @State private var focusedMeta: NuvioMeta?
@@ -7235,7 +7235,7 @@ struct TVHomeView: View {
             upCount: continueWatchingVisible ? upcomingMetas.count : 0,
             upFirstId: continueWatchingVisible ? upcomingMetas.first?.id : nil,
             localCount: localTitlesSection?.items.count ?? 0,
-            jellyfinCount: jellyfinSection?.items.count ?? 0,
+            jellyfinCount: jellyfinSections.reduce(0) { $0 + $1.items.count },
             storeRevision: store.sectionsRevision,
             hideUnreleased: hideUnreleased,
             cwLandscape: continueWatchingLandscape,
@@ -7260,7 +7260,8 @@ struct TVHomeView: View {
         )
         let pinnedSections = ((continueWatching.isEmpty || !continueWatchingVisible) ? [] : [resumeSection])
             + ((upcomingMetas.isEmpty || !continueWatchingVisible) ? [] : [upcomingSection])
-            + [localTitlesSection, jellyfinSection].compactMap { $0 }
+            + [localTitlesSection].compactMap { $0 }
+            + jellyfinSections
         let allSections = collectionHome == nil ? pinnedSections + store.sections : store.sections
 
         let result: [TVHomeSection]
@@ -7272,7 +7273,8 @@ struct TVHomeView: View {
                 // Collection folder rows don't carry title posters; leave them intact.
                 if !section.collectionFolders.isEmpty
                     || section.id == TVHomeSection.localTitlesId
-                    || section.id == TVHomeSection.jellyfinId {
+                    || section.id == TVHomeSection.jellyfinId
+                    || section.id.hasPrefix(TVHomeSection.jellyfinLibraryIdPrefix) {
                     return section
                 }
                 var copy = section
@@ -8864,24 +8866,73 @@ struct TVHomeView: View {
 
     @MainActor
     private func loadJellyfinSection() async {
+        focusWork.cachedVisibleSections = nil
         guard collectionHome == nil else { return }
         guard contentIdentity.profileId != "none" && !contentIdentity.profileId.isEmpty else {
-            jellyfinSection = nil
+            jellyfinSections = []
             return
         }
         guard jellyfinLocalRowEnabled else {
-            jellyfinSection = nil
+            jellyfinSections = []
             return
         }
-        let metas = JellyfinLibraryIndex.shared.titles().compactMap {
+        let indexedTitles = JellyfinLibraryIndex.shared.titles()
+        let legacyTitles = indexedTitles.filter { $0.libraryID == nil || $0.libraryName == nil }
+        var sections: [TVHomeSection] = []
+        let legacyMetas = Self.jellyfinMetas(legacyTitles)
+        if !legacyMetas.isEmpty {
+            sections.append(TVHomeSection(
+                id: TVHomeSection.jellyfinId,
+                title: L10n.string("home_jellyfin_titles", fallback: "Jellyfin"),
+                items: legacyMetas
+            ))
+        }
+
+        let libraryTitles = indexedTitles.filter { $0.libraryID != nil && $0.libraryName != nil }
+        let groupedTitles = Dictionary(grouping: libraryTitles) {
+            JellyfinHomeLibraryKey(serverID: $0.serverID, libraryID: $0.libraryID!)
+        }
+        let serverOrder = Dictionary(uniqueKeysWithValues: JellyfinServerStore.shared.servers.enumerated().map {
+            ($0.element.id, $0.offset)
+        })
+        let orderedKeys = groupedTitles.keys.sorted { lhs, rhs in
+            let lhsServerOrder = serverOrder[lhs.serverID] ?? Int.max
+            let rhsServerOrder = serverOrder[rhs.serverID] ?? Int.max
+            if lhsServerOrder != rhsServerOrder { return lhsServerOrder < rhsServerOrder }
+            if lhs.serverID != rhs.serverID { return lhs.serverID < rhs.serverID }
+            let lhsName = groupedTitles[lhs]?.first?.libraryName ?? lhs.libraryID
+            let rhsName = groupedTitles[rhs]?.first?.libraryName ?? rhs.libraryID
+            if lhsName != rhsName { return lhsName < rhsName }
+            return lhs.libraryID < rhs.libraryID
+        }
+        for key in orderedKeys {
+            guard let titles = groupedTitles[key],
+                  let libraryName = titles.first?.libraryName else { continue }
+            let metas = Self.jellyfinMetas(titles)
+            guard !metas.isEmpty else { continue }
+            sections.append(TVHomeSection(
+                id: TVHomeSection.jellyfinLibraryId(serverID: key.serverID, libraryID: key.libraryID),
+                title: libraryName,
+                items: metas
+            ))
+        }
+        jellyfinSections = sections
+    }
+
+    @MainActor
+    private static func jellyfinMetas(_ titles: [JellyfinIndexedTitle]) -> [NuvioMeta] {
+        titles.sorted {
+            if $0.name != $1.name { return $0.name < $1.name }
+            return $0.contentId < $1.contentId
+        }.compactMap {
             JellyfinLibraryIndex.shared.meta(forContentId: $0.contentId)
         }
-        jellyfinSection = metas.isEmpty ? nil : TVHomeSection(
-            id: TVHomeSection.jellyfinId,
-            title: L10n.string("home_jellyfin_titles", fallback: "Jellyfin"),
-            items: metas
-        )
     }
+}
+
+private struct JellyfinHomeLibraryKey: Hashable {
+    let serverID: String
+    let libraryID: String
 }
 
 struct TVHomeSection: Identifiable {
@@ -8889,6 +8940,10 @@ struct TVHomeSection: Identifiable {
     static let upcomingId = "upcoming"
     static let localTitlesId = "local_titles"
     static let jellyfinId = "jellyfin_titles"
+    static let jellyfinLibraryIdPrefix = "jellyfin_library_"
+    static func jellyfinLibraryId(serverID: String, libraryID: String) -> String {
+        "\(jellyfinLibraryIdPrefix)\(serverID):\(libraryID)"
+    }
     /// Id prefix for rows built from account-synced collections.
     static let collectionIdPrefix = "collection_"
 
