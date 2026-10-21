@@ -784,7 +784,7 @@ extension PlayerView {
                 onClose: {
                     showingWatchPartyMenu = false
                     viewModel.revealControls()
-                    requestedControlFocus = .watchParty
+                    requestedControlFocus = canShowWatchPartyButton ? .watchParty : .settings
                 }
             )
             .transition(.opacity)
