@@ -168,7 +168,6 @@ struct PlayerWatchPartyPanel: View {
 @MainActor
 struct PlayerWatchPartySceneBridge: View {
     @ObservedObject var sceneViewModel: SceneViewModel
-    @ObservedObject var playerViewModel: PlayerViewModel
     @ObservedObject var owner: WatchPartyAppOwner
     @ObservedObject var service: WatchPartyService
     let isAdvancing: Bool
@@ -259,6 +258,9 @@ struct PlayerWatchPartyMenu: View {
             viewModel.setControlsAutoHideSuspended(true)
             focus = service.session?.party == nil ? "create" : "firstRoomAction"
         }
+        .onReceive(owner.$service) { currentService in
+            if currentService !== service { onClose() }
+        }
         .onDisappear {
             viewModel.setControlsAutoHideSuspended(false)
             pendingStreamShare = nil
@@ -327,8 +329,9 @@ struct PlayerWatchPartyMenu: View {
                         using: viewModel, isCurrentPlayerSurface: isCurrentPlayerSurface,
                         hostOnly: hostOnly
                     )
-                    if service.session?.party != nil && shareLater {
-                        message = "Ready when you are. Select Share my stream and confirm its link."
+                    if let id = service.session?.party?.id,
+                       owner.pendingHostOnlyRoomID != id, shareLater {
+                        message = "Select Share my stream and approve the exact source when ready."
                     }
                 }
             }
@@ -376,8 +379,14 @@ struct PlayerWatchPartyMenu: View {
                         }
                     }
                 }
-                menuButton("Catch up with room", icon: "backward.end.fill", id: "catchUp") {
-                    viewModel.catchUpWithWatchParty()
+                if owner.presentation?.mount.isCurrent == true {
+                    menuButton("Catch up with room", icon: "backward.end.fill", id: "catchUp") {
+                        viewModel.catchUpWithWatchParty()
+                    }
+                } else {
+                    Text("Select a source from the Watch Party sidebar to attach this player.")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.white.opacity(0.75))
                 }
                 menuButton("Leave room", icon: "rectangle.portrait.and.arrow.right", id: "leave") {
                     run {
@@ -389,8 +398,14 @@ struct PlayerWatchPartyMenu: View {
                     endingRoom = true
                 }
             } else {
-                menuButton("Catch up with host", icon: "backward.end.fill", id: "firstRoomAction") {
-                    viewModel.catchUpWithWatchParty()
+                if owner.presentation?.mount.isCurrent == true {
+                    menuButton("Catch up with host", icon: "backward.end.fill", id: "firstRoomAction") {
+                        viewModel.catchUpWithWatchParty()
+                    }
+                } else {
+                    Text("Choose your source from Watch Party in the sidebar to attach this player.")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.white.opacity(0.75))
                 }
                 menuButton("Leave room", icon: "rectangle.portrait.and.arrow.right", id: "leave") {
                     run {
