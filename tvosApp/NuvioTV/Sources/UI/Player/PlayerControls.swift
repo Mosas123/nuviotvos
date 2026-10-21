@@ -8,6 +8,7 @@ enum PlayerControlFocus: Hashable {
     case sources
     case subtitles
     case audio
+    case watchParty
     case settings
     case timeline
 }
@@ -19,6 +20,9 @@ struct PlayerControls: View {
     @Binding var requestedFocus: PlayerControlFocus?
     var onFocusSkipSegment: () -> Void = {}
     var onFocusNextEpisode: () -> Void = {}
+    var showWatchPartyButton = false
+    var isWatchPartyMenuPresented = false
+    var onOpenWatchPartyMenu: () -> Void = {}
 
     @FocusState private var focusedControl: PlayerControlFocus?
 
@@ -52,6 +56,11 @@ struct PlayerControls: View {
         .onChange(of: viewModel.showSettingsPanel) { _, isPresented in
             if !isPresented, viewModel.showControls {
                 DispatchQueue.main.async { focusedControl = .settings }
+            }
+        }
+        .onChange(of: isWatchPartyMenuPresented) { _, presented in
+            if !presented && viewModel.showControls {
+                DispatchQueue.main.async { focusedControl = .watchParty }
             }
         }
         .onAppear {
@@ -217,6 +226,7 @@ struct PlayerControls: View {
             && !viewModel.isSwitchingSource
             && !viewModel.showPauseOverlay
             && !viewModel.showSettingsPanel
+            && !isWatchPartyMenuPresented
             && !viewModel.showScenePanel
             && !viewModel.isSceneDetailVisible
             && !viewModel.postPlayState.isVisible
@@ -240,6 +250,7 @@ struct PlayerControls: View {
         if viewModel.canShowSourcesPanel && playerShowSources { order.append(.sources) }
         if canShowSubtitlePicker && playerShowSubtitles { order.append(.subtitles) }
         if canShowAudioPicker && playerShowAudio { order.append(.audio) }
+        if showWatchPartyButton { order.append(.watchParty) }
         order.append(.settings)
         return order
     }
@@ -493,6 +504,21 @@ struct PlayerControls: View {
                 .onMoveCommand { direction in
                     handleMove(direction, from: .audio)
                 }
+            }
+
+            if showWatchPartyButton {
+                glassIconButton(
+                    size: 70,
+                    iconSize: 28,
+                    focusKey: .watchParty,
+                    isFocused: focusedControl == .watchParty
+                ) {
+                    onOpenWatchPartyMenu()
+                } icon: {
+                    Image(systemName: "person.2.fill")
+                }
+                .id("watch_party_button")
+                .accessibilityLabel("Watch Party")
             }
 
             glassIconButton(
