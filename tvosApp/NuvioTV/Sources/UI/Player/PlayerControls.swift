@@ -60,7 +60,9 @@ struct PlayerControls: View {
         }
         .onChange(of: isWatchPartyMenuPresented) { _, presented in
             if !presented && viewModel.showControls {
-                DispatchQueue.main.async { focusedControl = .watchParty }
+                DispatchQueue.main.async {
+                    focusedControl = showWatchPartyButton ? .watchParty : .settings
+                }
             }
         }
         .onAppear {
@@ -287,7 +289,7 @@ struct PlayerControls: View {
     /// Once any transport button is focused, every visible button is focusable
     /// again so left/right still walks the full row.
     private func isTransportButtonFocusable(_ key: PlayerControlFocus) -> Bool {
-        guard controlsInteractable else { return false }
+        guard controlsInteractable, transportFocusOrder.contains(key) else { return false }
         if focusedControl == .timeline {
             return key == (transportFocusOrder.first ?? .settings)
         }
