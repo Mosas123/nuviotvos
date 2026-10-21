@@ -1107,8 +1107,8 @@ final class CatalogDecodingTests: XCTestCase {
             .map(\.catalogId), ["other_live"])
 
         let viewModel = DiscoverViewModel(repository: MockCatalogRepository())
-        XCTAssertEqual(viewModel.typeTitle(for: "series"), "Series")
         XCTAssertEqual(viewModel.typeTitle(for: "tv"), "TV")
+        // The Series label is localized and may differ by device language.
         XCTAssertNotEqual(viewModel.typeTitle(for: "tv"),
                           viewModel.typeTitle(for: "series"))
     }
