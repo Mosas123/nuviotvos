@@ -161,6 +161,38 @@ struct PlayerWatchPartyPanel: View {
     }
 }
 
+/// Watches the live service so the InSight tab appears and disappears with
+/// actual room membership, including rooms entered from the sidebar.
+@MainActor
+struct PlayerWatchPartySceneBridge: View {
+    @ObservedObject var sceneViewModel: SceneViewModel
+    @ObservedObject var playerViewModel: PlayerViewModel
+    @ObservedObject var owner: WatchPartyAppOwner
+    @ObservedObject var service: WatchPartyService
+    let isAdvancing: Bool
+    let onDismiss: () -> Void
+    let onPlayNextEpisode: () -> Void
+
+    private var hasAcceptedMembership: Bool {
+        guard let room = service.session, let party = room.party,
+              room.membershipExit == nil, let memberID = room.memberID else { return false }
+        return !party.id.isEmpty && room.members.contains(where: { $0.id == memberID })
+    }
+
+    var body: some View {
+        ScenePanelView(
+            viewModel: sceneViewModel,
+            isAdvancing: isAdvancing,
+            onDismiss: onDismiss,
+            onPlayNextEpisode: onPlayNextEpisode,
+            watchPartyContent: hasAcceptedMembership
+                ? { _, _ in
+                    AnyView(PlayerWatchPartyPanel(owner: owner, service: service))
+                } : nil
+        )
+    }
+}
+
 /// Full-screen menu mirrors the player's ellipsis Settings panel: same scrim,
 /// native Siri Remote focus, safe-area padding and Menu-to-close behavior.
 /// There is deliberately NO Join action; joining belongs to the sidebar.
