@@ -20,7 +20,7 @@ extension PlayerView {
                 if showingWatchPartyMenu {
                     showingWatchPartyMenu = false
                     viewModel.revealControls()
-                    requestedControlFocus = .watchParty
+                    requestedControlFocus = canShowWatchPartyButton ? .watchParty : .settings
                     return
                 }
                 if viewModel.isSceneDetailVisible {
