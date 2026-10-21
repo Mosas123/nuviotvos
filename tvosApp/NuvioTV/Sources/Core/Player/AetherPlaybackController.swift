@@ -3998,6 +3998,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                 lang: t.language ?? "",
                 selected: active == t.id,
                 externalFilename: t.isExternal ? (externalSubtitleURLsByTrackID[t.id] ?? "") : "",
+                isForced: t.isForced,
                 isNativelyRenderedSubtitle: t.isNativelyRenderedSubtitle,
                 languageName: t.language ?? "",
                 detail: t.codec

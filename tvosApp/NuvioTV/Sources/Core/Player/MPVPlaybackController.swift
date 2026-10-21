@@ -2323,6 +2323,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             let codec = getTrackString(i, "codec")
             let channelCount = getInt("track-list/\(i)/demux-channel-count")
             let selected = getFlag("track-list/\(i)/selected")
+            let isForced = getFlag("track-list/\(i)/forced")
             let externalFilename = getTrackString(i, "external-filename")
 
             if type == "audio" {
@@ -2340,7 +2341,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                 let display = trackTitle(title: title, lang: lang, codec: codec,
                                          channelCount: 0, fallback: "Subtitle \(subIdx + 1)")
                 subs.append(PlaybackTrackInfo(index: subIdx, id: id, type: type, title: display, lang: lang,
-                                      selected: selected, externalFilename: externalFilename))
+                                      selected: selected, externalFilename: externalFilename,
+                                      isForced: isForced))
                 subIdx += 1
             }
         }

@@ -1741,6 +1741,168 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertFalse(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
             forced, preferredLanguages: ["Spanish"], allowForcedSubtitles: true
         ))
+        XCTAssertFalse(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
+            SubtitleTrack(id: "4", name: "English Full", language: "eng", isSelected: true),
+            preferredLanguages: ["English"], requireForcedSubtitle: true
+        ))
+        XCTAssertTrue(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
+            SubtitleTrack(id: "5", name: "English", language: "eng", isSelected: true, isForced: true),
+            preferredLanguages: ["English"], requireForcedSubtitle: true
+        ))
+    }
+
+    @MainActor
+    func testPreferredFullSubtitleOutranksForcedAndHasNoForcedOnlyFallback() {
+        let forced = SubtitleTrack(
+            id: "1", name: "English Forced", language: "eng", isSelected: true, isForced: true
+        )
+        let full = SubtitleTrack(
+            id: "2", name: "English Full", language: "eng", isSelected: false
+        )
+
+        XCTAssertFalse(PlayerViewModel.shouldPreserveBackendSubtitleSelection(
+            forced, preferredLanguages: ["English"], allowForcedSubtitles: false
+        ))
+        XCTAssertEqual(
+            PlayerViewModel.matchingPreferredFullSubtitle(in: [forced, full], language: "English")?.id,
+            "2"
+        )
+        XCTAssertNil(PlayerViewModel.matchingPreferredFullSubtitle(in: [forced], language: "English"))
+    }
+
+    @MainActor
+    func testAutomaticSubtitlePolicyFollowsPreferredAudioLanguage() {
+        let englishAudio = AudioTrack(id: "1", name: "English", language: "eng", isSelected: true)
+        let japaneseAudio = AudioTrack(id: "2", name: "Japanese", language: "jpn", isSelected: true)
+
+        XCTAssertEqual(
+            PlayerViewModel.automaticSubtitlePolicy(
+                selectedAudio: englishAudio,
+                preferredAudioLanguage: "English",
+                preferredSubtitleLanguages: ["Spanish"],
+                allowForcedSubtitles: true
+            ),
+            .forced(language: "English")
+        )
+        XCTAssertEqual(
+            PlayerViewModel.automaticSubtitlePolicy(
+                selectedAudio: englishAudio,
+                preferredAudioLanguage: "English",
+                preferredSubtitleLanguages: ["Spanish"],
+                allowForcedSubtitles: false
+            ),
+            .off
+        )
+        XCTAssertEqual(
+            PlayerViewModel.automaticSubtitlePolicy(
+                selectedAudio: japaneseAudio,
+                preferredAudioLanguage: "English",
+                preferredSubtitleLanguages: ["Spanish"],
+                allowForcedSubtitles: true
+            ),
+            .preferredLanguages(["Spanish"])
+        )
+    }
+
+    @MainActor
+    func testPersistedAudioSwitchReappliesAutomaticSubtitlePolicyAndKeepsManualSubtitle() throws {
+        let savedSubtitleLanguages = ProfileSettings.current.string(forKey: SettingsKey.subtitleLanguages)
+        let savedAudioLanguage = ProfileSettings.current.string(forKey: SettingsKey.audioLanguage)
+        let savedSmartMatching = ProfileSettings.current.object(forKey: SettingsKey.smartSubtitleMatching)
+        let savedForcedSubtitles = ProfileSettings.current.object(forKey: SettingsKey.forcedSubtitles)
+        let savedShowAudioLanguages = ProfileSettings.current.string(forKey: SettingsKey.showAudioLanguages)
+        addTeardownBlock {
+            if let savedSubtitleLanguages {
+                ProfileSettings.current.set(savedSubtitleLanguages, forKey: SettingsKey.subtitleLanguages)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.subtitleLanguages)
+            }
+            if let savedAudioLanguage {
+                ProfileSettings.current.set(savedAudioLanguage, forKey: SettingsKey.audioLanguage)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.audioLanguage)
+            }
+            if let savedSmartMatching {
+                ProfileSettings.current.set(savedSmartMatching, forKey: SettingsKey.smartSubtitleMatching)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.smartSubtitleMatching)
+            }
+            if let savedForcedSubtitles {
+                ProfileSettings.current.set(savedForcedSubtitles, forKey: SettingsKey.forcedSubtitles)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.forcedSubtitles)
+            }
+            if let savedShowAudioLanguages {
+                ProfileSettings.current.set(savedShowAudioLanguages, forKey: SettingsKey.showAudioLanguages)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.showAudioLanguages)
+            }
+        }
+
+        ProfileSettings.current.set(SubtitleLanguagePreferences.encode(["English"]), forKey: SettingsKey.subtitleLanguages)
+        ProfileSettings.current.set("English", forKey: SettingsKey.audioLanguage)
+        ProfileSettings.current.set(true, forKey: SettingsKey.smartSubtitleMatching)
+        ProfileSettings.current.set(true, forKey: SettingsKey.forcedSubtitles)
+
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            aetherControllerFactory: { aether },
+            engineSettingProvider: { "Auto" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        defer {
+            model.shutdown()
+            coordinator.stopAll()
+        }
+
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/audio-switch.mkv")!))
+        let meta = NuvioMeta(id: "tt-subtitle-audio-switch", name: "Audio switch", type: "movie")
+        model.activeMeta = meta
+        let englishAudio = AudioTrack(id: "1", name: "English", language: "eng", isSelected: true)
+        let japaneseAudio = AudioTrack(id: "2", name: "Japanese", language: "jpn", isSelected: false)
+        model.audioTracks = [englishAudio, japaneseAudio]
+        model.subtitles = [
+            SubtitleTrack(id: "off", name: "Off", language: "", isSelected: false),
+            SubtitleTrack(id: "3", name: "English Forced", language: "eng", isSelected: true, isForced: true),
+            SubtitleTrack(id: "4", name: "Japanese Forced", language: "jpn", isSelected: false, isForced: true),
+            SubtitleTrack(id: "5", name: "English Full", language: "eng", isSelected: false)
+        ]
+        model.didApplySubtitlePreference = true
+
+        model.selectAudio(japaneseAudio)
+
+        XCTAssertEqual(ShowAudioLanguageStore.getLanguage(for: meta.id), "Japanese")
+        XCTAssertEqual(model.subtitles.first(where: { $0.isSelected })?.id, "4")
+
+        let manualFullSubtitle = model.subtitles.first(where: { $0.id == "5" })!
+        model.selectSubtitle(manualFullSubtitle)
+        model.selectAudio(englishAudio)
+
+        XCTAssertEqual(model.subtitles.first(where: { $0.isSelected })?.id, "5")
+    }
+
+    @MainActor
+    func testForcedSubtitleMatchingUsesBackendMetadataAndExternalTitleFallback() {
+        let full = SubtitleTrack(id: "1", name: "English Full", language: "eng", isSelected: false)
+        let forcedByMetadata = SubtitleTrack(
+            id: "2", name: "English", language: "eng", isSelected: false, isForced: true
+        )
+        let forcedByExternalTitle = SubtitleTrack(
+            id: "3", name: "English (Forced)", language: "eng", isSelected: false
+        )
+
+        XCTAssertTrue(PlayerViewModel.isForcedSubtitle(forcedByMetadata))
+        XCTAssertTrue(PlayerViewModel.isForcedSubtitle(forcedByExternalTitle))
+        XCTAssertEqual(
+            PlayerViewModel.matchingForcedSubtitle(in: [full, forcedByMetadata], language: "English")?.id,
+            "2"
+        )
+        XCTAssertEqual(
+            PlayerViewModel.matchingForcedSubtitle(in: [full, forcedByExternalTitle], language: "English")?.id,
+            "3"
+        )
     }
 
     @MainActor

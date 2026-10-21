@@ -746,6 +746,18 @@ final class PlayerControlsSettingsTests: XCTestCase {
         let matched = PlayerViewModel.smartMatchedSubtitles(in: allSubtitles)
         XCTAssertEqual(matched.count, 1, "Smart matching must return at most one subtitle to prevent bulk download")
         XCTAssertEqual(matched.first?.url, "https://titulky.com/file/1.srt")
+
+        let forcedEnglish = NuvioSubtitle(
+            url: "https://subs.example/forced.srt", language: "eng", label: "English Forced"
+        )
+        let fullEnglish = NuvioSubtitle(
+            url: "https://subs.example/full.srt", language: "eng", label: "English Full"
+        )
+        XCTAssertEqual(
+            PlayerViewModel.smartMatchedSubtitles(in: [forcedEnglish, fullEnglish]).map(\.url),
+            [fullEnglish.url]
+        )
+        XCTAssertTrue(PlayerViewModel.smartMatchedSubtitles(in: [forcedEnglish]).isEmpty)
     }
 
     @MainActor
@@ -830,6 +842,57 @@ final class PlayerControlsSettingsTests: XCTestCase {
 
         XCTAssertEqual(model.availableExternalSubtitles.count, 10)
         XCTAssertEqual(model.pendingExternalSubtitles.count, 0, "No external subtitles should be queued when embedded preferred track is active")
+    }
+
+    @MainActor
+    func testLateExternalSubtitlesUseForcedPolicyWhenPreferredAudioIsSelected() {
+        let savedLangs = ProfileSettings.current.string(forKey: SettingsKey.subtitleLanguages)
+        let savedSmart = ProfileSettings.current.object(forKey: SettingsKey.smartSubtitleMatching)
+        let savedAudioLanguage = ProfileSettings.current.string(forKey: SettingsKey.audioLanguage)
+        let savedForced = ProfileSettings.current.object(forKey: SettingsKey.forcedSubtitles)
+        addTeardownBlock {
+            if let savedLangs {
+                ProfileSettings.current.set(savedLangs, forKey: SettingsKey.subtitleLanguages)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.subtitleLanguages)
+            }
+            if let savedSmart {
+                ProfileSettings.current.set(savedSmart, forKey: SettingsKey.smartSubtitleMatching)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.smartSubtitleMatching)
+            }
+            if let savedAudioLanguage {
+                ProfileSettings.current.set(savedAudioLanguage, forKey: SettingsKey.audioLanguage)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.audioLanguage)
+            }
+            if let savedForced {
+                ProfileSettings.current.set(savedForced, forKey: SettingsKey.forcedSubtitles)
+            } else {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.forcedSubtitles)
+            }
+        }
+
+        ProfileSettings.current.set(SubtitleLanguagePreferences.encode(["English"]), forKey: SettingsKey.subtitleLanguages)
+        ProfileSettings.current.set("English", forKey: SettingsKey.audioLanguage)
+        ProfileSettings.current.set(true, forKey: SettingsKey.smartSubtitleMatching)
+        ProfileSettings.current.set(true, forKey: SettingsKey.forcedSubtitles)
+
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil })
+        )
+        model.audioTracks = [AudioTrack(id: "1", name: "English", language: "eng", isSelected: true)]
+        model.subtitles = [
+            SubtitleTrack(id: "off", name: "Off", language: "", isSelected: false),
+            SubtitleTrack(id: "2", name: "English Full", language: "eng", isSelected: true)
+        ]
+
+        let full = NuvioSubtitle(url: "https://subs.example/full.srt", language: "eng", label: "English Full")
+        let forced = NuvioSubtitle(url: "https://subs.example/forced.srt", language: "eng", label: "English Forced")
+        model.mergeExternalSubtitles([full, forced])
+
+        XCTAssertEqual(model.pendingExternalSubtitles.map(\.url), [forced.url])
+        XCTAssertEqual(model.subtitles.first(where: { $0.isSelected })?.id, "off")
     }
 
     @MainActor
