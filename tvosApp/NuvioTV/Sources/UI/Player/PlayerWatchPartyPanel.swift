@@ -203,6 +203,7 @@ struct PlayerWatchPartyMenu: View {
     @ObservedObject var owner: WatchPartyAppOwner
     @ObservedObject var service: WatchPartyService
     let isCurrentPlayerSurface: @MainActor () -> Bool
+    let onOpenLobby: () -> Void
     let onClose: () -> Void
 
     @State private var hostOnly = true
@@ -212,6 +213,9 @@ struct PlayerWatchPartyMenu: View {
     @State private var pendingStreamShare: WatchPartyStream?
     @State private var showingStreamWarning = false
     @State private var endingRoom = false
+    @State private var memberToRemove: WatchPartyMember?
+    @State private var memberRemovalRoomID: String?
+    @State private var showingMemberRemovalConfirmation = false
     @FocusState private var focus: String?
 
     var body: some View {
@@ -269,6 +273,9 @@ struct PlayerWatchPartyMenu: View {
             // A confirmation for one private room must not carry into another.
             pendingStreamShare = nil
             showingStreamWarning = false
+            memberToRemove = nil
+            memberRemovalRoomID = nil
+            showingMemberRemovalConfirmation = false
             focus = "firstRoomAction"
         }
         .focusSection()
@@ -293,6 +300,30 @@ struct PlayerWatchPartyMenu: View {
                 }
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .confirmationDialog(
+            "Remove \(memberToRemove?.displayName ?? "member") from this room?",
+            isPresented: $showingMemberRemovalConfirmation
+        ) {
+            Button("Remove member", role: .destructive) {
+                guard let member = memberToRemove,
+                      let expectedRoomID = memberRemovalRoomID else { return }
+                memberToRemove = nil
+                memberRemovalRoomID = nil
+                run {
+                    guard let currentRoom = service.session,
+                          currentRoom.party?.id == expectedRoomID,
+                          currentRoom.party?.hostMemberID == currentRoom.memberID,
+                          currentRoom.memberID != member.id else {
+                        throw WatchPartySessionError.notReady
+                    }
+                    try await service.removeMember(memberID: member.id)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                memberToRemove = nil
+                memberRemovalRoomID = nil
+            }
         }
     }
 
@@ -384,9 +415,23 @@ struct PlayerWatchPartyMenu: View {
                         viewModel.catchUpWithWatchParty()
                     }
                 } else {
-                    Text("Select a source from the Watch Party sidebar to attach this player.")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.white.opacity(0.75))
+                    menuButton("Choose source from Watch Party", icon: "play.rectangle", id: "lobby") {
+                        onClose()
+                        onOpenLobby()
+                    }
+                }
+                if room.members.contains(where: { $0.id != room.memberID }) {
+                    Text("MANAGE MEMBERS")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.67))
+                    ForEach(room.members.filter { $0.id != room.memberID }, id: \.id) { member in
+                        menuButton("Remove \(member.displayName)", icon: "person.crop.circle.badge.xmark",
+                                   id: "remove.\(member.id)") {
+                            memberToRemove = member
+                            memberRemovalRoomID = party.id
+                            showingMemberRemovalConfirmation = true
+                        }
+                    }
                 }
                 menuButton("Leave room", icon: "rectangle.portrait.and.arrow.right", id: "leave") {
                     run {
@@ -403,9 +448,10 @@ struct PlayerWatchPartyMenu: View {
                         viewModel.catchUpWithWatchParty()
                     }
                 } else {
-                    Text("Choose your source from Watch Party in the sidebar to attach this player.")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.white.opacity(0.75))
+                    menuButton("Choose source from Watch Party", icon: "play.rectangle", id: "lobby") {
+                        onClose()
+                        onOpenLobby()
+                    }
                 }
                 menuButton("Leave room", icon: "rectangle.portrait.and.arrow.right", id: "leave") {
                     run {
