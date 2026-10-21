@@ -79,9 +79,9 @@ struct PlayerWatchPartyPanel: View {
 
     private func membersCard(room: WatchPartySession, party: WatchPartyInfo) -> some View {
         statusCardShell("MEMBERS · \(room.members.count)", width: 520) {
-            ScrollView(.horizontal, showsIndicators: room.members.count > 3) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .top, spacing: 20) {
-                    ForEach(room.members, id: \.id) { member in
+                    ForEach(Array(room.members.prefix(3)), id: \.id) { member in
                         VStack(spacing: 6) {
                             Text(String(member.displayName.prefix(1)).uppercased())
                                 .font(.system(size: 28, weight: .bold))
@@ -103,8 +103,13 @@ struct PlayerWatchPartyPanel: View {
                         .accessibilityElement(children: .combine)
                     }
                 }
+                if room.members.count > 3 {
+                    Text("+\(room.members.count - 3) more in the room")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.65))
+                }
             }
-            .frame(height: 151, alignment: .top)
+            .frame(height: 151, alignment: .topLeading)
         }
     }
 
