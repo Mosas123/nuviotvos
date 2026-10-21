@@ -176,7 +176,8 @@ extension PlayerView {
         RemoteTouchCatcher(
             isActive: {
                 PlayerWindowInputCapturePolicy.allowsCapture(
-                    existingConditions: !isWakingFromBackground
+                    existingConditions: didReportPlaybackStarted
+                    && !isWakingFromBackground
                     && viewModel.currentErrorDiagnostic == nil && !viewModel.showSettingsPanel
                     && !viewModel.showScenePanel
                     && !viewModel.isSceneDetailVisible
@@ -205,7 +206,8 @@ extension PlayerView {
             // Tap or hold left/right seek is active during video playback,
             // when controls are hidden or when the timeline is focused.
             isActive: PlayerWindowInputCapturePolicy.allowsCapture(
-                existingConditions: !isWakingFromBackground
+                existingConditions: didReportPlaybackStarted
+                && !isWakingFromBackground
                 && viewModel.currentErrorDiagnostic == nil
                 && !viewModel.showSettingsPanel
                 && !viewModel.showScenePanel
@@ -352,17 +354,17 @@ extension PlayerView {
         // disabled), and dropping its opacity to hide that glow also makes the
         // focus engine skip it entirely — so `up` produced no move command.
         // A focusable Color draws no highlight yet stays reliably focusable at
-        // full opacity. Kept mounted full-time (mounting it only when the
-        // controls hide raced the timeline losing focusability, leaving focus in
-        // a void); non-focusable while the controls are up so focus hands cleanly
-        // to the timeline, focusable again the instant they hide. `up`/`down`
-        // reveal via the PlayerView `onMoveCommand`; the select click toggles
-        // play/pause via the tap gesture.
+        // full opacity. Kept mounted full-time; it is disabled during startup so
+        // the loading overlay can route input and the controls can take focus.
+        // After playback starts, it owns focus while controls are hidden and
+        // hands focus to the timeline when they appear. Select toggles playback
+        // only after startup is ready.
         Color.clear
             .ignoresSafeArea()
             .contentShape(Rectangle())
             .focusable(
-                (!viewModel.showControls || !didReportPlaybackStarted || viewModel.isSwitchingSource || viewModel.showPauseOverlay)
+                didReportPlaybackStarted
+                    && (!viewModel.showControls || viewModel.isSwitchingSource || viewModel.showPauseOverlay)
                     && !viewModel.isScrubbing
                     && !viewModel.isHoldingSeek
                     && viewModel.currentErrorDiagnostic == nil
@@ -380,6 +382,10 @@ extension PlayerView {
                 screensaverDebugLog("[ScreensaverDebug][Input] onTapGesture: isWakingFromBg=\(isWakingFromBackground) (elapsedWake=\(String(format: "%.3f", elapsedWake))s), isScrubbing=\(viewModel.isScrubbing), showPauseOverlay=\(viewModel.showPauseOverlay), status=\(viewModel.status), pos=\(viewModel.time.current)")
                 guard !isWakingFromBackground else {
                     screensaverDebugLog("[ScreensaverDebug][Input] onTapGesture suppressed by isWakingFromBackground")
+                    return
+                }
+                guard didReportPlaybackStarted else {
+                    revealControlsAndFocusSettings()
                     return
                 }
                 viewModel.handleSelectTap(
@@ -438,13 +444,14 @@ extension PlayerView {
                     }
                 },
                 watchPartyContent: WatchPartyConfiguration.isEnabled && watchPartyOwner?.service != nil && !isStandalonePlaybackSession
-                    ? { focus, tabFocus in
+                    ? { focus, focusContext in
                         guard let owner = watchPartyOwner, let service = owner.service else {
                             return AnyView(EmptyView())
                         }
                         return AnyView(PlayerWatchPartyPanel(
                             viewModel: viewModel, owner: owner, service: service,
-                            focusedControlID: focus, focusedTab: tabFocus,
+                            focusedControlID: focus,
+                            focusContext: focusContext,
                             isCurrentPlayerSurface: isCurrentPlayerSurface,
                             onOpenLobby: onOpenWatchPartyLobby
                         ))
@@ -695,10 +702,11 @@ extension PlayerView {
 
     @ViewBuilder
     var playerControlsLayer: some View {
-        if didReportPlaybackStarted, viewModel.currentErrorDiagnostic == nil {
+        if viewModel.currentErrorDiagnostic == nil {
             let isSeekingOrControlsVisible = (viewModel.showControls || viewModel.isScrubbing || viewModel.isHoldingSeek || viewModel.pendingSeekDelta != 0) && !viewModel.showScenePanel && !viewModel.isSceneDetailVisible
             PlayerControls(
                 viewModel: viewModel,
+                didReportPlaybackStarted: didReportPlaybackStarted,
                 isSkipSegmentFocused: skipSegmentFocused,
                 isNextEpisodeFocused: nextEpisodeFocused || cancelAutoPlayFocused,
                 requestedFocus: $requestedControlFocus,
@@ -708,7 +716,6 @@ extension PlayerView {
             .offset(y: viewModel.showScenePanel ? -160 : 0)
             .opacity(
                 isSeekingOrControlsVisible
-                    && didReportPlaybackStarted
                     && !viewModel.isSwitchingSource
                     && !viewModel.showSettingsPanel
                     && !viewModel.showPauseOverlay
@@ -716,7 +723,6 @@ extension PlayerView {
             )
             .scaleEffect(
                 isSeekingOrControlsVisible
-                    && didReportPlaybackStarted
                     && !viewModel.isSwitchingSource
                     && !viewModel.showSettingsPanel
                     && !viewModel.showPauseOverlay
@@ -724,7 +730,6 @@ extension PlayerView {
             )
             .allowsHitTesting(
                 isSeekingOrControlsVisible
-                    && didReportPlaybackStarted
                     && !viewModel.isSwitchingSource
                     && !viewModel.showSettingsPanel
                     && !viewModel.showPauseOverlay
@@ -749,7 +754,7 @@ extension PlayerView {
     var settingsPanelLayer: some View {
         // Settings panel (subtitles / audio / speed), over the dimmed video.
         if viewModel.showSettingsPanel {
-            PlayerSettingsPanel(viewModel: viewModel) {
+            PlayerSettingsPanel(viewModel: viewModel, didReportPlaybackStarted: didReportPlaybackStarted) {
                 viewModel.showSettingsPanel = false
             }
             .transition(.opacity)
@@ -762,10 +767,10 @@ extension PlayerView {
         // Episodes / Sources side panels.
         if viewModel.sidePanel == .episodes {
             PlayerEpisodesPanel(viewModel: viewModel)
-                .zIndex(7)
+                .zIndex(25)
         } else if viewModel.sidePanel == .sources {
             PlayerSourcesPanel(viewModel: viewModel)
-                .zIndex(7)
+                .zIndex(25)
         }
     }
 }

@@ -2994,6 +2994,7 @@ class PlayerViewModel: ObservableObject {
         }()
         let isReplacementSlate = !isStandalonePlaybackSession && !isLiveStream && loadedStreamLooksLikeReplacement()
         if !isLiveStream,
+           hasPresentedCurrentLoad,
            c.hasCoherentTimeSample,
            !c.isPlayerLoading,
            !c.isAtEndOfFile,
@@ -3013,8 +3014,10 @@ class PlayerViewModel: ObservableObject {
         // still polled at 4 Hz for playback/error handling.
         // During `loadfile replace`, the controller deliberately marks its time
         // sample incoherent while its numeric properties still contain the old
-        // file's final position. Do not republish that stale timeline.
+        // file's final position. Do not accept a sample until this load has
+        // been presented, either.
         if !isLiveStream,
+           hasPresentedCurrentLoad,
            c.hasCoherentTimeSample,
            !isPreSeekSettlingSample,
            latestTime.duration > 0,
