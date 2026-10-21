@@ -248,11 +248,11 @@ struct PlayerControls: View {
     private var transportFocusOrder: [PlayerControlFocus] {
         var order: [PlayerControlFocus] = []
         if viewModel.isPictureInPictureSupported && playerShowPiP { order.append(.pip) }
+        if showWatchPartyButton { order.append(.watchParty) }
         if viewModel.canShowEpisodesPanel && playerShowEpisodes { order.append(.episodes) }
         if viewModel.canShowSourcesPanel && playerShowSources { order.append(.sources) }
         if canShowSubtitlePicker && playerShowSubtitles { order.append(.subtitles) }
         if canShowAudioPicker && playerShowAudio { order.append(.audio) }
-        if showWatchPartyButton { order.append(.watchParty) }
         order.append(.settings)
         return order
     }
@@ -435,6 +435,21 @@ struct PlayerControls: View {
                 .id("pip_button")
             }
 
+            if showWatchPartyButton {
+                glassIconButton(
+                    size: 70,
+                    iconSize: 28,
+                    focusKey: .watchParty,
+                    isFocused: focusedControl == .watchParty
+                ) {
+                    onOpenWatchPartyMenu()
+                } icon: {
+                    Image(systemName: "person.2.fill")
+                }
+                .id("watch_party_button")
+                .accessibilityLabel("Watch Party")
+            }
+
             if viewModel.canShowEpisodesPanel && playerShowEpisodes {
                 glassIconButton(
                     size: 70,
@@ -506,21 +521,6 @@ struct PlayerControls: View {
                 .onMoveCommand { direction in
                     handleMove(direction, from: .audio)
                 }
-            }
-
-            if showWatchPartyButton {
-                glassIconButton(
-                    size: 70,
-                    iconSize: 28,
-                    focusKey: .watchParty,
-                    isFocused: focusedControl == .watchParty
-                ) {
-                    onOpenWatchPartyMenu()
-                } icon: {
-                    Image(systemName: "person.2.fill")
-                }
-                .id("watch_party_button")
-                .accessibilityLabel("Watch Party")
             }
 
             glassIconButton(
