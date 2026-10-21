@@ -780,6 +780,7 @@ extension PlayerView {
             PlayerWatchPartyMenu(
                 viewModel: viewModel, owner: owner, service: service,
                 isCurrentPlayerSurface: isCurrentPlayerSurface,
+                onOpenLobby: onOpenWatchPartyLobby,
                 onClose: {
                     showingWatchPartyMenu = false
                     viewModel.revealControls()
