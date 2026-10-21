@@ -568,7 +568,7 @@ struct WatchPartyLobbyView: View {
             hostSeatSummary(room, party: party)
             if invitationSetupBlocked && party.hostMemberID == room.memberID {
                 statusRow(
-                    symbol: "lock.trianglebadge.exclamationmark",
+                    symbol: "lock.shield",
                     title: "Room code is hidden until playback permissions are confirmed.",
                     tint: .orange
                 )
