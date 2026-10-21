@@ -421,41 +421,49 @@ extension PlayerView {
     @ViewBuilder
     var scenePanelLayer: some View {
         if viewModel.showScenePanel {
-            ScenePanelView(
-                viewModel: viewModel.sceneViewModel,
-                isAdvancing: viewModel.isAdvancingEpisode,
-                onDismiss: {
-                    withAnimation(.playerControls) {
-                        viewModel.closeScene()
-                        focusRemoteInput()
-                    }
-                },
-                onPlayNextEpisode: {
-                    guard !isWakingFromBackground else { return }
-                    withAnimation(.playerControls) {
-                        viewModel.closeScene()
-                        viewModel.playNextEpisode()
-                    }
-                },
-                watchPartyContent: WatchPartyConfiguration.isEnabled && watchPartyOwner?.service != nil && !isStandalonePlaybackSession
-                    ? { focus, tabFocus in
-                        guard let owner = watchPartyOwner, let service = owner.service else {
-                            return AnyView(EmptyView())
+            Group {
+                if canShowWatchPartyButton, let owner = watchPartyOwner,
+                   let service = owner.service {
+                    PlayerWatchPartySceneBridge(
+                        sceneViewModel: viewModel.sceneViewModel,
+                        playerViewModel: viewModel,
+                        owner: owner,
+                        service: service,
+                        isAdvancing: viewModel.isAdvancingEpisode,
+                        onDismiss: {
+                            withAnimation(.playerControls) {
+                                viewModel.closeScene()
+                                focusRemoteInput()
+                            }
+                        },
+                        onPlayNextEpisode: {
+                            guard !isWakingFromBackground else { return }
+                            withAnimation(.playerControls) {
+                                viewModel.closeScene()
+                                viewModel.playNextEpisode()
+                            }
                         }
-                        return AnyView(PlayerWatchPartyPanel(
-                            viewModel: viewModel, owner: owner, service: service,
-                            focusedControlID: focus, focusedTab: tabFocus,
-                            isCurrentPlayerSurface: isCurrentPlayerSurface,
-                            onOpenLobby: onOpenWatchPartyLobby
-                        ))
-                    }
-                    : nil,
-                watchPartyFocusTarget: {
-                    if watchPartyOwner?.presentation?.mount.isCurrent == true { return "party.catchUp" }
-                    guard let room = watchPartyOwner?.service?.session, let party = room.party else { return "party.create" }
-                    return party.hostMemberID == room.memberID ? "party.hostOnly" : "party.lobby"
-                }()
-            )
+                    )
+                } else {
+                    ScenePanelView(
+                        viewModel: viewModel.sceneViewModel,
+                        isAdvancing: viewModel.isAdvancingEpisode,
+                        onDismiss: {
+                            withAnimation(.playerControls) {
+                                viewModel.closeScene()
+                                focusRemoteInput()
+                            }
+                        },
+                        onPlayNextEpisode: {
+                            guard !isWakingFromBackground else { return }
+                            withAnimation(.playerControls) {
+                                viewModel.closeScene()
+                                viewModel.playNextEpisode()
+                            }
+                        }
+                    )
+                }
+            }
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(15)
         }
