@@ -218,6 +218,15 @@ struct PlayerWatchPartyMenu: View {
     @State private var showingMemberRemovalConfirmation = false
     @FocusState private var focus: String?
 
+    private var initialActionFocus: String {
+        guard let room = service.session, let party = room.party else { return "create" }
+        if room.memberID != party.hostMemberID,
+           owner.presentation?.mount.isCurrent != true {
+            return "leave"
+        }
+        return "firstRoomAction"
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             LinearGradient(
@@ -260,7 +269,7 @@ struct PlayerWatchPartyMenu: View {
         }
         .onAppear {
             viewModel.setControlsAutoHideSuspended(true)
-            focus = service.session?.party == nil ? "create" : "firstRoomAction"
+            focus = initialActionFocus
         }
         .onReceive(owner.$service) { currentService in
             if currentService !== service { onClose() }
@@ -276,7 +285,7 @@ struct PlayerWatchPartyMenu: View {
             memberToRemove = nil
             memberRemovalRoomID = nil
             showingMemberRemovalConfirmation = false
-            focus = "firstRoomAction"
+            focus = initialActionFocus
         }
         .focusSection()
         .onExitCommand(perform: onClose)
