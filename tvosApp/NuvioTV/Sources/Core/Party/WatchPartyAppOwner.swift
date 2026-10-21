@@ -17,7 +17,19 @@ final class WatchPartyAppOwner: ObservableObject {
     // The backend currently configures host-only after room creation. Hide
     // invitations while the explicit host choice remains unconfirmed.
     @Published private(set) var pendingHostOnlyRoomID: String?
+    // Local acknowledgement of one consented broadcast, not a persistent
+    // server source or a guarantee that peers still have a valid link.
+    @Published private(set) var locallySharedStreamRoomID: String?
     private var requestedHostOnly = true
+
+    func markLocalStreamShared(roomID: String) {
+        guard service?.session?.party?.id == roomID else { return }
+        locallySharedStreamRoomID = roomID
+    }
+
+    func clearLocalStreamShared(roomID: String) {
+        if locallySharedStreamRoomID == roomID { locallySharedStreamRoomID = nil }
+    }
 
     func confirmPendingHostOnly() async throws {
         guard let service, let room = service.session, let party = room.party,
@@ -316,6 +328,8 @@ final class WatchPartyAppOwner: ObservableObject {
             finishPlayback(reportBrowsing: false)
         }
         try await service.leave(endForEveryone: endForEveryone)
+        locallySharedStreamRoomID = nil
+        pendingHostOnlyRoomID = nil
     }
 
     /// Root consumes this when the presentation disappears after an explicit leave/end.
@@ -332,6 +346,7 @@ final class WatchPartyAppOwner: ObservableObject {
         let oldRuntime = runtime
         let oldService = service
         pendingHostOnlyRoomID = nil
+        locallySharedStreamRoomID = nil
         runtime = nil
         service = nil
         authManager = nil
@@ -362,6 +377,9 @@ final class WatchPartyAppOwner: ObservableObject {
                 if service?.session !== next { self?.finishPlayback(reportBrowsing: false) }
                 if next?.party?.id != self?.pendingHostOnlyRoomID {
                     self?.pendingHostOnlyRoomID = nil
+                }
+                if next?.party?.id != self?.locallySharedStreamRoomID {
+                    self?.locallySharedStreamRoomID = nil
                 }
                 self?.observeRoom(next)
             }
