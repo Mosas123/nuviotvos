@@ -75,6 +75,18 @@ struct WatchPartyRoomCreationSnapshot {
     fileprivate let transportIntentRevision: UInt64
 }
 
+@MainActor
+struct WatchPartyIncomingEpisodePlan {
+    typealias Completion = @MainActor (
+        UUID, WatchPartyPlaybackContext, WatchPartyMedia, NuvioVideo, PreparedNextStream, UUID
+    ) async -> Bool
+
+    let episode: NuvioVideo
+    let title: String
+    let resolve: (NuvioVideo, UUID?) async -> PreparedNextStream?
+    let complete: Completion
+}
+
 enum WatchPartyRoomCreationError: Error {
     case unsupportedMedia
     case invalidEpisode
@@ -311,6 +323,11 @@ class PlayerViewModel: ObservableObject {
     /// Resolves a next episode into a ready-to-play stream, provided by the app
     /// layer (reuses the details screen's add-on fetch + smart selection).
     private var resolveNextStream: ((NuvioVideo, UUID?) async -> PreparedNextStream?)?
+    private var onWatchPartyEpisodeResolved: (@MainActor (NuvioVideo, PreparedNextStream) async -> Bool)?
+    private var onWatchPartyIncomingMediaResolved: WatchPartyIncomingEpisodePlan.Completion?
+    var onWatchPartySourceChanged: (@MainActor () async -> Void)?
+    private var isCurrentPlayerSurface: @MainActor () -> Bool = { true }
+    private var allowsManualEpisodeSelection = true
     private(set) var startupBenchmarkToken: UUID?
 
     // MARK: - Post-Play Recommendations
@@ -1653,17 +1670,23 @@ class PlayerViewModel: ObservableObject {
         current: NuvioVideo?,
         autoPlayEnabled: Bool,
         autoPlayCountdownSeconds: Int,
-        resolver: @escaping (NuvioVideo, UUID?) async -> PreparedNextStream?
+        resolver: @escaping (NuvioVideo, UUID?) async -> PreparedNextStream?,
+        allowsManualEpisodeSelection: Bool = true,
+        isCurrentPlayerSurface: @escaping @MainActor () -> Bool = { true },
+        onWatchPartyEpisodeResolved: (@MainActor (NuvioVideo, PreparedNextStream) async -> Bool)? = nil,
+        onWatchPartyIncomingMediaResolved: WatchPartyIncomingEpisodePlan.Completion? = nil
     ) {
         guard !isStandalonePlaybackSession else {
             seriesEpisodes = []
             currentEpisodeVideo = nil
             resolveNextStream = nil
+            self.onWatchPartyEpisodeResolved = nil
+            self.onWatchPartyIncomingMediaResolved = nil
+            self.allowsManualEpisodeSelection = false
             nextEpisode = nil
             clearNextEpisodeCard()
             return
         }
-        guard watchPartyPlayerBridge == nil else { return }
         seriesEpisodes = episodes
         if currentEpisodeVideo?.id != current?.id {
             lastAdvancedEpisodeId = nil
@@ -1672,6 +1695,10 @@ class PlayerViewModel: ObservableObject {
         autoPlayNextEnabled = autoPlayEnabled
         autoPlayNextCountdownSeconds = max(1, autoPlayCountdownSeconds)
         resolveNextStream = resolver
+        self.allowsManualEpisodeSelection = allowsManualEpisodeSelection
+        self.isCurrentPlayerSurface = isCurrentPlayerSurface
+        self.onWatchPartyEpisodeResolved = onWatchPartyEpisodeResolved
+        self.onWatchPartyIncomingMediaResolved = onWatchPartyIncomingMediaResolved
         autoHiddenNextEpisodeCard = false
         showNextEpisodeCard = false
         nextEpisodeCountdown = nil
@@ -1706,6 +1733,93 @@ class PlayerViewModel: ObservableObject {
         }
     }
 
+    /// Breaks closures back into the app root before the checked Watch Party mount is released.
+    /// The episode callback may retain that mount, which itself owns this player model.
+    func clearWatchPartyTransitionCallbacks() {
+        onWatchPartyEpisodeResolved = nil
+        onWatchPartyIncomingMediaResolved = nil
+        onWatchPartySourceChanged = nil
+    }
+
+    func incomingWatchPartyEpisodePlan(for media: WatchPartyMedia) -> WatchPartyIncomingEpisodePlan? {
+        guard watchPartyPlayerBridge != nil,
+              let activeMeta, activeMeta.isSeries,
+              let episode = nextEpisode,
+              EpisodeReleasePolicy.hasAired(episode.released),
+              let resolver = resolveNextStream,
+              let complete = onWatchPartyIncomingMediaResolved,
+              let expected = try? WatchPartyLaunchPolicy.mediaForPlayback(
+                activeMeta, episode: episode, room: media
+              ), expected.key == media.key else { return nil }
+        return WatchPartyIncomingEpisodePlan(
+            episode: episode,
+            title: activeMeta.name,
+            resolve: resolver,
+            complete: complete
+        )
+    }
+
+    func resolveIncomingWatchPartyEpisode(
+        _ plan: WatchPartyIncomingEpisodePlan,
+        media: WatchPartyMedia,
+        context: WatchPartyPlaybackContext,
+        transitionID: UUID,
+        isCurrent: @escaping @MainActor () -> Bool,
+        waitUntilReady: @escaping @MainActor () async -> Bool
+    ) async -> Bool {
+        guard isCurrent() else { return false }
+        let startupToken = PlaybackStartupTiming.start(title: plan.title)
+        let prepared = await plan.resolve(plan.episode, startupToken)
+        guard let prepared, !Task.isCancelled, isCurrent(),
+              nextEpisode?.id == plan.episode.id,
+              isIncomingWatchPartyEpisode(plan.episode, matching: media),
+              PlaybackStartupTiming.isActive(token: startupToken) else {
+            PlaybackStartupTiming.cancel(token: startupToken)
+            if let prepared,
+               PictureInPictureManager.shared.activeCoordinator?.torrentStreamSourceURL != prepared.url {
+                await TorrentEngineManager.shared.stopActiveStream(for: prepared.url)
+            }
+            return false
+        }
+        guard await waitUntilReady(), !Task.isCancelled, isCurrent(),
+              nextEpisode?.id == plan.episode.id,
+              isIncomingWatchPartyEpisode(plan.episode, matching: media) else {
+            PlaybackStartupTiming.cancel(token: startupToken)
+            if PictureInPictureManager.shared.activeCoordinator?.torrentStreamSourceURL != prepared.url {
+                await TorrentEngineManager.shared.stopActiveStream(for: prepared.url)
+            }
+            return false
+        }
+        let accepted = await plan.complete(transitionID, context, media, plan.episode, prepared, startupToken)
+        guard accepted else {
+            PlaybackStartupTiming.cancel(token: startupToken)
+            if PictureInPictureManager.shared.activeCoordinator?.torrentStreamSourceURL != prepared.url {
+                await TorrentEngineManager.shared.stopActiveStream(for: prepared.url)
+            }
+            return false
+        }
+        return true
+    }
+
+    func openWatchPartyScene() {
+        openScene()
+        sceneViewModel.selectTab(.watchParty)
+    }
+
+    func isCurrentWatchPartyPlayerSurface() -> Bool {
+        isCurrentPlayerSurface()
+    }
+
+    private func isIncomingWatchPartyEpisode(_ episode: NuvioVideo, matching media: WatchPartyMedia) -> Bool {
+        guard let activeMeta, activeMeta.isSeries,
+              nextEpisode?.id == episode.id,
+              EpisodeReleasePolicy.hasAired(episode.released),
+              let expected = try? WatchPartyLaunchPolicy.mediaForPlayback(
+                activeMeta, episode: episode, room: media
+              ) else { return false }
+        return expected.key == media.key
+    }
+
     private static func nextEpisode(after current: NuvioVideo?, in episodes: [NuvioVideo]) -> NuvioVideo? {
         guard let current, let index = episodes.firstIndex(where: { $0.id == current.id }) else { return nil }
         let following = episodes.index(after: index)
@@ -1725,7 +1839,7 @@ class PlayerViewModel: ObservableObject {
     /// Re-evaluated on every poll tick: shows the card with Skip Ending (when
     /// IntroDB has an outro) and auto-hides it like the Skip Intro card.
     private func updateNextEpisodeState() {
-        guard watchPartyPlayerBridge == nil,
+        guard allowsManualEpisodeSelection,
               let _ = nextEpisode,
               !isStandalonePlaybackSession,
               !isAdvanceInFlight,
@@ -1829,6 +1943,7 @@ class PlayerViewModel: ObservableObject {
 
     /// Restore the standalone episode presentation after leaving a room while keeping playback.
     func resumeNextEpisodeStateAfterWatchParty() {
+        clearWatchPartyTransitionCallbacks()
         guard watchPartyPlayerBridge == nil,
               let wasCancelled = watchPartySuspendedAutoPlayWasCancelled else { return }
         watchPartySuspendedAutoPlayWasCancelled = nil
@@ -2060,7 +2175,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     func advance() {
-        guard !isStandalonePlaybackSession, watchPartyPlayerBridge == nil, !isAdvanceInFlight,
+        guard allowsManualEpisodeSelection, !isStandalonePlaybackSession, !isAdvanceInFlight,
               let next = nextEpisode,
               currentEpisodeVideo?.id != next.id,
               lastAdvancedEpisodeId != next.id,
@@ -2142,6 +2257,21 @@ class PlayerViewModel: ObservableObject {
                 return
             }
             guard self.clearPendingAdvanceResolution(generation: gen) else { return }
+            if self.watchPartyPlayerBridge != nil {
+                guard let transition = self.onWatchPartyEpisodeResolved,
+                      await transition(next, prepared) else {
+                    self.cancelStartupBenchmark(token: startupToken)
+                    self.isAdvanceInFlight = false
+                    self.isAdvancingEpisode = false
+                    self.isAwaitingStreamStart = false
+                    self.isSwitchingSource = false
+                    self.lastAdvancedEpisodeId = nil
+                    self.status = .paused
+                    self.showPlayerToast("Couldn't change the Watch Party episode")
+                    return
+                }
+                return
+            }
             self.replaceStream(prepared: prepared, episode: next, resumeFrom: nil)
         }
     }
@@ -3754,6 +3884,7 @@ class PlayerViewModel: ObservableObject {
     /// Only the checked Party runtime's resource cleanup calls this entry point.
     func shutdownForWatchParty() {
         guard !didShutdown else { return }
+        clearWatchPartyTransitionCallbacks()
         let sourceURL = sessionCoordinator.torrentStreamSourceURL
         cancelStartupBenchmark()
         shutdown(preservingPictureInPicture: false)
@@ -3800,7 +3931,6 @@ class PlayerViewModel: ObservableObject {
         toastClearTask?.cancel()
         cancelPauseOverlaySchedule()
         showPauseOverlay = false
-        isAwaitingStreamStart = false
         sidePanel = nil
         availableSources = []
         cancelSourcesFetch()
@@ -3824,6 +3954,7 @@ class PlayerViewModel: ObservableObject {
         skipIntervalLoadTask = nil
         playerController.pausePlayback()
         saveProgress(force: true, eventAction: .pause)
+        isAwaitingStreamStart = false
         if preservingPictureInPicture {
             // Preserve the existing non-Party teardown path.
             playerController.destroyPlayer()
@@ -5724,7 +5855,7 @@ class PlayerViewModel: ObservableObject {
     // MARK: - Side panels (episodes / sources)
 
     var canShowEpisodesPanel: Bool {
-        !seriesEpisodes.isEmpty && !isStandalonePlaybackSession
+        allowsManualEpisodeSelection && !seriesEpisodes.isEmpty && !isStandalonePlaybackSession
     }
 
     var canShowSourcesPanel: Bool {
@@ -5827,10 +5958,6 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectSource(_ stream: NuvioStream) {
-        guard watchPartyPlayerBridge == nil else {
-            showPlayerToast("Choose a new source from the Watch Party room")
-            return
-        }
         PlaybackTimelineRecorder.record(.sourceSelectionRequested, engine: activeEngineKind)
         if let unavailableReason = stream.unavailabilityReason {
             showPlayerToast(unavailableReason)
@@ -5897,7 +6024,12 @@ class PlayerViewModel: ObservableObject {
                 BingeGroupStore.save(seriesId: meta.id, stream: stream)
             }
             self.replaceStream(prepared: prepared, episode: nil, resumeFrom: resume)
-            self.showPlayerToast("Source switched")
+            if self.watchPartyPlayerBridge != nil {
+                await self.onWatchPartySourceChanged?()
+            }
+            self.showPlayerToast(self.watchPartyPlayerBridge == nil
+                ? "Source switched"
+                : "Source switched. Share it from the Watch Party panel if guests should use it.")
         }
     }
 
@@ -5920,8 +6052,8 @@ class PlayerViewModel: ObservableObject {
     }
 
     func selectEpisode(_ episode: NuvioVideo) {
-        guard watchPartyPlayerBridge == nil else {
-            showPlayerToast("Episode switching is unavailable in Watch Party")
+        guard allowsManualEpisodeSelection else {
+            showPlayerToast("Only the host can change the room episode")
             return
         }
         guard let resolveNextStream else {
@@ -5959,6 +6091,18 @@ class PlayerViewModel: ObservableObject {
             }
             self.failedStreamURLs.removeAll()
             self.availableSources = []
+            if self.watchPartyPlayerBridge != nil {
+                guard let transition = self.onWatchPartyEpisodeResolved,
+                      await transition(episode, prepared) else {
+                    self.cancelStartupBenchmark(token: startupToken)
+                    self.isSwitchingSource = false
+                    self.isAwaitingStreamStart = false
+                    self.status = .paused
+                    self.showPlayerToast("Couldn't change the Watch Party episode")
+                    return
+                }
+                return
+            }
             self.replaceStream(prepared: prepared, episode: episode, resumeFrom: nil)
         }
     }

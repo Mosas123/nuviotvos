@@ -58,8 +58,6 @@ struct DetailsScreen: View {
 
     @StateObject private var viewModel: DetailsViewModel
     @State private var isStreamPickerPresented = false
-    @State private var isWatchPartyEpisodePickerPresented = false
-    @State private var pendingWatchPartySelection: (NuvioMeta, NuvioVideo)?
     @State private var isSmartPlaybackPending = false
     @State private var isPreparingPlayback = false
     @State private var isPreparingInitialPlayback = false
@@ -238,13 +236,9 @@ struct DetailsScreen: View {
                             forceManualPicker: true
                         )
                     },
-                    onHostWatchParty: onCreateWatchParty == nil ? nil : {
+                    onHostWatchParty: onCreateWatchParty == nil ? nil : { episode in
                         guard let meta = viewModel.uiState.meta else { return }
-                        if meta.isSeries {
-                            isWatchPartyEpisodePickerPresented = true
-                        } else {
-                            onCreateWatchParty?(meta, nil)
-                        }
+                        onCreateWatchParty?(meta, episode)
                     },
                     onEpisodeSelected: { video in
                         if creatingWatchPartyRoom, let meta = viewModel.uiState.meta {
@@ -297,7 +291,7 @@ struct DetailsScreen: View {
                 // While the stream picker is open it sits on top as a full-screen
                 // overlay; disable the details content so the focus engine can't
                 // route focus to the (hidden) buttons behind it.
-                .disabled(isStreamPickerPresented || isWatchPartyEpisodePickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
+                .disabled(isStreamPickerPresented || expandedComment != nil || isSmartPlaybackPending || isResolvingDebrid || isPreparingPlayback || isPreparingInitialPlayback)
                 #else
                 MobileDetailsContent(
                     uiState: viewModel.uiState,
@@ -345,26 +339,6 @@ struct DetailsScreen: View {
             }
         }
         #if os(tvOS)
-        .fullScreenCover(isPresented: $isWatchPartyEpisodePickerPresented, onDismiss: {
-            // Wait for the native focus hierarchy to dismiss before navigating.
-            guard let selection = pendingWatchPartySelection else { return }
-            pendingWatchPartySelection = nil
-            onCreateWatchParty?(selection.0, selection.1)
-        }) {
-            if let meta = viewModel.uiState.meta {
-                WatchPartyDetailsEpisodePicker(
-                    episodes: (meta.videos ?? []).filter { $0.episode > 0 && $0.season >= 0 },
-                    onSelect: { episode in
-                        pendingWatchPartySelection = (meta, episode)
-                        isWatchPartyEpisodePickerPresented = false
-                    },
-                    onCancel: {
-                        pendingWatchPartySelection = nil
-                        isWatchPartyEpisodePickerPresented = false
-                    }
-                )
-            }
-        }
         // Present sources in an isolated full-screen focus hierarchy. Keeping
         // this overlay inside the details screen's vertical ScrollView ancestry
         // lets tvOS apply focus-visibility corrections to the shared host,
@@ -3199,84 +3173,13 @@ private enum TvDetailsFocusSection: Hashable {
     case comments
 }
 
-/// A separate focus hierarchy for choosing the exact episode to host.
-private struct WatchPartyDetailsEpisodePicker: View {
-    let episodes: [NuvioVideo]
-    let onSelect: (NuvioVideo) -> Void
-    let onCancel: () -> Void
-
-    @FocusState private var focusedEpisodeID: String?
-
-    private var sortedEpisodes: [NuvioVideo] {
-        episodes.sorted {
-            ($0.season, $0.episode, $0.id) < ($1.season, $1.episode, $1.id)
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            HStack {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Choose an episode")
-                        .font(.system(size: 40, weight: .bold))
-                    Text("Your Watch Party room will be created for this exact episode.")
-                        .font(.system(size: 21))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Cancel", action: onCancel)
-            }
-            .padding(.horizontal, 64)
-
-            if sortedEpisodes.isEmpty {
-                ContentUnavailableView(
-                    "Episodes unavailable",
-                    systemImage: "tv",
-                    description: Text("Wait for the episode list to load before creating a room.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 14) {
-                        ForEach(sortedEpisodes, id: \.id) { episode in
-                            Button {
-                                onSelect(episode)
-                            } label: {
-                                HStack(spacing: 20) {
-                                    Text("S\(episode.season) · E\(episode.episode)")
-                                        .font(.system(size: 23, weight: .semibold, design: .monospaced))
-                                    Text(episode.title)
-                                        .font(.system(size: 22))
-                                        .lineLimit(2)
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                }
-                                .padding(22)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 18))
-                            }
-                            .buttonStyle(.plain)
-                            .focused($focusedEpisodeID, equals: episode.id)
-                        }
-                    }
-                    .padding(.horizontal, 64)
-                }
-            }
-        }
-        .padding(.vertical, 46)
-        .background(Color.black.ignoresSafeArea())
-        .onAppear { focusedEpisodeID = sortedEpisodes.first?.id }
-        .onExitCommand(perform: onCancel)
-    }
-}
-
 struct TvDetailsContent: View {
     let uiState: DetailsUiState
     var initialPlayRequestID: UInt? = nil
     var onInitialPlayRequestConsumed: ((UInt) -> Void)? = nil
     let onPlayClick: () -> Void
     var onPlayManually: (() -> Void)? = nil
-    var onHostWatchParty: (() -> Void)? = nil
+    var onHostWatchParty: ((NuvioVideo?) -> Void)? = nil
     let onEpisodeSelected: (NuvioVideo) -> Void
     var onEpisodePlayManually: ((NuvioVideo) -> Void)? = nil
     var onEpisodeMenuPresented: ((Bool) -> Void)? = nil
@@ -3301,6 +3204,7 @@ struct TvDetailsContent: View {
     /// The section that currently owns focus. Other sections expose only their
     /// remembered entry anchor, matching Settings' pre-spatial focus lock.
     @State private var focusedDetailsSection: TvDetailsFocusSection = .actions
+    @State private var isChoosingWatchPartyEpisode = false
     @State private var consumedInitialPlayRequestID: UInt?
     @State private var detailsFocusMoveGeneration = 0
     @State private var pendingPlayFocusGeneration: Int?
@@ -3567,7 +3471,13 @@ struct TvDetailsContent: View {
             onPlayLongPress: canBypassPicker ? {
                 handlePlayLongPress(playTarget: playTarget)
             } : nil,
-            onHostWatchParty: onHostWatchParty,
+            onHostWatchParty: onHostWatchParty == nil ? nil : {
+                beginWatchPartyEpisodeSelection(
+                    meta: meta,
+                    playTarget: playTarget,
+                    scrollProxy: scrollProxy
+                )
+            },
             onWatchlistClick: onWatchlistClick,
             onWatchedClick: onWatchedClick,
             onRateClick: onRateClick != nil ? {
@@ -3625,6 +3535,31 @@ struct TvDetailsContent: View {
             onPlayManually()
         } else {
             onPlayClick()
+        }
+    }
+
+    private func beginWatchPartyEpisodeSelection(
+        meta: NuvioMeta,
+        playTarget: TvDetailsPlayTarget,
+        scrollProxy: ScrollViewProxy
+    ) {
+        stopBackgroundTrailer(manual: false)
+        guard meta.isSeries else {
+            onHostWatchParty?(nil)
+            return
+        }
+        guard let episode = playTarget.episode else { return }
+
+        isChoosingWatchPartyEpisode = true
+        cancelPendingFocusHandoff()
+        focusedDetailsSection = .episodes
+        withAnimation(.easeOut(duration: TvDetailsScrollTiming.duration)) {
+            scrollProxy.scrollTo(TvDetailsScrollID.episodesSection, anchor: .top)
+        }
+        let target = TvEpisodeFocus.card(episode.id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + TvDetailsScrollTiming.duration) {
+            guard isChoosingWatchPartyEpisode else { return }
+            episodeFocus = target
         }
     }
 
@@ -3702,6 +3637,8 @@ struct TvDetailsContent: View {
                                     presentationRevision: episodePresentation.revision,
                                     seriesRating: meta.rating,
                                     continueItem: continueItem,
+                                    isChoosingWatchPartyEpisode: isChoosingWatchPartyEpisode,
+                                    onCancelWatchPartySelection: { isChoosingWatchPartyEpisode = false },
                                     onFocus: {
                                         cancelPendingFocusHandoff()
                                         if focusedDetailsSection != .episodes {
@@ -3719,7 +3656,12 @@ struct TvDetailsContent: View {
                                     },
                                     onSelect: { video in
                                         stopBackgroundTrailer(manual: false)
-                                        onEpisodeSelected(video)
+                                        if isChoosingWatchPartyEpisode {
+                                            isChoosingWatchPartyEpisode = false
+                                            onHostWatchParty?(video)
+                                        } else {
+                                            onEpisodeSelected(video)
+                                        }
                                     },
                                     onPlayManually: onEpisodePlayManually != nil ? { video in
                                         stopBackgroundTrailer(manual: false)
@@ -6827,6 +6769,8 @@ private struct TvDetailsEpisodes: View {
     let presentationRevision: TvDetailsEpisodePresentationRevision
     let seriesRating: Double?
     let continueItem: ContinueWatchingItem?
+    let isChoosingWatchPartyEpisode: Bool
+    let onCancelWatchPartySelection: () -> Void
     let onFocus: () -> Void
     let onSelect: (NuvioVideo) -> Void
     var onPlayManually: ((NuvioVideo) -> Void)? = nil
@@ -6862,6 +6806,8 @@ private struct TvDetailsEpisodes: View {
         presentationRevision: TvDetailsEpisodePresentationRevision,
         seriesRating: Double?,
         continueItem: ContinueWatchingItem?,
+        isChoosingWatchPartyEpisode: Bool = false,
+        onCancelWatchPartySelection: @escaping () -> Void = {},
         onFocus: @escaping () -> Void,
         onSelect: @escaping (NuvioVideo) -> Void,
         onPlayManually: ((NuvioVideo) -> Void)? = nil,
@@ -6879,6 +6825,8 @@ private struct TvDetailsEpisodes: View {
         self.presentationRevision = presentationRevision
         self.seriesRating = seriesRating
         self.continueItem = continueItem
+        self.isChoosingWatchPartyEpisode = isChoosingWatchPartyEpisode
+        self.onCancelWatchPartySelection = onCancelWatchPartySelection
         self.onFocus = onFocus
         self.onSelect = onSelect
         self.onPlayManually = onPlayManually
@@ -6901,13 +6849,20 @@ private struct TvDetailsEpisodes: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
+            if isChoosingWatchPartyEpisode {
+                watchPartySelectionPrompt
+            }
             watchedProgressSummary
             seasonSelector
             episodeCardStrip
         }
         .focusSection()
         .onExitCommand {
-            onBack?()
+            if isChoosingWatchPartyEpisode {
+                onCancelWatchPartySelection()
+            } else {
+                onBack?()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: WatchedStore.changedNotification).receive(on: RunLoop.main)) { _ in
             refreshWatchedState()
@@ -6934,6 +6889,21 @@ private struct TvDetailsEpisodes: View {
         .onChange(of: selectedSeason) { _, newSeason in
             setSeasonEpisodes(episodeGuide.episodesBySeason[newSeason] ?? [])
         }
+    }
+
+    private var watchPartySelectionPrompt: some View {
+        HStack(spacing: 18) {
+            Label("Choose an episode for your Watch Party", systemImage: "person.2.fill")
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(.white)
+            Spacer()
+            Button("Cancel", action: onCancelWatchPartySelection)
+                .buttonStyle(PosterCardButtonStyle())
+                .focusEffectDisabledIfAvailable()
+        }
+        .padding(.horizontal, 30)
+        .padding(.vertical, 18)
+        .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private func refreshEpisodeGuideState() {

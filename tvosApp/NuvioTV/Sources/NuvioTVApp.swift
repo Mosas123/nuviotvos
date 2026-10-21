@@ -571,6 +571,10 @@ struct ContentView: View {
         }
         .onChange(of: activeScreen) { oldScreen, newScreen in
             TVHomeDebugTrace.log("app.activeScreen changed from \(oldScreen) to \(newScreen)")
+            if oldScreen.isPlayer, !newScreen.isPlayer,
+               let transitionID = watchPartyOwner.incomingMediaTransition?.id {
+                watchPartyOwner.cancelIncomingMediaTransition(transitionID)
+            }
             if oldScreen != newScreen, !newScreen.isPlayer, partyLaunchTask != nil {
                 partyLaunchID = UUID(); partyLaunchTask?.cancel(); partyLaunchTask = nil
             }
@@ -610,6 +614,9 @@ struct ContentView: View {
                     activeScreen = .main; selectedTab = WatchPartyConfiguration.isEnabled ? .party : .home
                 }
             }
+        }
+        .onChange(of: watchPartyOwner.incomingMediaTransition?.id) { _, transitionID in
+            handleIncomingMediaTransitionChange(transitionID)
         }
         .onReceive(authManager.contextWillChange.merge(with: profileViewModel.contextWillChange)) { _ in
             partyDetailsOrigin = nil
@@ -1859,6 +1866,198 @@ struct ContentView: View {
         }
     }
 
+    @MainActor
+    private func changeWatchPartyEpisode(
+        _ episode: NuvioVideo,
+        prepared: PreparedNextStream,
+        sourceViewModel: PlayerViewModel,
+        expectedPresentationID: UUID,
+        expectedSurfaceID: UUID,
+        meta: NuvioMeta
+    ) async -> Bool {
+        guard activeScreen.isPlayer, playerSurfaceID == expectedSurfaceID,
+              playbackPartyID == expectedPresentationID,
+              let presentation = watchPartyOwner.presentation,
+              presentation.id == expectedPresentationID,
+              presentation.mount.isCurrent,
+              presentation.mount.viewModel === sourceViewModel,
+              let service = watchPartyOwner.service,
+              let room = service.session,
+              room.connection == .ready,
+              room.playbackContext == presentation.context,
+              room.party?.hostMemberID == room.memberID else { return false }
+
+        let startupToken = sourceViewModel.startupBenchmarkToken
+        var nextStartupToken: UUID?
+        do {
+            let media = try WatchPartyLaunchPolicy.mediaForPlayback(
+                meta, episode: episode, room: room.party?.media
+            )
+            try await watchPartyOwner.updateRoomMedia(media)
+            try Task.checkCancellation()
+            guard watchPartyOwner.service === service, service.session === room,
+                  room.connection == .ready, room.party?.media.key == media.key,
+                  activeScreen.isPlayer, playerSurfaceID == expectedSurfaceID else {
+                throw WatchPartyPlaybackRuntimeError.staleContext
+            }
+
+            playbackCurrentEpisode = episode
+            PlaybackStartupTiming.cancel(token: startupToken)
+            nextStartupToken = PlaybackStartupTiming.start(title: meta.name)
+            let nextPresentation = try watchPartyOwner.preparePlayback(media: media)
+            presentBuiltInPlayer(
+                url: prepared.url,
+                meta: meta,
+                subtitle: prepared.subtitleLine,
+                httpHeaders: prepared.httpHeaders,
+                externalSubtitles: prepared.subtitles,
+                resumeFrom: nil,
+                origin: playbackOrigin,
+                cacheFileIdentity: prepared.cacheFileIdentity,
+                filename: prepared.filename,
+                videoSize: prepared.videoSize,
+                videoHash: prepared.videoHash,
+                startupBenchmarkToken: nextStartupToken,
+                sourceID: prepared.sourceID,
+                party: nextPresentation
+            )
+            return true
+        } catch {
+            PlaybackStartupTiming.cancel(token: startupToken)
+            PlaybackStartupTiming.cancel(token: nextStartupToken)
+            guard activeScreen.isPlayer, playerSurfaceID == expectedSurfaceID,
+                  playbackPartyID == expectedPresentationID else { return false }
+            if watchPartyOwner.presentation?.id == expectedPresentationID {
+                watchPartyOwner.message = "Couldn't change the Watch Party episode. Try again."
+            } else {
+                playbackPartyID = nil
+                selectedTab = .party
+                activeScreen = .main
+            }
+            return false
+        }
+    }
+
+    @MainActor
+    private func handleIncomingMediaTransitionChange(_ transitionID: UUID?) {
+        guard let transitionID,
+              let transition = watchPartyOwner.incomingMediaTransition,
+              transition.id == transitionID else { return }
+        guard case let .player(_, meta, _, _, _, _) = activeScreen else {
+            watchPartyOwner.cancelIncomingMediaTransition(transitionID)
+            return
+        }
+        let expectedSurfaceID = playerSurfaceID
+        Task { @MainActor in
+            await handleIncomingWatchPartyMediaTransition(
+                transition, expectedSurfaceID: expectedSurfaceID, meta: meta
+            )
+        }
+    }
+
+    @MainActor
+    private func completeIncomingWatchPartyEpisode(
+        transitionID: UUID,
+        context: WatchPartyPlaybackContext,
+        media: WatchPartyMedia,
+        episode: NuvioVideo,
+        prepared: PreparedNextStream,
+        startupToken: UUID,
+        expectedSurfaceID: UUID,
+        meta: NuvioMeta
+    ) async -> Bool {
+        guard activeScreen.isPlayer, playerSurfaceID == expectedSurfaceID,
+              watchPartyOwner.isCurrentIncomingMediaTransition(transitionID, context: context),
+              let service = watchPartyOwner.service,
+              let room = service.session,
+              room.connection == .ready,
+              room.playbackContext == context,
+              room.party?.media.key == media.key,
+              context.mediaKey == media.key else { return false }
+
+        do {
+            let presentation = try watchPartyOwner.preparePlayback(media: media)
+            playbackCurrentEpisode = episode
+            presentBuiltInPlayer(
+                url: prepared.url,
+                meta: meta,
+                subtitle: prepared.subtitleLine,
+                httpHeaders: prepared.httpHeaders,
+                externalSubtitles: prepared.subtitles,
+                resumeFrom: nil,
+                origin: playbackOrigin,
+                cacheFileIdentity: prepared.cacheFileIdentity,
+                filename: prepared.filename,
+                videoSize: prepared.videoSize,
+                videoHash: prepared.videoHash,
+                startupBenchmarkToken: startupToken,
+                sourceID: prepared.sourceID,
+                party: presentation
+            )
+            watchPartyOwner.completeIncomingMediaTransition(transitionID, context: context)
+            return true
+        } catch {
+            PlaybackStartupTiming.cancel(token: startupToken)
+            return false
+        }
+    }
+
+    @MainActor
+    private func handleIncomingWatchPartyMediaTransition(
+        _ transition: WatchPartyAppOwner.IncomingMediaTransition,
+        expectedSurfaceID: UUID,
+        meta: NuvioMeta
+    ) async {
+        let id = transition.id
+        let context = transition.context
+        let viewModel = transition.viewModel
+        guard activeScreen.isPlayer, playerSurfaceID == expectedSurfaceID,
+              watchPartyOwner.isCurrentIncomingMediaTransition(id, context: context) else {
+            watchPartyOwner.cancelIncomingMediaTransition(id)
+            return
+        }
+        guard let plan = transition.plan,
+              let service = watchPartyOwner.service,
+              let room = service.session else {
+            if !watchPartyOwner.showWatchPartyAfterIncomingMediaTransition(id) {
+                selectedTab = .party
+                activeScreen = .main
+            }
+            return
+        }
+
+        let isCurrent: @MainActor () -> Bool = {
+            activeScreen.isPlayer && playerSurfaceID == expectedSurfaceID
+                && watchPartyOwner.isCurrentIncomingMediaTransition(id, context: context)
+        }
+        let waitUntilReady: @MainActor () async -> Bool = {
+            let deadline = Date().addingTimeInterval(20)
+            while service.session === room, room.connection != .ready {
+                guard !Task.isCancelled, isCurrent(),
+                      Date() < deadline else { return false }
+                do { try await Task.sleep(nanoseconds: 100_000_000) }
+                catch { return false }
+            }
+            return !Task.isCancelled && isCurrent()
+        }
+        let resolved = await viewModel.resolveIncomingWatchPartyEpisode(
+            plan, media: transition.media, context: context,
+            transitionID: id, isCurrent: isCurrent,
+            waitUntilReady: waitUntilReady
+        )
+        guard watchPartyOwner.incomingMediaTransition?.id == id else { return }
+        guard activeScreen.isPlayer, playerSurfaceID == expectedSurfaceID else {
+            watchPartyOwner.cancelIncomingMediaTransition(id)
+            return
+        }
+        if !resolved {
+            if !watchPartyOwner.showWatchPartyAfterIncomingMediaTransition(id) {
+                selectedTab = .party
+                activeScreen = .main
+            }
+        }
+    }
+
     private func watchPartyMedia(
         for meta: NuvioMeta,
         episode: NuvioVideo? = nil,
@@ -1972,7 +2171,8 @@ struct ContentView: View {
                 presentation.mount.viewModel.markWatchPartySharedSource()
                 creatingParty = false; choosingPartySource = false
                 playbackIsActionPlaybackSession = false
-                playbackEpisodes = []; playbackCurrentEpisode = target.episode
+                playbackEpisodes = target.meta.isSeries ? (target.meta.videos ?? []) : []
+                playbackCurrentEpisode = target.episode
                 reopenStreamPickerOnDetails = false; reopenStreamPickerEpisode = nil
                 pendingDetailsPlaybackRequestID = nil
                 let subtitle = target.episode.map { "S\($0.season) · E\($0.episode) · \($0.title)" } ?? ""
@@ -3113,6 +3313,38 @@ struct ContentView: View {
         let party = playbackPartyID.flatMap { id in
             watchPartyOwner.presentation.flatMap { $0.id == id && $0.mount.isCurrent ? $0.mount : nil }
         }
+        let partyRoom = party == nil ? nil : watchPartyOwner.service?.session
+        let partyIsHost = party == nil
+            || (partyRoom?.memberID != nil && partyRoom?.party?.hostMemberID == partyRoom?.memberID)
+        let incomingMediaCompletion: WatchPartyIncomingEpisodePlan.Completion? = {
+            guard party != nil else { return nil }
+            return { transitionID, context, media, episode, prepared, startupToken in
+                await self.completeIncomingWatchPartyEpisode(
+                    transitionID: transitionID, context: context, media: media,
+                    episode: episode, prepared: prepared, startupToken: startupToken,
+                    expectedSurfaceID: surfaceIdentity, meta: meta
+                )
+            }
+        }()
+        let hostEpisodeResolved: (@MainActor (NuvioVideo, PreparedNextStream) async -> Bool)? = {
+            guard party != nil, partyIsHost else { return nil }
+            return { episode, prepared in
+                guard let party, let expectedID = playbackPartyID else { return false }
+                return await self.changeWatchPartyEpisode(
+                    episode, prepared: prepared, sourceViewModel: party.viewModel,
+                    expectedPresentationID: expectedID, expectedSurfaceID: surfaceIdentity, meta: meta
+                )
+            }
+        }()
+        let watchPartySourceChanged: (@MainActor () async -> Void)? = {
+            guard party != nil else { return nil }
+            return {
+                guard let room = watchPartyOwner.service?.session,
+                      let roomParty = room.party,
+                      roomParty.hostMemberID == room.memberID else { return }
+                _ = try? await room.stopSharingStream()
+            }
+        }()
         if playbackPartyID == nil || party != nil {
         PlayerView(
             url: url,
@@ -3128,12 +3360,13 @@ struct ContentView: View {
             videoHash: isStandalonePlaybackSession ? nil : playbackVideoHash,
             cacheFileIdentity: isStandalonePlaybackSession ? nil : playbackCacheFileIdentity,
             sourceID: isStandalonePlaybackSession ? nil : playbackSourceID,
-            episodes: (isStandalonePlaybackSession || party != nil) ? [] : playbackEpisodes,
+            episodes: isStandalonePlaybackSession ? [] : playbackEpisodes,
             currentEpisode: isStandalonePlaybackSession ? nil : playbackCurrentEpisode,
             initialStartupBenchmarkToken: startupBenchmarkToken,
             autoPlayNextEnabled: party == nil && autoPlayNext,
             autoPlayNextCountdownSeconds: autoPlayNextCountdown,
-            resolveNextStream: (isStandalonePlaybackSession || party != nil || !meta.isSeries) ? nil : { episode, startupToken in
+            allowsManualEpisodeSelection: party == nil || partyIsHost,
+            resolveNextStream: (isStandalonePlaybackSession || !meta.isSeries) ? nil : { episode, startupToken in
                 await Self.resolveNextEpisodeStream(
                     episode: episode,
                     seriesMeta: meta,
@@ -3168,14 +3401,14 @@ struct ContentView: View {
                     startupToken: nil
                 )
             },
-            fetchPlaybackSources: (isStandalonePlaybackSession || party != nil) ? nil : { contentId, type in
+            fetchPlaybackSources: isStandalonePlaybackSession ? nil : { contentId, type in
                 Self.playbackSourcesProgressively(
                     contentId: contentId,
                     type: type,
                     profileId: profileViewModel.activeProfile?.id
                 )
             },
-            resolvePlaybackStream: (isStandalonePlaybackSession || party != nil) ? nil : { stream, contentId, subtitleLine, startupToken in
+            resolvePlaybackStream: isStandalonePlaybackSession ? nil : { stream, contentId, subtitleLine, startupToken in
                 await Self.resolveChosenStream(
                     stream,
                     contentId: contentId,
@@ -3185,6 +3418,9 @@ struct ContentView: View {
                     startupToken: startupToken
                 )
             },
+            onWatchPartyIncomingMediaResolved: incomingMediaCompletion,
+            onWatchPartyEpisodeResolved: hostEpisodeResolved,
+            onWatchPartySourceChanged: watchPartySourceChanged,
             onRequestSources: (isStandalonePlaybackSession || party != nil) ? nil : {
                 withAnimation(.easeInOut(duration: 0.28)) {
                     reopenStreamPickerOnDetails = true

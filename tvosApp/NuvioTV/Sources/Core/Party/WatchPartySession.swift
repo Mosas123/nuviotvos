@@ -64,6 +64,7 @@ final class WatchPartySession {
     private(set) var membershipExit: WatchPartyMembershipExit?
     var onChange: (@MainActor () -> Void)?
     private(set) var sharedStream: WatchPartyStream?
+    private(set) var isSharingStream = false
     /// A received candidate is inert. The future UI must explicitly select it before resolution/playback.
     var onStream: (@MainActor (WatchPartyStream?) -> Void)?
 
@@ -273,6 +274,53 @@ final class WatchPartySession {
         }
     }
 
+    /// Changes the room's exact episode after an explicit host selection. Playback state is
+    /// omitted so an old episode position can never be applied to the new media key.
+    func updateMedia(_ media: WatchPartyMedia) async throws {
+        try requireReady(generation)
+        guard let party, let memberID, party.hostMemberID == memberID else {
+            throw WatchPartySessionError.forbidden
+        }
+        guard media.metaID == party.media.metaID,
+              media.metaType.caseInsensitiveCompare("series") == .orderedSame,
+              party.media.metaType.caseInsensitiveCompare("series") == .orderedSame,
+              media.key != party.media.key else {
+            throw WatchPartyLaunchError.differentMedia
+        }
+        try WatchPartyLaunchPolicy.validate(media)
+        guard channel?.isConnected == true else { throw WatchPartySessionError.notReady }
+
+        let epoch = generation
+        let attempt = connectionID
+        let roomID = party.id
+        let requestingMemberID = memberID
+        let snapshotRevision = authoritativeSnapshotRevision
+        cancelPersistence()
+        do {
+            let snapshot = try await remote.update(
+                partyID: party.id, deviceID: deviceID, media: media, playback: nil
+            )
+            try checkContext()
+            guard generation == epoch, self.party?.id == roomID, self.memberID == requestingMemberID else {
+                throw WatchPartyAPIError.staleContext
+            }
+            // A room event may apply the same media update before the RPC returns.
+            // Keep that newer snapshot instead of overwriting it with a late response.
+            if authoritativeSnapshotRevision == snapshotRevision { try apply(snapshot) }
+            // The backend may broadcast media invalidation just before or just after the
+            // update response, and a concurrent heartbeat can carry an older snapshot. Reconnect
+            // unconditionally before checking the media key so the accepted server state wins.
+            try await reconnect()
+            guard connection == .ready, self.party?.id == roomID,
+                  self.memberID == requestingMemberID, self.party?.media.key == media.key else {
+                throw WatchPartySessionError.notReady
+            }
+        } catch {
+            if shouldRecover(after: error) { lost(epoch: epoch, attempt: attempt) }
+            throw error
+        }
+    }
+
     private func shouldRecover(after error: Error) -> Bool {
         if error is CancellationError { return false }
         guard let error = error as? WatchPartyAPIError else { return true }
@@ -378,6 +426,8 @@ final class WatchPartySession {
         let epoch = generation, attempt = connectionID
         do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: stream), epoch: epoch) }
         catch { lost(epoch: epoch, attempt: attempt); throw error }
+        isSharingStream = true
+        notifyChange()
     }
 
     /// Revocation can clear an already shared candidate but cannot retract a URL a peer has received.
@@ -385,6 +435,8 @@ final class WatchPartySession {
         revokeStreamConsent()
         try requireReady(generation)
         guard let memberID, party?.hostMemberID == memberID else { throw WatchPartyStreamError.notHost }
+        isSharingStream = false
+        notifyChange()
         let epoch = generation, attempt = connectionID
         do { try await send("stream", WatchPartyStreamMessage(memberID: memberID, stream: nil), epoch: epoch) }
         catch { lost(epoch: epoch, attempt: attempt); throw error }
@@ -435,6 +487,7 @@ final class WatchPartySession {
     private func clearSharedStream() {
         streamConsentNonce = nil
         sharedStreamRevision = UUID()
+        isSharingStream = false
         if sharedStream != nil { sharedStream = nil; onStream?(nil) }
     }
 
