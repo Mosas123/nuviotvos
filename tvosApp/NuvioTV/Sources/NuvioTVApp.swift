@@ -2474,9 +2474,23 @@ struct ContentView: View {
             syncManager: syncManager,
             watchPartyOwner: watchPartyOwner,
             partyDetailsMedia: partyDetailsBackdrop,
-            invitationSetupBlocked: pendingWatchPartyPermission != nil
-                && pendingWatchPartyPermission?.roomID == watchPartyOwner.service?.session?.party?.id,
-            onRetryInviteSetup: retryWatchPartyHostOnly,
+            invitationSetupBlocked:
+                (pendingWatchPartyPermission != nil
+                    && pendingWatchPartyPermission?.roomID == watchPartyOwner.service?.session?.party?.id)
+                || (watchPartyOwner.pendingHostOnlyRoomID != nil
+                    && watchPartyOwner.pendingHostOnlyRoomID == watchPartyOwner.service?.session?.party?.id),
+            onRetryInviteSetup: {
+                if watchPartyOwner.pendingHostOnlyRoomID != nil {
+                    Task { @MainActor in
+                        do { try await watchPartyOwner.confirmPendingHostOnly() }
+                        catch {
+                            watchPartyOwner.message = "Host permissions are still unconfirmed. Do not invite anyone yet."
+                        }
+                    }
+                } else {
+                    retryWatchPartyHostOnly()
+                }
+            },
             onPartyRoomExited: didExitWatchPartyRoom,
             onCreateParty: {
                 partyDetailsOrigin = nil
