@@ -114,7 +114,8 @@ struct PlayerWatchPartyPanel: View {
                 statusLine("Connection", value: connectionText(room.connection))
                 statusLine("Playback control", value: party.hostOnly ? "Host only" : "Shared")
                 statusLine("Your role", value: room.memberID == party.hostMemberID ? "Host" : "Guest")
-                statusLine("Host source", value: room.sharedStream == nil ? "Not available here" : "Available · BETA")
+                statusLine("Host source", value: owner.locallySharedStreamRoomID == party.id
+                    ? "Sent · BETA" : room.sharedStream == nil ? "Not available" : "Available · BETA")
             }
         }
     }
@@ -208,7 +209,6 @@ struct PlayerWatchPartyMenu: View {
     @State private var shareLater = false
     @State private var operation: Task<Void, Never>?
     @State private var message: String?
-    @State private var hasSharedStream = false
     @State private var pendingStreamShare: WatchPartyStream?
     @State private var showingStreamWarning = false
     @State private var endingRoom = false
@@ -263,7 +263,6 @@ struct PlayerWatchPartyMenu: View {
             pendingStreamShare = nil
         }
         .onChange(of: service.session?.party?.id) { _, _ in
-            hasSharedStream = false
             focus = "firstRoomAction"
         }
         .focusSection()
@@ -364,11 +363,11 @@ struct PlayerWatchPartyMenu: View {
                 }
                 .disabled(owner.pendingHostOnlyRoomID == party.id || service.busy || operation != nil
                     || room.connection != .ready || owner.presentation?.mount.isCurrent != true)
-                if hasSharedStream {
+                if owner.locallySharedStreamRoomID == party.id {
                     menuButton("Stop sharing (does not revoke links)", icon: "xmark.shield", id: "stopShare") {
                         run {
                             try await room.stopSharingStream()
-                            hasSharedStream = false
+                            owner.clearLocalStreamShared(roomID: party.id)
                         }
                     }
                 }
@@ -458,7 +457,7 @@ struct PlayerWatchPartyMenu: View {
             let consent = try room.approveStreamSharing(source, origin: .directHTTP)
             run {
                 try await room.shareStream(source, consent: consent)
-                hasSharedStream = true
+                owner.markLocalStreamShared(roomID: party.id)
             }
         } catch {
             message = "The playback source is no longer shareable."
