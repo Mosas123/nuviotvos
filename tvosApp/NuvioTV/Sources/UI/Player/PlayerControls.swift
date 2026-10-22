@@ -1077,9 +1077,13 @@ private struct PlayerPlaybackInfoBadges: View {
                 .components(separatedBy: "|")
                 .first?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !audioFormat.isEmpty,
-               !audioFormat.localizedCaseInsensitiveContains("unknown"),
-               !values.contains(where: { $0.caseInsensitiveCompare(audioFormat) == .orderedSame }) {
+            let hasAtmos = "\(audio.name) \(audio.detail)"
+                .localizedCaseInsensitiveContains("atmos")
+            let validAudioFormat = !audioFormat.isEmpty
+                && !audioFormat.localizedCaseInsensitiveContains("unknown")
+            if hasAtmos {
+                values.append(validAudioFormat ? "\(audioFormat) · Atmos" : "Atmos")
+            } else if validAudioFormat {
                 values.append(audioFormat)
             }
 
@@ -1090,11 +1094,6 @@ private struct PlayerPlaybackInfoBadges: View {
                !language.localizedCaseInsensitiveContains("unknown"),
                !values.contains(where: { $0.caseInsensitiveCompare(language) == .orderedSame }) {
                 values.append(language)
-            }
-
-            let audioEvidence = "\(audio.name) \(audio.detail)"
-            if audioEvidence.localizedCaseInsensitiveContains("atmos") {
-                values.append("Atmos")
             }
         }
 
