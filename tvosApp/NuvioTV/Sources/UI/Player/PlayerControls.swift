@@ -1048,6 +1048,7 @@ private struct PlayerPlaybackInfoBadges: View {
     @ObservedObject var viewModel: PlayerViewModel
 
     private var labels: [String] {
+        guard viewModel.status == .playing || viewModel.status == .paused else { return [] }
         var values: [String] = []
         let size = viewModel.videoNaturalSize
         if let resolution = PlayerPlaybackBadgePolicy.resolutionLabel(
