@@ -1677,6 +1677,21 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         currentSpeed = speed
     }
 
+    /// HDR badge source metadata. Do not label unknown gamma as SDR.
+    var currentHDRLabel: String? {
+        let dvProfile = getInt("current-tracks/video/dolby-vision-profile")
+        if dvProfile > 0 { return "Dolby Vision" }
+
+        let gamma = (getString("video-params/gamma") ?? "").lowercased()
+        if gamma.contains("hlg") || gamma.contains("b67") || gamma.contains("arib") {
+            return "HLG"
+        }
+        if gamma.contains("pq") || gamma.contains("2084") {
+            return "HDR10"
+        }
+        return nil
+    }
+
     /// Decoded video dimensions (0 until the first frame reports params).
     var videoFrameSize: CGSize {
         let w = getInt("video-params/w")
