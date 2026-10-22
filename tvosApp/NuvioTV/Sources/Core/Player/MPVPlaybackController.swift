@@ -1679,6 +1679,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     /// HDR badge source metadata. Do not label unknown gamma as SDR.
     var currentHDRLabel: String? {
+        guard videoFrameSize.width > 1, videoFrameSize.height > 1 else { return nil }
         let dvProfile = getInt("current-tracks/video/dolby-vision-profile")
         if dvProfile > 0 { return "Dolby Vision" }
 
