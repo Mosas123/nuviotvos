@@ -280,6 +280,8 @@ class PlayerViewModel: ObservableObject {
     @Published var aspectMode: PlayerAspectMode = PlayerAspectMode.current
     /// Decoded frame size for aspect-mode scaling (0 until first frame).
     @Published private(set) var videoNaturalSize: CGSize = .zero
+    /// Source HDR label, nil for SDR or when the active backend cannot confirm it.
+    @Published private(set) var currentHDRLabel: String?
     private var pauseOverlayTask: Task<Void, Never>?
     /// Seconds to wait after pausing before the metadata sheet appears.
     private let pauseOverlayDelaySeconds: TimeInterval
@@ -1105,6 +1107,7 @@ class PlayerViewModel: ObservableObject {
             filename: url.lastPathComponent
         )
         videoNaturalSize = .zero
+        currentHDRLabel = nil
         startPolling()
         configureWheelTrackingIfNeeded()
         startLoadWatchdog()
@@ -2406,6 +2409,7 @@ class PlayerViewModel: ObservableObject {
             artworkURL: prepared.artworkURL
         )
         videoNaturalSize = .zero
+        currentHDRLabel = nil
         if pollTimer == nil { startPolling() }
         startLoadWatchdog()
     }
@@ -3162,6 +3166,10 @@ class PlayerViewModel: ObservableObject {
         let frameSize = c.videoFrameSize
         if frameSize.width > 1, frameSize.height > 1, frameSize != videoNaturalSize {
             videoNaturalSize = frameSize
+        }
+        let hdrLabel = c.currentHDRLabel
+        if hdrLabel != currentHDRLabel {
+            currentHDRLabel = hdrLabel
         }
 
         let isRecoverableAetherLoading = sampledEngineKind == .aether && c.isPlayerLoading
