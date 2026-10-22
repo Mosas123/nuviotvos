@@ -2775,6 +2775,53 @@ final class ExternalPlayerTests: XCTestCase {
         // Audio delay should have reset to 0!
         XCTAssertEqual(model.audioDelayMs, 0)
     }
+
+    func testEstimatedEndDateAccountsForPlaybackRateAndRejectsInvalidTimelines() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        XCTAssertEqual(
+            PlayerTime.estimatedEndDate(
+                now: now,
+                position: 30,
+                duration: 150,
+                playbackRate: 2
+            ),
+            now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(
+            PlayerTime.estimatedEndDate(
+                now: now,
+                position: 30,
+                duration: 150,
+                playbackRate: 0.5
+            ),
+            now.addingTimeInterval(240)
+        )
+        XCTAssertNil(
+            PlayerTime.estimatedEndDate(
+                now: now,
+                position: 150,
+                duration: 150,
+                playbackRate: 1
+            )
+        )
+        XCTAssertNil(
+            PlayerTime.estimatedEndDate(
+                now: now,
+                position: 10,
+                duration: 150,
+                playbackRate: 0
+            )
+        )
+        XCTAssertNil(
+            PlayerTime.estimatedEndDate(
+                now: now,
+                position: .nan,
+                duration: 150,
+                playbackRate: 1
+            )
+        )
+    }
 }
 
 
