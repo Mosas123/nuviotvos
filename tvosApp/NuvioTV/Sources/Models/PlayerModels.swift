@@ -630,6 +630,20 @@ struct PreparedNextStream {
     var sourceID: String? = nil
 }
 
+enum PlayerPlaybackBadgePolicy {
+    static func resolutionLabel(width: Double, height: Double) -> String? {
+        guard width.isFinite, height.isFinite, width > 1, height > 1 else { return nil }
+        switch height {
+        case 2100...: return "4K"
+        case 1400...: return "1440p"
+        case 1000...: return "1080p"
+        case 700...: return "720p"
+        case 460...: return "480p"
+        default: return "\(Int(height.rounded()))p"
+        }
+    }
+}
+
 struct PlayerTime: Equatable {
     var current: Double = 0
     var duration: Double = 0
