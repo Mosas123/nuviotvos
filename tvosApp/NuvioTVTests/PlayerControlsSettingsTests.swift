@@ -2401,6 +2401,14 @@ extension PlayerControlsSettingsTests {
         vm.handleMoveSeek(direction: .right)
         XCTAssertEqual(vm.pendingSeekDelta, 20, "Second tap must accumulate to +20s seek")
     }
+
+    func testPlaybackResolutionBadgePolicyUsesDecodedHeightAndRejectsInvalidSize() {
+        XCTAssertEqual(PlayerPlaybackBadgePolicy.resolutionLabel(width: 3840, height: 2160), "4K")
+        XCTAssertEqual(PlayerPlaybackBadgePolicy.resolutionLabel(width: 1920, height: 1080), "1080p")
+        XCTAssertEqual(PlayerPlaybackBadgePolicy.resolutionLabel(width: 1280, height: 720), "720p")
+        XCTAssertNil(PlayerPlaybackBadgePolicy.resolutionLabel(width: 0, height: 1080))
+        XCTAssertNil(PlayerPlaybackBadgePolicy.resolutionLabel(width: .infinity, height: 720))
+    }
 }
 
 final class ExternalPlayerTests: XCTestCase {
