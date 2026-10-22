@@ -654,4 +654,30 @@ struct PlayerTime: Equatable {
             return String(format: "%02d:%02d", minutes, seconds)
         }
     }
+
+    /// Estimates the wall-clock end time for finite media, accounting for playback speed.
+    /// Returns nil when the timeline or rate is not reliable enough to show an estimate.
+    static func estimatedEndDate(
+        now: Date = Date(),
+        position: Double,
+        duration: Double,
+        playbackRate: Double
+    ) -> Date? {
+        guard now.timeIntervalSince1970.isFinite,
+              position.isFinite,
+              duration.isFinite,
+              playbackRate.isFinite,
+              position >= 0,
+              duration > position,
+              playbackRate > 0 else {
+            return nil
+        }
+
+        let remainingPlaybackTime = duration - position
+        let remainingWallClockTime = remainingPlaybackTime / playbackRate
+        guard remainingWallClockTime.isFinite, remainingWallClockTime > 0 else {
+            return nil
+        }
+        return now.addingTimeInterval(remainingWallClockTime)
+    }
 }
