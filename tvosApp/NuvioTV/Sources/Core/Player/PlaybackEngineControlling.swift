@@ -221,6 +221,8 @@ protocol PlaybackEngineControlling: AnyObject {
     var currentSpeed: Float { get }
     var currentErrorMessage: String { get }
     var videoFrameSize: CGSize { get }
+    /// Reliable source HDR label for compact playback UI; nil when unavailable or SDR.
+    var currentHDRLabel: String? { get }
     var engineVersion: String? { get }
     var playbackDebugInfo: PlaybackDebugInfo { get }
     var loadingStepMessage: String? { get }
@@ -246,6 +248,7 @@ protocol PlaybackEngineControlling: AnyObject {
 
 @MainActor
 extension PlaybackEngineControlling {
+    var currentHDRLabel: String? { nil }
     var engineVersion: String? { nil }
     func setAudioProcessing(dialogue: EnhanceDialogueMode, reduceLoud: Bool) {}
 }
