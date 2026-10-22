@@ -401,6 +401,13 @@ struct PlayerControls: View {
                         }
 
                         Spacer()
+
+                        PlaybackEndTimeBadge(
+                            clock: viewModel.clock,
+                            playbackRate: Double(viewModel.playbackSpeed.rawValue),
+                            isLive: viewModel.isLiveStream,
+                            isPlaying: viewModel.status == .playing
+                        )
                     }
                 }
                 .padding(.horizontal, 60)
@@ -1037,6 +1044,43 @@ private struct SeekPreviewTimelineCard: View {
             }
         }
         .frame(height: 270)
+    }
+}
+
+
+/// Small, isolated HUD that observes the high-frequency playback clock without
+/// making the whole player surface observe every position tick.
+private struct PlaybackEndTimeBadge: View {
+    @ObservedObject var clock: PlaybackClock
+    let playbackRate: Double
+    let isLive: Bool
+    let isPlaying: Bool
+
+    var body: some View {
+        Group {
+            if !isLive,
+               isPlaying,
+               let endDate = PlayerTime.estimatedEndDate(
+                   position: clock.position,
+                   duration: clock.duration,
+                   playbackRate: playbackRate
+               ) {
+                HStack(spacing: 8) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text("\(L10n.string("player_ends_at", fallback: "Ends at")) \(endDate.formatted(date: .omitted, time: .shortened))")
+                        .font(.system(size: 18, weight: .semibold))
+                        .lineLimit(1)
+                        .monospacedDigit()
+                }
+                .foregroundColor(.white.opacity(0.92))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(Color.black.opacity(0.48), in: Capsule())
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(L10n.string("player_ends_at", fallback: "Ends at")) \(endDate.formatted(date: .omitted, time: .shortened))")
+            }
+        }
     }
 }
 
