@@ -4579,6 +4579,16 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         sourceProbe = nil
     }
 
+    /// HDR badge source metadata, kept lightweight and separate from the full diagnostics snapshot.
+    var currentHDRLabel: String? {
+        guard videoFrameSize.width > 1, videoFrameSize.height > 1 else { return nil }
+        let label = Self.dynamicRangeLabel(
+            engine.sourceVideoFormat,
+            dolbyVisionProfile: engine.sourceDVProfile ?? sourceProbe?.dvProfile
+        )
+        return label == "SDR" ? nil : label
+    }
+
     private static func dynamicRangeLabel(_ format: VideoFormat, dolbyVisionProfile: Int?) -> String {
         switch format {
         case .sdr: return "SDR"
