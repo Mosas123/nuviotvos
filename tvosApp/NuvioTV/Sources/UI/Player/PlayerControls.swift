@@ -398,6 +398,8 @@ struct PlayerControls: View {
                                     .foregroundColor(.white.opacity(0.68))
                                     .lineLimit(1)
                             }
+
+                            PlayerPlaybackInfoBadges(viewModel: viewModel)
                         }
 
                         Spacer()
@@ -1037,6 +1039,85 @@ private struct SeekPreviewTimelineCard: View {
             }
         }
         .frame(height: 270)
+    }
+}
+
+/// Compact, non-focusable playback metadata. It reads lightweight state already
+/// maintained by the active engine and never samples the expensive diagnostics HUD.
+private struct PlayerPlaybackInfoBadges: View {
+    @ObservedObject var viewModel: PlayerViewModel
+
+    private var labels: [String] {
+        var values: [String] = []
+        let size = viewModel.videoNaturalSize
+        if let resolution = PlayerPlaybackBadgePolicy.resolutionLabel(
+            width: size.width,
+            height: size.height
+        ) {
+            values.append(resolution)
+        }
+
+        if let hdr = viewModel.currentHDRLabel, !hdr.isEmpty {
+            let normalized: String
+            if hdr.localizedCaseInsensitiveContains("dolby vision") {
+                normalized = "Dolby Vision"
+            } else if hdr.localizedCaseInsensitiveContains("hdr10+") {
+                normalized = "HDR10+"
+            } else if hdr.localizedCaseInsensitiveContains("hdr10") {
+                normalized = "HDR10"
+            } else {
+                normalized = hdr
+            }
+            values.append(normalized)
+        }
+
+        if let audio = viewModel.audioTracks.first(where: \.isSelected) {
+            let audioFormat = audio.detail
+                .components(separatedBy: "|")
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !audioFormat.isEmpty,
+               !audioFormat.localizedCaseInsensitiveContains("unknown"),
+               !values.contains(where: { $0.caseInsensitiveCompare(audioFormat) == .orderedSame }) {
+                values.append(audioFormat)
+            }
+
+            let language = !audio.languageName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? audio.languageName.trimmingCharacters(in: .whitespacesAndNewlines)
+                : audio.language.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !language.isEmpty,
+               !language.localizedCaseInsensitiveContains("unknown"),
+               !values.contains(where: { $0.caseInsensitiveCompare(language) == .orderedSame }) {
+                values.append(language)
+            }
+
+            let audioEvidence = "\(audio.name) \(audio.detail)"
+            if audioEvidence.localizedCaseInsensitiveContains("atmos") {
+                values.append("Atmos")
+            }
+        }
+
+        var seen = Set<String>()
+        return values.filter { seen.insert($0.lowercased()).inserted }.prefix(4).map { $0 }
+    }
+
+    var body: some View {
+        if !labels.isEmpty {
+            HStack(spacing: 8) {
+                ForEach(labels, id: \.self) { label in
+                    Text(label)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white.opacity(0.96))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.black.opacity(0.52), in: Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+                }
+            }
+            .padding(.top, 6)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(labels.joined(separator: ", "))
+        }
     }
 }
 
