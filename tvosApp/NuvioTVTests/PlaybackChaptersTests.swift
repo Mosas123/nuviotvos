@@ -94,6 +94,20 @@ final class PlaybackChaptersTests: XCTestCase {
         XCTAssertTrue(PlaybackChapters.skipIntervals(from: [chapter(0, "OP", 0, 5)]).isEmpty)
     }
 
+    func testNamedChaptersInTheMiddleOfAFilmAreNotSkipped() {
+        let film = [
+            chapter(0, "Chapter 1", 0, 3000),
+            chapter(1, "Opening", 3000, 3120),
+            chapter(2, "Ed", 3120, 3240),
+            chapter(3, "Chapter 4", 3240, 9000),
+            chapter(4, "End Credits", 9000, 9200),
+        ]
+        let intervals = PlaybackChapters.skipIntervals(from: film)
+        XCTAssertEqual(intervals.count, 1, "only the real end credits")
+        XCTAssertTrue(intervals[0].isEnding)
+        XCTAssertEqual(intervals[0].startTime, 9000)
+    }
+
     func testOpeningAndEndingOnTheTimeline() {
         let segments = PlaybackChapters.timelineSegments([
             SkipInterval(startTime: 60, endTime: 150, type: "intro", provider: "introdb"),

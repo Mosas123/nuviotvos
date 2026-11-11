@@ -130,6 +130,11 @@ enum PlaybackChapters {
     static let maxOpeningSeconds: Double = 180
     static let maxEndingSeconds: Double = 240
     static let minSegmentSeconds: Double = 15
+    /// Where in the file a named chapter may sit to be taken as the opening or the ending: an
+    /// opening starting in the first 30 %, an ending finishing in the last 20 %. A chapter with
+    /// such a name in the middle of a film ("Ed", a scene called "Opening") is not one.
+    static let openingLatestStartFraction: Double = 0.3
+    static let endingEarliestEndFraction: Double = 0.8
 
     /// What a chapter name says: "Opening", "OP", "OP2", "Intro", "Opening
     /// Credits" → opening; "Ending", "ED", "Credits", "End Credits", "Outro" →
@@ -155,13 +160,16 @@ enum PlaybackChapters {
     static func skipIntervals(from chapters: [PlaybackChapter]) -> [SkipInterval] {
         var opening: SkipInterval?
         var ending: SkipInterval?
+        let total = chapters.map(\.endSeconds).max() ?? 0
         for chapter in chapters {
             guard let kind = kind(ofName: chapter.name), chapter.durationSeconds >= minSegmentSeconds else { continue }
             switch kind {
-            case .opening where opening == nil && chapter.durationSeconds <= maxOpeningSeconds:
+            case .opening where opening == nil && chapter.durationSeconds <= maxOpeningSeconds
+                && chapter.startSeconds <= total * openingLatestStartFraction:
                 opening = SkipInterval(startTime: chapter.startSeconds, endTime: chapter.endSeconds,
                                        type: "intro", provider: "chapters")
-            case .ending where ending == nil && chapter.durationSeconds <= maxEndingSeconds:
+            case .ending where ending == nil && chapter.durationSeconds <= maxEndingSeconds
+                && chapter.endSeconds >= total * endingEarliestEndFraction:
                 ending = SkipInterval(startTime: chapter.startSeconds, endTime: chapter.endSeconds,
                                       type: "outro", provider: "chapters")
             default:
