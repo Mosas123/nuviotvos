@@ -1004,6 +1004,7 @@ struct NativeSearchView: View {
                 }
                 .padding(.top, 16)
                 .padding(.horizontal, NativeSearchGridMetrics.gridContentInset)
+                .background(TVTopBarScrollAnchor())
             }
             .onChange(of: resultsScrollTopGeneration) { _, _ in
                 withAnimation(.easeInOut(duration: 0.2)) {
