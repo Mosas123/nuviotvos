@@ -515,6 +515,20 @@ enum SimklSyncCache {
         LargePayloadStore.removeDirectory(storageDirectoryName)
     }
 
+    /// One profile's caches, for when its Simkl session ends. The snapshots and their activity
+    /// watermarks belong to the account that wrote them; a different account connected later on
+    /// the same profile must start from a full pull, not from the previous account's delta state.
+    static func erase(in store: UserDefaults) {
+        let keys = [
+            itemCacheKey, itemActivityKey, historyCacheKey, historySnapshotKey,
+            playbackCacheKey, playbackSnapshotKey, playbackInvalidatedKey, itemSnapshotKey,
+        ]
+        for key in keys {
+            LargePayloadStore.remove(key: scopedKey(key, store: store), directory: storageDirectoryName)
+            store.removeObject(forKey: key)
+        }
+    }
+
     static func items(in store: UserDefaults) -> SimklAllItemsResponse? {
         itemSnapshot(in: store)?.items
     }

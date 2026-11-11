@@ -681,6 +681,20 @@ final class SimklAuthServiceTests: XCTestCase {
         XCTAssertEqual(TraktSettingsStore.watchProgressSource(in: defaults), .trakt)
     }
 
+    /// The sync snapshots belong to the account that wrote them: after a disconnect, a different
+    /// Simkl account on the same profile must start from a full pull.
+    func testClearingAuthErasesThisProfilesSyncCaches() {
+        authorize()
+        SimklSyncCache.savePlaybacks([], watermark: "previous-account", store: defaults)
+        SimklSyncCache.saveHistory([], watermark: "previous-account", activities: nil, store: defaults)
+        XCTAssertEqual(SimklSyncCache.playbackWatermark(in: defaults), "previous-account")
+
+        SimklAuthStore.clearAuth(profileScope: "profile-1", store: defaults, tokenStorage: tokenStorage)
+
+        XCTAssertNil(SimklSyncCache.playbackWatermark(in: defaults))
+        XCTAssertNil(SimklSyncCache.historyWatermark(in: defaults))
+    }
+
     /// The Continue Watching list is cached against Simkl's account watermark,
     /// which lags a scrobble we just sent. Leaving the watermark in place served
     /// the pre-session list back to Home, so closing the player mid-episode made
