@@ -274,9 +274,22 @@ enum AniListScrobbler {
         return Target(entryID: match.entryID, episode: match.episode, label: "\(match.entryTitle) E\(match.episode)")
     }
 
+    /// Whether the profile that asked for a write is still the active one. Finding the AniList
+    /// entry takes network round trips; the logins and lists read afterwards are the active
+    /// profile's, so a write that outlived a profile switch is dropped rather than sent to the
+    /// next profile's account.
+    static func isStillActive(_ profileScope: String, _ what: String) -> Bool {
+        guard ProfileSettings.activeProfileScope == profileScope else {
+            AniListDiagnostics.note(.account, "\(what): profile changed meanwhile, nothing written")
+            return false
+        }
+        return true
+    }
+
     /// After an episode or film is watched to the end in the player.
     static func recordPlayback(meta: NuvioMeta, video: NuvioVideo?, season: Int?, episode: Int?) {
         guard AniListSettings.scrobbles || MALSettings.scrobbles else { return }
+        let profileScope = ProfileSettings.activeProfileScope
         Task.detached(priority: .utility) {
             guard let target = await target(meta: meta, video: video, season: season, episode: episode) else {
                 if !AniListMetaBuilder.isAniListID(meta.id), AniListSettings.scrobblesCinemeta, meta.isAnime {
@@ -284,6 +297,7 @@ enum AniListScrobbler {
                 }
                 return
             }
+            guard isStillActive(profileScope, "Watched \(target.label)") else { return }
             if AniListSettings.scrobbles {
                 await AniListAccount.perform(.watched(episode: target.episode, byPlaying: true), entryID: target.entryID, reason: "Watched \(target.label)")
             }
@@ -296,8 +310,10 @@ enum AniListScrobbler {
     /// counts episodes, so everything before is watched too).
     static func markEpisode(meta: NuvioMeta, video: NuvioVideo, watched: Bool) {
         guard AniListSettings.scrobbles || MALSettings.scrobbles else { return }
+        let profileScope = ProfileSettings.activeProfileScope
         Task.detached(priority: .utility) {
-            guard let target = await target(meta: meta, video: video, season: video.season, episode: video.episode) else { return }
+            guard let target = await target(meta: meta, video: video, season: video.season, episode: video.episode),
+                  isStillActive(profileScope, "Marked \(target.label)") else { return }
             let action: AniListAccount.Action = watched
                 ? .watched(episode: target.episode, byPlaying: false)
                 : .unwatched(episode: target.episode)
@@ -316,12 +332,14 @@ enum AniListScrobbler {
     /// episode in that season.
     static func markSeason(meta: NuvioMeta, videos: [NuvioVideo], watched: Bool) {
         guard AniListSettings.scrobbles || MALSettings.scrobbles, !videos.isEmpty else { return }
+        let profileScope = ProfileSettings.activeProfileScope
         Task.detached(priority: .utility) {
             var byEntry: [Int: [Int]] = [:]
             for video in videos.sorted(by: { $0.episode < $1.episode }) {
                 guard let target = await target(meta: meta, video: video, season: video.season, episode: video.episode) else { continue }
                 byEntry[target.entryID, default: []].append(target.episode)
             }
+            guard isStillActive(profileScope, "Marked a season") else { return }
             for (entryID, episodes) in byEntry {
                 guard let first = episodes.min(), let last = episodes.max() else { continue }
                 let action: AniListAccount.Action = watched

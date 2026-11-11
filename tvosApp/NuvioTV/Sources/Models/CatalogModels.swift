@@ -12378,8 +12378,15 @@ enum ProfileSettings {
         // Profile selection remains active when disk migration fails. In that
         // case, skip preference mutations so an oversized legacy domain is not
         // sent back through cfprefsd.
+        let switchedProfile = activeProfileID != id
         current = suite
         activeProfileID = id
+        if switchedProfile {
+            // AniList list entries and MAL lists are kept in memory for the logged-in account;
+            // the next profile may use another account (or none).
+            AniListAccount.clearStates()
+            Task { await MALAccount.lists.forget() }
+        }
         guard canMutatePreferences else { return }
 
         suite.set(primary, forKey: primaryProfileKey)
