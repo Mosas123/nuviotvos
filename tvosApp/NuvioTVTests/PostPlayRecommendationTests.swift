@@ -739,6 +739,12 @@ final class PostPlayRecommendationTests: XCTestCase {
         XCTAssertEqual(heuristicScene?.startTime, 550)
         XCTAssertEqual(heuristicScene?.endTime, 560)
         XCTAssertEqual(heuristicScene?.provider, "heuristic")
+
+        // An episode's outro followed by a few seconds of logos or a preview is not a scene.
+        let outro = SkipInterval(startTime: 1_300, endTime: 1_380, type: "outro", provider: "introdb")
+        XCTAssertNil(outro.followingPostCreditsScene(intervals: [outro], duration: 1_420))
+        let explicit = SkipInterval(startTime: 1_390, endTime: 1_420, type: "post-credits", provider: "introdb")
+        XCTAssertEqual(outro.followingPostCreditsScene(intervals: [outro, explicit], duration: 1_420), explicit)
     }
 
     func testAutoSkipSettingsKeysRegistered() {

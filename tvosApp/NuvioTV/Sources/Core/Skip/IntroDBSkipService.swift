@@ -104,8 +104,10 @@ struct SkipInterval: Identifiable, Equatable {
                 (duration <= 0 || $0.startTime < duration)
         }.min { $0.startTime < $1.startTime }
         if let explicit { return explicit }
-        // Heuristic: significant content after credits/outro suggests a post-credits scene (> 5 seconds).
-        if duration > 0 {
+        // Heuristic: significant content after a film's credits suggests a post-credits scene
+        // (> 5 seconds). Episodes routinely run a few seconds past their outro (logos, a
+        // next-episode preview), so for series only an explicit post-credits segment counts.
+        if isMovieCredits, duration > 0 {
             let gap = duration - endTime
             if gap > 5.0 {
                 return SkipInterval(
