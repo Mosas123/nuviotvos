@@ -217,7 +217,7 @@ struct SurpriseMeView: View {
         let watched = WatchedStore.items()
         history = SurpriseMeHistory(
             watched: watched.map(\.meta),
-            library: LibraryStore.items().map(\.meta),
+            library: SurpriseMeLibraries.allItems(),
             continueWatching: ContinueWatchingStore.items().map(\.meta)
         )
         profile = TasteProfile.build(
