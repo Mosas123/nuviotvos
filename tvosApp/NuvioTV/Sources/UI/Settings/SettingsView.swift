@@ -1479,7 +1479,9 @@ struct AISubtitleTranslationSettings: Equatable {
         "gemma-4-26b-a4b-it",
         "gemma-4-31b-it"
     ]
-    static let defaultOpenRouterModel = "google/gemini-2.5-flash"
+    /// Qwen 3.7 Flash: fast, cheap and run without reasoning, which keeps live
+    /// translation quick. qwen/qwen3.7-flash is being retired.
+    static let defaultOpenRouterModel = "qwen/qwen3.7-flash"
 
     let isEnabled: Bool
     let provider: AISubtitleProvider
@@ -8765,7 +8767,7 @@ private struct AISubtitleOptionsSheet: View {
                                 title: L10n.string("settings_ai_subtitles_openrouter_model", fallback: "OpenRouter Model"),
                                 subtitle: L10n.string(
                                     "settings_ai_subtitles_openrouter_model_subtitle",
-                                    fallback: "Use any OpenRouter model ID, for example google/gemini-2.5-flash"
+                                    fallback: "Use any OpenRouter model ID, for example qwen/qwen3.7-flash"
                                 ),
                                 placeholder: AISubtitleTranslationSettings.defaultOpenRouterModel,
                                 text: $openRouterModel,
