@@ -30,7 +30,14 @@ enum SurpriseMeAIProvider: String, CaseIterable, Identifiable {
     var suggestedModels: [(id: String, name: String)] {
         switch self {
         case .deepSeek: return [("deepseek-flash", "DeepSeek-V4.1-Flash")]
-        case .off, .gemini, .openRouter: return []
+        // All on Gemini's free tier. 3.6 Flash is the default because AI Subtitles
+        // already uses it; 3.8 Flash is newer, 3.5 Flash-Lite faster with more quota.
+        case .gemini: return [
+            ("gemini-3.6-flash", "Gemini 3.6 Flash"),
+            ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+            ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
+        ]
+        case .off, .openRouter: return []
         }
     }
 
