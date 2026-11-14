@@ -23,16 +23,43 @@ final class SurpriseMeAITests: XCTestCase {
         XCTAssertTrue(SurpriseMeAI.parse("{\"picks\": \"Arrival\"}", candidates: candidates).isEmpty)
     }
 
-    func testPromptListsCandidatesWithNumbersAndYears() {
+    func testPromptGivesTheAIEverythingItLearnsFrom() {
+        let interstellar = movie("i", "Interstellar", year: 2014)
+        let history = SurpriseMeHistory(
+            watched: [interstellar, interstellar],
+            library: [movie("d", "Dune", year: 2021)],
+            continueWatching: [movie("s", "Severance", year: 2022)]
+        )
+        let profile = TasteProfile.build(watched: [movie("x", "X", genres: ["Sci-Fi"])], library: [], continueWatching: [])
         let prompt = SurpriseMeAI.prompt(
-            profile: TasteProfile(weights: ["scifi": 1], topGenres: ["Sci-Fi"]),
-            recentTitles: [movie("i", "Interstellar", year: 2014)],
-            candidates: [movie("a", "Arrival", year: 2016, genres: ["Sci-Fi", "Drama"])],
+            context: SurpriseMeAIContext(
+                profile: profile,
+                history: history,
+                opened: [movie("a", "Arrival", year: 2016)],
+                skipped: [movie("n", "Notebook", year: 2004)]
+            ),
+            candidates: [movie("b", "Blade Runner 2049", year: 2017, genres: ["Sci-Fi", "Drama"])],
             language: "Spanish"
         )
-        XCTAssertTrue(prompt.contains("1. Arrival (2016) — Sci-Fi, Drama"))
-        XCTAssertTrue(prompt.contains("Interstellar (2014)"))
+        XCTAssertTrue(prompt.contains("Sci-Fi 100%"))
+        XCTAssertTrue(prompt.contains("Watched (most recent first): Interstellar (2014)."))
+        XCTAssertTrue(prompt.contains("Saved to watch later: Dune (2021)."))
+        XCTAssertTrue(prompt.contains("Watching now: Severance (2022)."))
+        XCTAssertTrue(prompt.contains("they opened: Arrival (2016)."))
+        XCTAssertTrue(prompt.contains("they skipped (avoid similar ones): Notebook (2004)."))
+        XCTAssertTrue(prompt.contains("1. Blade Runner 2049 (2017) — Sci-Fi, Drama"))
         XCTAssertTrue(prompt.contains("in Spanish"))
+    }
+
+    func testReadsTheAIsOwnSuggestions() {
+        let answer = """
+        {"picks":[],"others":[{"title":"Contact","year":1997,"reason":"Like Arrival."},{"title":" "},{"title":"contact","year":1997}]}
+        """
+        XCTAssertEqual(
+            SurpriseMeAI.parseOthers(answer),
+            [SurpriseMeAISuggestion(title: "Contact", year: 1997, reason: "Like Arrival.")]
+        )
+        XCTAssertTrue(SurpriseMeAI.parseOthers(#"{"picks":[]}"#).isEmpty)
     }
 
     func testRequestsUseEachProvidersFormat() throws {
