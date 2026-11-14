@@ -15,10 +15,13 @@ final class AIHomeCatalogsTests: XCTestCase {
         XCTAssertTrue(titles.allSatisfy(\.isFilm))
     }
 
-    func testAnimeKeepsTheFilmFlagAndSeriesAreNeverFilms() {
-        let answer = #"{"titles":[{"title":"Spirited Away","year":2001,"film":true},{"title":"Frieren","year":2023}]}"#
-        XCTAssertEqual(AIHomeCatalogs.parse(answer, kind: .anime).map(\.isFilm), [true, false])
+    func testEachKindIsLookedUpAsAFilmOrASeries() {
+        let answer = #"{"titles":[{"title":"Spirited Away","year":2001},{"title":"Frieren","year":2023}]}"#
+        XCTAssertEqual(AIHomeCatalogs.parse(answer, kind: .animeMovies).map(\.isFilm), [true, true])
+        XCTAssertEqual(AIHomeCatalogs.parse(answer, kind: .animeSeries).map(\.isFilm), [false, false])
         XCTAssertEqual(AIHomeCatalogs.parse(answer, kind: .series).map(\.isFilm), [false, false])
+        XCTAssertEqual(AIHomeCatalogKind.animeMovies.contentType, "movie")
+        XCTAssertEqual(AIHomeCatalogKind.animeSeries.contentType, "series")
     }
 
     func testAtMost40TitlesAreTakenFromTheAnswer() {
@@ -36,7 +39,7 @@ final class AIHomeCatalogsTests: XCTestCase {
         )
         XCTAssertFalse(AIHomeCatalogs.needsRebuild(cache: cache, kinds: [.movies], historyCount: 105, provider: "Gemini", now: now))
         XCTAssertTrue(AIHomeCatalogs.needsRebuild(cache: cache, kinds: [.movies], historyCount: 110, provider: "Gemini", now: now))
-        XCTAssertTrue(AIHomeCatalogs.needsRebuild(cache: cache, kinds: [.movies, .anime], historyCount: 100, provider: "Gemini", now: now))
+        XCTAssertTrue(AIHomeCatalogs.needsRebuild(cache: cache, kinds: [.movies, .animeSeries], historyCount: 100, provider: "Gemini", now: now))
         XCTAssertTrue(AIHomeCatalogs.needsRebuild(cache: cache, kinds: [.movies], historyCount: 100, provider: "DeepSeek", now: now))
         XCTAssertTrue(AIHomeCatalogs.needsRebuild(
             cache: cache, kinds: [.movies], historyCount: 100, provider: "Gemini", now: now.addingTimeInterval(24 * 3600)
@@ -48,15 +51,15 @@ final class AIHomeCatalogsTests: XCTestCase {
     func testSectionsFollowTheKindsTurnedOnAndDropWatchedTitles() {
         let cache = AIHomeCatalogCache(
             rows: [
-                .init(kind: .anime, items: [meta("tmdb:1", "Frieren", type: "series")]),
+                .init(kind: .animeSeries, items: [meta("tmdb:1", "Frieren", type: "series")]),
                 .init(kind: .movies, items: [meta("tmdb:2", "Arrival"), meta("tmdb:3", "Contact")]),
             ],
             builtAt: Date(),
             historyCount: 0,
             provider: "Gemini"
         )
-        let sections = AIHomeCatalogs.sections(from: cache, kinds: [.movies, .anime]) { $0.id == "tmdb:3" }
-        XCTAssertEqual(sections.map(\.id), ["ai_for_you_movies", "ai_for_you_anime"])
+        let sections = AIHomeCatalogs.sections(from: cache, kinds: [.movies, .animeSeries]) { $0.id == "tmdb:3" }
+        XCTAssertEqual(sections.map(\.id), ["ai_for_you_movies", "ai_for_you_animeSeries"])
         XCTAssertEqual(sections.first?.items.map(\.id), ["tmdb:2"])
         XCTAssertTrue(sections.allSatisfy { AIHomeCatalogs.isSectionID($0.id) })
         XCTAssertTrue(AIHomeCatalogs.sections(from: cache, kinds: [.series]) { _ in false }.isEmpty)
@@ -65,9 +68,9 @@ final class AIHomeCatalogsTests: XCTestCase {
     func testPromptAsksForTheRightKindFromTheWholeHistory() {
         let history = SurpriseMeHistory(watched: [meta("tt1", "Akira", year: 1988)], library: [], continueWatching: [])
         let context = SurpriseMeAIContext(profile: .empty, history: history)
-        let prompt = AIHomeCatalogs.prompt(kind: .anime, context: context, excludedTitles: [], language: "Spanish")
+        let prompt = AIHomeCatalogs.prompt(kind: .animeMovies, context: context, excludedTitles: [], language: "Spanish")
         XCTAssertTrue(prompt.contains("Watched (most recent first): Akira (1988)."))
-        XCTAssertTrue(prompt.contains("40 anime series and anime films"))
+        XCTAssertTrue(prompt.contains("40 anime films (no series)"))
         XCTAssertFalse(prompt.contains("Choose the 5 movies"))
     }
 }

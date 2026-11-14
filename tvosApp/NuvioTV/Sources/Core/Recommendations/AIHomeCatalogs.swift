@@ -2,7 +2,7 @@ import Foundation
 
 /// "For You" rows on Home, chosen by the viewer's AI (Settings > Integrations >
 /// Surprise Me > For You rows). One row per kind the viewer turns on: movies,
-/// series, anime.
+/// series, anime movies and anime series.
 ///
 /// The AI learns from the whole history (watched, every library, Continue
 /// Watching) and answers with titles and years. Each title is looked up on
@@ -15,13 +15,15 @@ import Foundation
 enum AIHomeCatalogKind: String, CaseIterable, Codable, Sendable {
     case movies
     case series
-    case anime
+    case animeMovies
+    case animeSeries
 
     var settingsKey: String {
         switch self {
         case .movies: return SettingsKey.aiCatalogMovies
         case .series: return SettingsKey.aiCatalogSeries
-        case .anime: return SettingsKey.aiCatalogAnime
+        case .animeMovies: return SettingsKey.aiCatalogAnimeMovies
+        case .animeSeries: return SettingsKey.aiCatalogAnimeSeries
         }
     }
 
@@ -31,18 +33,23 @@ enum AIHomeCatalogKind: String, CaseIterable, Codable, Sendable {
         switch self {
         case .movies: return L10n.string("ai_catalog_movies", fallback: "✨ For You · Movies")
         case .series: return L10n.string("ai_catalog_series", fallback: "✨ For You · Series")
-        case .anime: return L10n.string("ai_catalog_anime", fallback: "✨ For You · Anime")
+        case .animeMovies: return L10n.string("ai_catalog_anime_movies", fallback: "✨ For You · Anime Movies")
+        case .animeSeries: return L10n.string("ai_catalog_anime_series", fallback: "✨ For You · Anime Series")
         }
     }
 
-    var contentType: String { self == .movies ? "movie" : "series" }
+    /// Films are looked up as movies on TMDB, the rest as series.
+    var isFilm: Bool { self == .movies || self == .animeMovies }
+
+    var contentType: String { isFilm ? "movie" : "series" }
 
     /// What the AI is asked for.
     var promptNoun: String {
         switch self {
         case .movies: return "movies (no anime)"
         case .series: return "TV series (no anime)"
-        case .anime: return "anime series and anime films"
+        case .animeMovies: return "anime films (no series)"
+        case .animeSeries: return "anime series (no films)"
         }
     }
 
@@ -161,8 +168,7 @@ enum AIHomeCatalogs {
         Never include anything they already watched\(avoid.isEmpty ? "" : " or these titles: \(avoid)"). \
         Only real, released titles, with the exact original title and the release year.
 
-        Answer with JSON only: {"titles":[{"title":"...","year":2016,"film":false}]}. \
-        "film" is true for a film and false for a series.
+        Answer with JSON only: {"titles":[{"title":"...","year":2016}]}.
         """
     }
 
@@ -171,7 +177,6 @@ enum AIHomeCatalogs {
             struct Title: Decodable {
                 let title: String
                 let year: Int?
-                let film: Bool?
             }
             let titles: [Title]
         }
@@ -181,13 +186,7 @@ enum AIHomeCatalogs {
         return answer.titles.compactMap { item in
             let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty, seen.insert("\(title.lowercased())|\(item.year ?? 0)").inserted else { return nil }
-            let isFilm: Bool
-            switch kind {
-            case .movies: isFilm = true
-            case .series: isFilm = false
-            case .anime: isFilm = item.film ?? false
-            }
-            return AIHomeCatalogSuggestion(title: title, year: item.year, isFilm: isFilm)
+            return AIHomeCatalogSuggestion(title: title, year: item.year, isFilm: kind.isFilm)
         }
         .prefix(requestedCount)
         .map { $0 }

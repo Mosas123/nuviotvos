@@ -199,7 +199,8 @@ enum SettingsKey {
     static let surpriseMeAIModel = "nuvio.tv.settings.integrations.surpriseMeAIModel"
     static let aiCatalogMovies = "nuvio.tv.settings.integrations.aiCatalogMovies"
     static let aiCatalogSeries = "nuvio.tv.settings.integrations.aiCatalogSeries"
-    static let aiCatalogAnime = "nuvio.tv.settings.integrations.aiCatalogAnime"
+    static let aiCatalogAnimeMovies = "nuvio.tv.settings.integrations.aiCatalogAnimeMovies"
+    static let aiCatalogAnimeSeries = "nuvio.tv.settings.integrations.aiCatalogAnimeSeries"
     static let useTopNavigation = "nuvio.tv.settings.layout.useTopNavigation"
     /// Settings → Appearance → Sidebar → Watch Party.
     static let showWatchPartyTab = "nuvio.tv.settings.layout.showWatchPartyTab"
@@ -455,7 +456,7 @@ enum SettingsKey {
         homeLayout, sidebarClockFormat, gridRows, gridItemsPerRow, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, homeHeroRatingSource, homeHeroRatingsEnabled, posterLabels, continueWatchingLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
         searchStyle, preferAddonArtworkInSearch,
         continueWatchingVisible, continueWatchingLandscape, continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp, continueWatchingEpisodeRatings, continueWatchingBlurNextUp,
-        showCalendarTab, showSurpriseMeTab, surpriseMeUseTMDB, surpriseMeUseTrackers, surpriseMeAIProvider, surpriseMeAIModel, aiCatalogMovies, aiCatalogSeries, aiCatalogAnime, showWatchPartyTab, useTopNavigation, homeCalendarToday, calendarFilter, calendarHideSpoilers, calendarCheckAvailability, calendarTvmazeTimes, calendarAniList, calendarAniListPlanning,
+        showCalendarTab, showSurpriseMeTab, surpriseMeUseTMDB, surpriseMeUseTrackers, surpriseMeAIProvider, surpriseMeAIModel, aiCatalogMovies, aiCatalogSeries, aiCatalogAnimeMovies, aiCatalogAnimeSeries, showWatchPartyTab, useTopNavigation, homeCalendarToday, calendarFilter, calendarHideSpoilers, calendarCheckAvailability, calendarTvmazeTimes, calendarAniList, calendarAniListPlanning,
         cardCornerRadius, cardSize, liquidGlassCards,
         hideUnreleased, showFullDates, detailsActionsBelowInfo,
         detailsSectionOrder, detailsSectionDisabled,
@@ -8514,7 +8515,8 @@ private struct SurpriseMeOptionsSheet: View {
     @State private var previousProvider = SurpriseMeAIProvider.off.rawValue
     @AppStorage(SettingsKey.aiCatalogMovies) private var aiCatalogMovies = false
     @AppStorage(SettingsKey.aiCatalogSeries) private var aiCatalogSeries = false
-    @AppStorage(SettingsKey.aiCatalogAnime) private var aiCatalogAnime = false
+    @AppStorage(SettingsKey.aiCatalogAnimeMovies) private var aiCatalogAnimeMovies = false
+    @AppStorage(SettingsKey.aiCatalogAnimeSeries) private var aiCatalogAnimeSeries = false
     @ObservedObject private var aiCatalogStore = AIHomeCatalogStore.shared
 
     private var aiCatalogsAvailable: Bool {
@@ -8685,13 +8687,20 @@ private struct SurpriseMeOptionsSheet: View {
                             isAvailable: aiCatalogsAvailable
                         )
                         SettingsToggleRow(
-                            title: L10n.string("ai_catalog_anime_toggle", fallback: "Anime for you"),
-                            subtitle: L10n.string("ai_catalog_anime_toggle_subtitle", fallback: "A row of anime series and films picked for you"),
-                            isOn: $aiCatalogAnime,
+                            title: L10n.string("ai_catalog_anime_movies_toggle", fallback: "Anime movies for you"),
+                            subtitle: L10n.string("ai_catalog_anime_movies_toggle_subtitle", fallback: "A row of anime films picked for you"),
+                            isOn: $aiCatalogAnimeMovies,
                             accentColor: accentColor,
                             isAvailable: aiCatalogsAvailable
                         )
-                        if aiCatalogsAvailable, aiCatalogMovies || aiCatalogSeries || aiCatalogAnime {
+                        SettingsToggleRow(
+                            title: L10n.string("ai_catalog_anime_series_toggle", fallback: "Anime series for you"),
+                            subtitle: L10n.string("ai_catalog_anime_series_toggle_subtitle", fallback: "A row of anime series picked for you"),
+                            isOn: $aiCatalogAnimeSeries,
+                            accentColor: accentColor,
+                            isAvailable: aiCatalogsAvailable
+                        )
+                        if aiCatalogsAvailable, aiCatalogMovies || aiCatalogSeries || aiCatalogAnimeMovies || aiCatalogAnimeSeries {
                             SettingsActionRow(
                                 title: L10n.string("ai_catalog_refresh", fallback: "Refresh now"),
                                 subtitle: aiCatalogStatus,
@@ -8715,7 +8724,8 @@ private struct SurpriseMeOptionsSheet: View {
         }
         .onChange(of: aiCatalogMovies) { _, _ in aiCatalogStore.settingsChanged() }
         .onChange(of: aiCatalogSeries) { _, _ in aiCatalogStore.settingsChanged() }
-        .onChange(of: aiCatalogAnime) { _, _ in aiCatalogStore.settingsChanged() }
+        .onChange(of: aiCatalogAnimeMovies) { _, _ in aiCatalogStore.settingsChanged() }
+        .onChange(of: aiCatalogAnimeSeries) { _, _ in aiCatalogStore.settingsChanged() }
         .onChange(of: provider) { _, _ in aiCatalogStore.settingsChanged() }
         .alert(
             L10n.string("surprise_me_consent_title", fallback: "Turn on Surprise Me?"),
