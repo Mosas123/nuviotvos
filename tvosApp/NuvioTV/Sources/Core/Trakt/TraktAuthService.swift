@@ -2343,6 +2343,8 @@ struct TraktProgressService {
             service: service
         )
 
+        async let droppedShowsRequest = fetchDroppedShowIDs(service: service)
+
         let (movies, episodes, watchedShows, episodeHistory) = await (
             moviesRequest,
             episodesRequest,
@@ -2361,9 +2363,12 @@ struct TraktProgressService {
             return nil
         }
 
+        let droppedShowIDs = await droppedShowsRequest
+        guard !Task.isCancelled else { return nil }
         var seeds =
             movies.orEmpty.compactMap { playbackSeed(from: $0, type: "movie") }
             + episodes.orEmpty.compactMap { playbackSeed(from: $0, type: "series") }
+                .filter { !droppedShowIDs.contains($0.contentID) }
         let playbackIDs = Set(seeds.map(\.contentID))
         let preferFurthestEpisode = UpNextEpisodeSelectionPolicy.prefersFurthestEpisode
 
@@ -2396,7 +2401,7 @@ struct TraktProgressService {
             }
             upNextSeedsByContentID[candidate.contentID] = candidate
         }
-        seeds.append(contentsOf: upNextSeedsByContentID.values)
+        seeds.append(contentsOf: upNextSeedsByContentID.values.filter { !droppedShowIDs.contains($0.contentID) })
 
         let cutoff: Date? = {
             let days = TraktSettingsStore.continueWatchingDaysCap
@@ -2465,10 +2470,21 @@ struct TraktProgressService {
             }
             items = indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
         }
+        let traktDisplayPredicate = displayPredicate.map { predicate in
+            { (item: ContinueWatchingItem) in
+                let meta = item.meta
+                let isDropped = meta.type == "series" && (
+                    droppedShowIDs.contains(meta.id)
+                    || meta.imdbId.map { droppedShowIDs.contains($0) } == true
+                    || meta.tmdbId.map { droppedShowIDs.contains("tmdb:\($0)") } == true
+                )
+                return !isDropped && predicate(item)
+            }
+        }
         guard let resolvedItems = finalizeContinueWatchingFetch(
             items,
             context: context,
-            displayPredicate: displayPredicate,
+            displayPredicate: traktDisplayPredicate,
             displaySort: displaySort
         ) else {
             return nil
@@ -2477,6 +2493,28 @@ struct TraktProgressService {
         print("[ContinueWatching] Trakt provider returning \(resolvedItems.count) items")
         #endif
         return resolvedItems
+    }
+
+    private static func fetchDroppedShowIDs(service: TraktAuthService) async -> Set<String> {
+        let limit = 1_000
+        var page = 1
+        var ids = Set<String>()
+        while !Task.isCancelled {
+            guard let items = await fetchList(
+                TraktDroppedShowDTO.self,
+                path: "users/hidden/dropped?type=show&page=\(page)&limit=\(limit)",
+                service: service
+            ) else { break }
+            for item in items {
+                guard let showIDs = item.show?.ids else { continue }
+                if let imdb = showIDs.imdb, !imdb.isEmpty { ids.insert(imdb) }
+                if let tmdb = showIDs.tmdb { ids.insert("tmdb:\(tmdb)") }
+                if let trakt = showIDs.trakt { ids.insert("trakt:\(trakt)") }
+            }
+            if items.count < limit { break }
+            page += 1
+        }
+        return ids
     }
 
     private static func fetchList<Element: Decodable>(
@@ -4605,6 +4643,10 @@ struct TraktProgressIDsDTO: Decodable {
     let trakt: Int?
     let imdb: String?
     let tmdb: Int?
+}
+
+private struct TraktDroppedShowDTO: Decodable {
+    let show: TraktProgressMediaDTO?
 }
 
 struct TraktWatchedShowDTO: Decodable {
