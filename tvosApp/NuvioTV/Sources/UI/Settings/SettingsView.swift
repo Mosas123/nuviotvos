@@ -197,6 +197,9 @@ enum SettingsKey {
     static let surpriseMeUseTrackers = "nuvio.tv.settings.integrations.surpriseMeUseTrackers"
     static let surpriseMeAIProvider = "nuvio.tv.settings.integrations.surpriseMeAIProvider"
     static let surpriseMeAIModel = "nuvio.tv.settings.integrations.surpriseMeAIModel"
+    static let aiCatalogMovies = "nuvio.tv.settings.integrations.aiCatalogMovies"
+    static let aiCatalogSeries = "nuvio.tv.settings.integrations.aiCatalogSeries"
+    static let aiCatalogAnime = "nuvio.tv.settings.integrations.aiCatalogAnime"
     static let useTopNavigation = "nuvio.tv.settings.layout.useTopNavigation"
     /// Settings → Appearance → Sidebar → Watch Party.
     static let showWatchPartyTab = "nuvio.tv.settings.layout.showWatchPartyTab"
@@ -452,7 +455,7 @@ enum SettingsKey {
         homeLayout, sidebarClockFormat, gridRows, gridItemsPerRow, catalogAutoRefreshInterval, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, homeHeroRatingSource, homeHeroRatingsEnabled, posterLabels, continueWatchingLabels, catalogAddonNames, landscapePosters, customPosterURLPattern, customPosterEnabledScreens, discoverLocation,
         searchStyle, preferAddonArtworkInSearch,
         continueWatchingVisible, continueWatchingLandscape, continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp, continueWatchingEpisodeRatings, continueWatchingBlurNextUp,
-        showCalendarTab, showSurpriseMeTab, surpriseMeUseTMDB, surpriseMeUseTrackers, surpriseMeAIProvider, surpriseMeAIModel, showWatchPartyTab, useTopNavigation, homeCalendarToday, calendarFilter, calendarHideSpoilers, calendarCheckAvailability, calendarTvmazeTimes, calendarAniList, calendarAniListPlanning,
+        showCalendarTab, showSurpriseMeTab, surpriseMeUseTMDB, surpriseMeUseTrackers, surpriseMeAIProvider, surpriseMeAIModel, aiCatalogMovies, aiCatalogSeries, aiCatalogAnime, showWatchPartyTab, useTopNavigation, homeCalendarToday, calendarFilter, calendarHideSpoilers, calendarCheckAvailability, calendarTvmazeTimes, calendarAniList, calendarAniListPlanning,
         cardCornerRadius, cardSize, liquidGlassCards,
         hideUnreleased, showFullDates, detailsActionsBelowInfo,
         detailsSectionOrder, detailsSectionDisabled,
@@ -8509,6 +8512,29 @@ private struct SurpriseMeOptionsSheet: View {
     @State private var confirmingTab = false
     @State private var confirmingAI = false
     @State private var previousProvider = SurpriseMeAIProvider.off.rawValue
+    @AppStorage(SettingsKey.aiCatalogMovies) private var aiCatalogMovies = false
+    @AppStorage(SettingsKey.aiCatalogSeries) private var aiCatalogSeries = false
+    @AppStorage(SettingsKey.aiCatalogAnime) private var aiCatalogAnime = false
+    @ObservedObject private var aiCatalogStore = AIHomeCatalogStore.shared
+
+    private var aiCatalogsAvailable: Bool {
+        selectedProvider != .off && !SurpriseMeAIKeyStore.apiKey(for: selectedProvider).isEmpty && tmdbReady
+    }
+
+    private var aiCatalogStatus: String {
+        if aiCatalogStore.isBuilding {
+            return L10n.string("ai_catalog_status_building", fallback: "Building your rows…")
+        }
+        guard let builtAt = aiCatalogStore.cache?.builtAt else {
+            return L10n.string("ai_catalog_status_never", fallback: "Not built yet")
+        }
+        let formatter = RelativeDateTimeFormatter()
+        return L10n.format(
+            "ai_catalog_status_built",
+            fallback: "Updated %@",
+            formatter.localizedString(for: builtAt, relativeTo: Date())
+        )
+    }
 
     private var selectedProvider: SurpriseMeAIProvider { SurpriseMeAIProvider(rawValue: provider) ?? .off }
     private var tmdbReady: Bool { tmdbEnabled && TmdbDetailsService.isAvailableForSurpriseMe }
@@ -8631,6 +8657,51 @@ private struct SurpriseMeOptionsSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+
+                    SettingsGroup(
+                        title: L10n.string("ai_catalog_group", fallback: "For You rows"),
+                        subtitle: aiCatalogsAvailable
+                            ? L10n.string(
+                                "ai_catalog_group_subtitle",
+                                fallback: "Rows at the top of Home that your AI builds from everything you watched and saved. Up to 30 titles each, checked on TMDB, refreshed once a day or after 10 new titles."
+                            )
+                            : L10n.string(
+                                "ai_catalog_group_unavailable",
+                                fallback: "Needs an AI provider with a key above, and TMDB with an API key in Integrations."
+                            )
+                    ) {
+                        SettingsToggleRow(
+                            title: L10n.string("ai_catalog_movies_toggle", fallback: "Movies for you"),
+                            subtitle: L10n.string("ai_catalog_movies_toggle_subtitle", fallback: "A row of movies picked for you"),
+                            isOn: $aiCatalogMovies,
+                            accentColor: accentColor,
+                            isAvailable: aiCatalogsAvailable
+                        )
+                        SettingsToggleRow(
+                            title: L10n.string("ai_catalog_series_toggle", fallback: "Series for you"),
+                            subtitle: L10n.string("ai_catalog_series_toggle_subtitle", fallback: "A row of series picked for you"),
+                            isOn: $aiCatalogSeries,
+                            accentColor: accentColor,
+                            isAvailable: aiCatalogsAvailable
+                        )
+                        SettingsToggleRow(
+                            title: L10n.string("ai_catalog_anime_toggle", fallback: "Anime for you"),
+                            subtitle: L10n.string("ai_catalog_anime_toggle_subtitle", fallback: "A row of anime series and films picked for you"),
+                            isOn: $aiCatalogAnime,
+                            accentColor: accentColor,
+                            isAvailable: aiCatalogsAvailable
+                        )
+                        if aiCatalogsAvailable, aiCatalogMovies || aiCatalogSeries || aiCatalogAnime {
+                            SettingsActionRow(
+                                title: L10n.string("ai_catalog_refresh", fallback: "Refresh now"),
+                                subtitle: aiCatalogStatus,
+                                value: aiCatalogStore.isBuilding ? "…" : L10n.string("ai_catalog_refresh_action", fallback: "Refresh"),
+                                accentColor: accentColor
+                            ) {
+                                aiCatalogStore.refreshIfNeeded(force: true)
+                            }
+                        }
+                    }
                 }
                 .frame(width: 1_000, alignment: .leading)
                 .padding(.horizontal, 52)
@@ -8642,6 +8713,10 @@ private struct SurpriseMeOptionsSheet: View {
         .onChange(of: apiKey) { _, newValue in
             SurpriseMeAIKeyStore.save(newValue, for: selectedProvider)
         }
+        .onChange(of: aiCatalogMovies) { _, _ in aiCatalogStore.settingsChanged() }
+        .onChange(of: aiCatalogSeries) { _, _ in aiCatalogStore.settingsChanged() }
+        .onChange(of: aiCatalogAnime) { _, _ in aiCatalogStore.settingsChanged() }
+        .onChange(of: provider) { _, _ in aiCatalogStore.settingsChanged() }
         .alert(
             L10n.string("surprise_me_consent_title", fallback: "Turn on Surprise Me?"),
             isPresented: $confirmingTab

@@ -1970,7 +1970,49 @@ extension TmdbDetailsService {
         ], apiKey: apiKey)
     }
 
+    /// TMDB's TV genre ids, with the names Nuvio's catalogs use.
+    static let surpriseMeTVGenres: [Int: String] = [
+        10759: "Action", 16: "Animation", 35: "Comedy", 80: "Crime", 99: "Documentary",
+        18: "Drama", 10751: "Family", 10762: "Kids", 9648: "Mystery", 10763: "News",
+        10764: "Reality", 10765: "Sci-Fi", 10766: "Soap", 10767: "Talk", 10768: "War", 37: "Western",
+    ]
+
+    /// The series TMDB finds for a title the AI suggested, or nil when there is
+    /// no match. With a year, the first air year must be within one year of it.
+    static func surpriseMeFindSeries(title: String, year: Int?) async -> NuvioMeta? {
+        guard isEnabled, let apiKey else { return nil }
+        var query = ["query": title, "include_adult": "false"]
+        if let year { query["first_air_date_year"] = String(year) }
+        var results = await surpriseMeTitles(path: "search/tv", query: query, apiKey: apiKey, type: "series")
+        if results.isEmpty, year != nil {
+            query["first_air_date_year"] = nil
+            results = await surpriseMeTitles(path: "search/tv", query: query, apiKey: apiKey, type: "series")
+        }
+        return bestMatch(in: results, title: title, year: year)
+    }
+
+    private static func bestMatch(in results: [NuvioMeta], title: String, year: Int?) -> NuvioMeta? {
+        let wanted = title.lowercased().filter { $0.isLetter || $0.isNumber }
+        func yearMatches(_ meta: NuvioMeta) -> Bool {
+            guard let year else { return true }
+            return meta.year.map { abs($0 - year) <= 1 } == true
+        }
+        return results.first { meta in
+            let name = meta.name.lowercased().filter { $0.isLetter || $0.isNumber }
+            return yearMatches(meta) && (name == wanted || results.count == 1)
+        } ?? results.first { year != nil && yearMatches($0) }
+    }
+
     private static func surpriseMeMovies(path: String, query: [String: String], apiKey: String) async -> [NuvioMeta] {
+        await surpriseMeTitles(path: path, query: query, apiKey: apiKey, type: "movie")
+    }
+
+    private static func surpriseMeTitles(
+        path: String,
+        query: [String: String],
+        apiKey: String,
+        type: String
+    ) async -> [NuvioMeta] {
         var components = URLComponents(url: apiBase.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "api_key", value: apiKey),
@@ -1990,9 +2032,11 @@ extension TmdbDetailsService {
                 posterUrl: imageURL(item.posterPath, size: "w500"),
                 backgroundUrl: imageURL(item.backdropPath, size: "w1280"),
                 tmdbId: item.id,
-                type: "movie",
-                year: item.releaseDate.flatMap { Int($0.prefix(4)) },
-                genres: (item.genreIds ?? []).compactMap { surpriseMeMovieGenres[$0] },
+                type: type,
+                year: (item.releaseDate ?? item.firstAirDate).flatMap { Int($0.prefix(4)) },
+                genres: (item.genreIds ?? []).compactMap {
+                    (type == "series" ? surpriseMeTVGenres : surpriseMeMovieGenres)[$0]
+                },
                 rating: item.voteAverage.flatMap { $0 > 0 ? $0 : nil }
             )
         }
