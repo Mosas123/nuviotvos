@@ -238,6 +238,7 @@ enum SettingsKey {
     /// connecting a tracker is allowed to select itself.
     static let watchProgressSourceChosenByUser = "nuvio.tv.settings.integrations.watchProgressSourceChosenByUser"
     static let traktLibrarySourceMode = "nuvio.tv.settings.integrations.traktLibrarySourceMode"
+    static let libraryShowAllSources = "nuvio.tv.settings.integrations.libraryShowAllSources"
     static let traktMoreLikeThisSource = "nuvio.tv.settings.integrations.traktMoreLikeThisSource"
     static let simklClientID = "nuvio.tv.settings.integrations.simklClientID"
     static let simklPlanToWatchHomeCatalogs = "nuvio.tv.settings.integrations.simklPlanToWatchHomeCatalogs"
@@ -461,7 +462,7 @@ enum SettingsKey {
         traktContinueWatchingDaysCap, traktShowMetaComments,
         traktWatchProgressSource, watchProgressSourceChosenByUser,
         nuvioSyncScrobbleEnabled, traktScrobbleEnabled, simklScrobbleEnabled, mdbListScrobbleEnabled, wetrakrScrobbleEnabled,
-        traktLibrarySourceMode, traktMoreLikeThisSource,
+        traktLibrarySourceMode, libraryShowAllSources, traktMoreLikeThisSource,
         simklClientID, simklAccessToken, simklRefreshToken, simklPlanToWatchHomeCatalogs,
         wetrakrClientID, wetrakrClientSecret, wetrakrAccessToken, wetrakrRefreshToken, wetrakrConnected,
         tmdbEnabled, tmdbApiKey, tmdbLanguage, tmdbFollowAppLanguage,
@@ -5585,6 +5586,7 @@ private struct IntegrationSettingsView: View {
     @State private var wetrakrClientSecretDraft: String
     @AppStorage(SettingsKey.tmdbEnabled) private var tmdbEnabled = false
     @AppStorage(SettingsKey.tmdbApiKey) private var tmdbApiKey = ""
+    @AppStorage(SettingsKey.libraryShowAllSources) private var libraryShowAllSources = false
     @AppStorage(SettingsKey.mdbListEnabled) private var mdbListEnabled = false
     @AppStorage(SettingsKey.mdbListApiKey) private var mdbListApiKey = ""
     @AppStorage(SettingsKey.debridProvider) private var debridProvider = "None"
@@ -5822,6 +5824,16 @@ private struct IntegrationSettingsView: View {
                     subtitle: L10n.string("tvos_settings_trakt_library_source_subtitle", fallback: "Choose which library to use for saving and viewing your collection"),
                     selection: globalLibrarySourceSelection,
                     options: RemoteTrackingState.availableLibrarySources().map(\.label),
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("library_show_all_sources", fallback: "Show all libraries"),
+                    subtitle: L10n.string(
+                        "library_show_all_sources_subtitle",
+                        fallback: "Library also shows titles saved in your other libraries, each title once and labelled with where it's from. Adding, removing and watched marks still use the Library Source above."
+                    ),
+                    isOn: $libraryShowAllSources,
                     accentColor: accentColor
                 )
             }

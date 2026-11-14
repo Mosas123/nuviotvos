@@ -17,7 +17,14 @@ private struct LibraryLoadSnapshot: Sendable {
 public class LibraryViewModel: ObservableObject {
     typealias LibraryHistorySyncHandler = @MainActor (TraktLibrarySourceMode, String?) async -> Bool
 
+    /// The selected library source's titles. Adding, removing and watched
+    /// marks act on this list only.
     @Published public var items: [StremioMeta] = []
+    /// Settings > Library > Show all libraries: titles from the other sources,
+    /// read from the copies this Apple TV keeps, shown but never changed.
+    @Published private(set) var otherLibraryItems: [StremioMeta] = []
+    /// Which source each title in `otherLibraryItems` comes from, e.g. "Trakt".
+    @Published private(set) var otherLibrarySourceByID: [String: String] = [:]
     @Published public var sortOption: SortOption = .dateAdded
     @Published public var groupOption: GroupOption = .none
     @Published public var contentTypeFilter: String?
@@ -291,6 +298,7 @@ public class LibraryViewModel: ObservableObject {
         displayedSource = source
         displayedWatchedContext = watchedContext
         self.items = items
+        refreshOtherLibraries()
         validateFilters()
         return true
     }
@@ -443,6 +451,7 @@ public class LibraryViewModel: ObservableObject {
         displayedSource = currentContext.source
         displayedWatchedContext = currentContext
         items = snapshot.items
+        refreshOtherLibraries()
         isLoadingCachedLibrary = false
         updateLoadingState()
         validateFilters()
@@ -866,14 +875,48 @@ public class LibraryViewModel: ObservableObject {
         }
     }
 
+    /// Everything the Library shows: the selected source first, then the other
+    /// libraries when Show all libraries is on.
+    public var allItems: [StremioMeta] { items + otherLibraryItems }
+
+    public var showsOtherLibraries: Bool { !otherLibraryItems.isEmpty }
+
+    /// Reloads the other libraries from this Apple TV's copies. Read only:
+    /// nothing is requested from the services and nothing is changed.
+    func refreshOtherLibraries() {
+        let defaults = ProfileSettings.current
+        guard defaults.bool(forKey: SettingsKey.libraryShowAllSources),
+              selectedMdbListListID == nil else {
+            otherLibraryItems = []
+            otherLibrarySourceByID = [:]
+            return
+        }
+        let selected = TraktSettingsStore.librarySourceMode(in: defaults)
+        let profileID = LibraryStore.activeProfileId
+        var others: [(label: String, items: [LibraryStoreItem])] = []
+        for source in TraktLibrarySourceMode.allCases where source != selected {
+            if source == .local {
+                others.append((L10n.string("library_source_nuvio", fallback: "Nuvio"), LibraryStore.items(forProfileId: profileID)))
+                continue
+            }
+            let binding = RemoteLibraryStore.accountBindingID(for: source, profileId: profileID, in: defaults)
+            guard let cached = RemoteLibraryStore.load(source: source, profileId: profileID, accountBindingId: binding) else { continue }
+            others.append((source.label, cached))
+        }
+        let merged = LibraryMerge.others(others, excluding: items)
+        otherLibraryItems = merged.map(\.meta)
+        otherLibrarySourceByID = Dictionary(merged.map { ($0.meta.id, $0.label) }, uniquingKeysWith: { first, _ in first })
+        validateFilters()
+    }
+
     public var availableContentTypes: [String] {
-        Array(Set(items.map(\.contentType)))
+        Array(Set(allItems.map(\.contentType)))
             .filter { !$0.isEmpty }
             .sorted { typeLabel($0) < typeLabel($1) }
     }
 
     public var availableGenres: [String] {
-        Array(Set(items.flatMap { $0.genres ?? [] }))
+        Array(Set(allItems.flatMap { $0.genres ?? [] }))
             .filter { !$0.isEmpty }
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
@@ -892,7 +935,7 @@ public class LibraryViewModel: ObservableObject {
     public var sortedAndGroupedItems: [String: [StremioMeta]] {
         var result: [String: [StremioMeta]] = [:]
         
-        let filtered = items.filter { item in
+        let filtered = allItems.filter { item in
             let matchesType = contentTypeFilter == nil || item.contentType == contentTypeFilter
             let matchesGenre = genreFilter == nil || item.genres?.contains(where: {
                 $0.caseInsensitiveCompare(genreFilter ?? "") == .orderedSame

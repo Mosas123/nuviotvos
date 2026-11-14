@@ -285,6 +285,7 @@ public struct LibraryView: View {
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
     @AppStorage(SettingsKey.debridProvider) private var debridProvider = "None"
+    @AppStorage(SettingsKey.libraryShowAllSources) private var libraryShowAllSources = false
     @AppStorage(SettingsKey.debridApiKey) private var debridApiKey = ""
     @AppStorage(SettingsKey.torboxAccessToken) private var torboxAccessToken = ""
     @AppStorage(SettingsKey.premiumizeAccessToken) private var premiumizeAccessToken = ""
@@ -526,7 +527,11 @@ public struct LibraryView: View {
                 }
             }
         }
+        .onChange(of: libraryShowAllSources) { _, _ in
+            viewModel.refreshOtherLibraries()
+        }
         .task {
+            viewModel.refreshOtherLibraries()
             await viewModel.refreshSelectedLibrary(syncWatchedHistory: true)
             if cloudViewModel.isAvailable {
                 await cloudViewModel.load()
@@ -566,14 +571,14 @@ public struct LibraryView: View {
     private var savedContent: some View {
         let watchedContext = viewModel.displayedWatchedContext ?? LibraryWatchedContext.currentScope()
         let watchedContextIsCurrent = watchedContext.isCurrentScope
-        if viewModel.isLoading && viewModel.items.isEmpty {
+        if viewModel.isLoading && viewModel.allItems.isEmpty {
             centeredMessage {
                 ProgressView()
                     .progressViewStyle(.circular)
                     .tint(.white)
                     .scaleEffect(1.6)
             }
-        } else if viewModel.items.isEmpty {
+        } else if viewModel.allItems.isEmpty {
             centeredMessage {
                 VStack(spacing: 16) {
                     Image(systemName: "books.vertical")
@@ -608,6 +613,15 @@ public struct LibraryView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    if viewModel.showsOtherLibraries {
+                        Text(L10n.format(
+                            "library_show_all_sources_note",
+                            fallback: "Also showing your other libraries. Adding and removing titles uses %@.",
+                            TraktSettingsStore.librarySourceMode.label
+                        ))
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.white.opacity(0.6))
+                    }
                     ForEach(viewModel.sortedAndGroupedItems.keys.sorted(), id: \.self) { group in
                         if viewModel.groupOption != .none {
                             Text(group.capitalized)
@@ -646,6 +660,19 @@ public struct LibraryView: View {
                                     (overlayRestoreItemID != nil && overlayRestoreItemID != item.id)
                                         || !watchedContextIsCurrent
                                 )
+                                .overlay(alignment: .topLeading) {
+                                    // Titles from another library say where they're saved.
+                                    if let source = viewModel.otherLibrarySourceByID[item.id] {
+                                        Text(source)
+                                            .font(.system(size: 16, weight: .semibold))
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 4)
+                                            .background(Capsule().fill(Color.black.opacity(0.7)))
+                                            .padding(10)
+                                            .allowsHitTesting(false)
+                                    }
+                                }
                             }
                         }
                     }
