@@ -2188,13 +2188,10 @@ struct TraktProgressService {
         return displayedItems
     }
 
-    /// Backfill Home in bounded batches when metadata or display filters
-    /// leave gaps. Keep resolved items for the existing checkpoint merge.
+    /// Resolve all Home candidates while bounding concurrent metadata requests.
     static func resolveContinueWatchingMetadata<Seed>(
         from seeds: [Seed],
         batchSize: Int,
-        displayPredicate: (ContinueWatchingItem) -> Bool,
-        projectItems: ([ContinueWatchingItem]) -> [ContinueWatchingItem] = { $0 },
         resolve: @escaping (Seed) async -> ContinueWatchingItem?
     ) async -> [ContinueWatchingItem]? {
         guard !Task.isCancelled else { return nil }
@@ -2206,8 +2203,6 @@ struct TraktProgressService {
                 return nil
             }
             items.append(contentsOf: resolved)
-            let visible = selectContinueWatchingItemsForDisplay(projectItems(items), predicate: displayPredicate)
-            if visible.count == maxItems { break }
         }
         return Task.isCancelled ? nil : items
     }
@@ -2239,7 +2234,7 @@ struct TraktProgressService {
     }
 
     /// Apply Home eligibility and title-level deduplication only after all
-    /// checkpoints are merged, then order and cap the visible row.
+    /// checkpoints are merged, then order the visible row.
     static func selectContinueWatchingItemsForDisplay(
         _ items: [ContinueWatchingItem],
         predicate: (ContinueWatchingItem) -> Bool,
@@ -2249,13 +2244,12 @@ struct TraktProgressService {
         let eligibleUniqueItems = items.filter {
             predicate($0) && seenMetaIDs.insert($0.meta.id).inserted
         }
-        let orderedItems = sort?(eligibleUniqueItems) ?? eligibleUniqueItems
-        return Array(orderedItems.prefix(maxItems))
+        return sort?(eligibleUniqueItems) ?? eligibleUniqueItems
     }
 
     /// Separate Upcoming is a presentation split performed after selection.
     /// Rank its combined pool by the default recency order so upcoming entries
-    /// still compete for the Home 20-item limit before `setContinueWatching` splits it.
+    /// are ordered before `setContinueWatching` splits the pool.
     static func sortContinueWatchingForDisplaySelection(
         _ items: [ContinueWatchingItem],
         preference: String
@@ -2426,21 +2420,10 @@ struct TraktProgressService {
             usedContentIDs.insert($0.contentID).inserted
         }
         let items: [ContinueWatchingItem]
-        if let displayPredicate {
+        if displayPredicate != nil {
             guard let resolvedItems = await resolveContinueWatchingMetadata(
                 from: uniqueSeeds,
                 batchSize: homeContinueWatchingBatchSize,
-                displayPredicate: displayPredicate,
-                projectItems: { items in
-                    guard context.updateDisplayedSnapshot else { return items }
-                    return mergingLocalPlaybackCheckpoints(
-                        into: items,
-                        source: context.source,
-                        profileId: context.profileId,
-                        limit: nil,
-                        reconcile: false
-                    )
-                },
                 resolve: { seed in
                     let item = await makeItem(from: seed, repository: repository)
                     #if DEBUG
@@ -2527,10 +2510,9 @@ struct TraktProgressService {
         into remoteItems: [ContinueWatchingItem],
         source: TraktWatchProgressSource,
         profileId: String? = ContinueWatchingStore.activeProfileId,
-        limit: Int? = maxItems,
-        reconcile: Bool = true
+        limit: Int? = maxItems
     ) -> [ContinueWatchingItem] {
-        if reconcile { pruneExpiredLocalCheckpoints() }
+        pruneExpiredLocalCheckpoints()
         let now = Date()
         let checkpoints = localPlaybackCheckpoints.filter {
             $0.profileId == profileId && $0.source == source
@@ -2601,7 +2583,7 @@ struct TraktProgressService {
             }
         }
 
-        if reconcile && !confirmedItems.isEmpty {
+        if !confirmedItems.isEmpty {
             localPlaybackCheckpoints.removeAll { checkpoint in
                 checkpoint.profileId == profileId
                     && checkpoint.source == source
