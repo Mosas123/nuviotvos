@@ -1771,7 +1771,7 @@ struct TraktProgressService {
 
     private static let completionPercent = 90.0
     nonisolated private static let maxItems = 20
-    static let maxHomeContinueWatchingSeeds = 36
+    static let homeContinueWatchingBatchSize = 36
     /// Long enough to outlive an app relaunch plus Simkl's 20-second per-user
     /// scrobble lock. Kept to an hour so a checkpoint the server never confirms
     /// (for example the title was marked watched on another device) cannot linger
@@ -2188,15 +2188,29 @@ struct TraktProgressService {
         return displayedItems
     }
 
-    /// Resolve a bounded seed pool concurrently. Each result is restored to
-    /// candidate order before returning, regardless of completion order.
+    /// Resolve all Home candidates while bounding concurrent metadata requests.
     static func resolveContinueWatchingMetadata<Seed>(
         from seeds: [Seed],
-        candidateLimit: Int,
+        batchSize: Int,
         resolve: @escaping (Seed) async -> ContinueWatchingItem?
     ) async -> [ContinueWatchingItem]? {
-        guard candidateLimit > 0 else { return [] }
-        let candidates = Array(seeds.prefix(candidateLimit))
+        guard !Task.isCancelled else { return nil }
+        guard batchSize > 0 else { return [] }
+        var items: [ContinueWatchingItem] = []
+        for start in stride(from: 0, to: seeds.count, by: batchSize) {
+            let batch = seeds[start...].prefix(batchSize)
+            guard let resolved = await resolveContinueWatchingBatch(batch, resolve: resolve) else {
+                return nil
+            }
+            items.append(contentsOf: resolved)
+        }
+        return Task.isCancelled ? nil : items
+    }
+
+    private static func resolveContinueWatchingBatch<Seed>(
+        _ candidates: ArraySlice<Seed>,
+        resolve: @escaping (Seed) async -> ContinueWatchingItem?
+    ) async -> [ContinueWatchingItem]? {
         guard !Task.isCancelled else { return nil }
         let tasks = candidates.enumerated().map { index, seed in
             Task { @MainActor in
@@ -2220,7 +2234,7 @@ struct TraktProgressService {
     }
 
     /// Apply Home eligibility and title-level deduplication only after all
-    /// checkpoints are merged, then order and cap the visible row.
+    /// checkpoints are merged, then order the visible row.
     static func selectContinueWatchingItemsForDisplay(
         _ items: [ContinueWatchingItem],
         predicate: (ContinueWatchingItem) -> Bool,
@@ -2230,13 +2244,12 @@ struct TraktProgressService {
         let eligibleUniqueItems = items.filter {
             predicate($0) && seenMetaIDs.insert($0.meta.id).inserted
         }
-        let orderedItems = sort?(eligibleUniqueItems) ?? eligibleUniqueItems
-        return Array(orderedItems.prefix(maxItems))
+        return sort?(eligibleUniqueItems) ?? eligibleUniqueItems
     }
 
     /// Separate Upcoming is a presentation split performed after selection.
     /// Rank its combined pool by the default recency order so upcoming entries
-    /// still compete for the Home 20-item limit before `setContinueWatching` splits it.
+    /// are ordered before `setContinueWatching` splits the pool.
     static func sortContinueWatchingForDisplaySelection(
         _ items: [ContinueWatchingItem],
         preference: String
@@ -2330,6 +2343,8 @@ struct TraktProgressService {
             service: service
         )
 
+        async let droppedShowsRequest = fetchDroppedShowIDs(service: service)
+
         let (movies, episodes, watchedShows, episodeHistory) = await (
             moviesRequest,
             episodesRequest,
@@ -2348,9 +2363,12 @@ struct TraktProgressService {
             return nil
         }
 
+        let droppedShowIDs = await droppedShowsRequest
+        guard !Task.isCancelled else { return nil }
         var seeds =
             movies.orEmpty.compactMap { playbackSeed(from: $0, type: "movie") }
             + episodes.orEmpty.compactMap { playbackSeed(from: $0, type: "series") }
+                .filter { !droppedShowIDs.contains($0.contentID) }
         let playbackIDs = Set(seeds.map(\.contentID))
         let preferFurthestEpisode = UpNextEpisodeSelectionPolicy.prefersFurthestEpisode
 
@@ -2383,7 +2401,7 @@ struct TraktProgressService {
             }
             upNextSeedsByContentID[candidate.contentID] = candidate
         }
-        seeds.append(contentsOf: upNextSeedsByContentID.values)
+        seeds.append(contentsOf: upNextSeedsByContentID.values.filter { !droppedShowIDs.contains($0.contentID) })
 
         let cutoff: Date? = {
             let days = TraktSettingsStore.continueWatchingDaysCap
@@ -2410,7 +2428,7 @@ struct TraktProgressService {
         if displayPredicate != nil {
             guard let resolvedItems = await resolveContinueWatchingMetadata(
                 from: uniqueSeeds,
-                candidateLimit: maxHomeContinueWatchingSeeds,
+                batchSize: homeContinueWatchingBatchSize,
                 resolve: { seed in
                     let item = await makeItem(from: seed, repository: repository)
                     #if DEBUG
@@ -2452,10 +2470,21 @@ struct TraktProgressService {
             }
             items = indexedItems.sorted { $0.0 < $1.0 }.map(\.1)
         }
+        let traktDisplayPredicate = displayPredicate.map { predicate in
+            { (item: ContinueWatchingItem) in
+                let meta = item.meta
+                let isDropped = meta.type == "series" && (
+                    droppedShowIDs.contains(meta.id)
+                    || meta.imdbId.map { droppedShowIDs.contains($0) } == true
+                    || meta.tmdbId.map { droppedShowIDs.contains("tmdb:\($0)") } == true
+                )
+                return !isDropped && predicate(item)
+            }
+        }
         guard let resolvedItems = finalizeContinueWatchingFetch(
             items,
             context: context,
-            displayPredicate: displayPredicate,
+            displayPredicate: traktDisplayPredicate,
             displaySort: displaySort
         ) else {
             return nil
@@ -2464,6 +2493,28 @@ struct TraktProgressService {
         print("[ContinueWatching] Trakt provider returning \(resolvedItems.count) items")
         #endif
         return resolvedItems
+    }
+
+    private static func fetchDroppedShowIDs(service: TraktAuthService) async -> Set<String> {
+        let limit = 1_000
+        var page = 1
+        var ids = Set<String>()
+        while !Task.isCancelled {
+            guard let items = await fetchList(
+                TraktDroppedShowDTO.self,
+                path: "users/hidden/dropped?type=show&page=\(page)&limit=\(limit)",
+                service: service
+            ) else { break }
+            for item in items {
+                guard let showIDs = item.show?.ids else { continue }
+                if let imdb = showIDs.imdb, !imdb.isEmpty { ids.insert(imdb) }
+                if let tmdb = showIDs.tmdb { ids.insert("tmdb:\(tmdb)") }
+                if let trakt = showIDs.trakt { ids.insert("trakt:\(trakt)") }
+            }
+            if items.count < limit { break }
+            page += 1
+        }
+        return ids
     }
 
     private static func fetchList<Element: Decodable>(
@@ -2500,8 +2551,10 @@ struct TraktProgressService {
         limit: Int? = maxItems
     ) -> [ContinueWatchingItem] {
         pruneExpiredLocalCheckpoints()
+        let now = Date()
         let checkpoints = localPlaybackCheckpoints.filter {
             $0.profileId == profileId && $0.source == source
+                && now.timeIntervalSince($0.item.lastWatchedAt) <= localCheckpointLifetime
         }
         var merged = remoteItems
         var confirmedItems: [ContinueWatchingItem] = []
@@ -4590,6 +4643,10 @@ struct TraktProgressIDsDTO: Decodable {
     let trakt: Int?
     let imdb: String?
     let tmdb: Int?
+}
+
+private struct TraktDroppedShowDTO: Decodable {
+    let show: TraktProgressMediaDTO?
 }
 
 struct TraktWatchedShowDTO: Decodable {
