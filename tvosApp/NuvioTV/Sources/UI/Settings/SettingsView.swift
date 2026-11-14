@@ -8643,6 +8643,32 @@ private struct SurpriseMeOptionsSheet: View {
                                 isSecure: true,
                                 onCommit: { SurpriseMeAIKeyStore.save(apiKey, for: selectedProvider) }
                             )
+                            if !selectedProvider.suggestedModels.isEmpty {
+                                SettingsOptionRow(
+                                    title: L10n.string("surprise_me_ai_model_preset", fallback: "Suggested Model"),
+                                    subtitle: L10n.string(
+                                        "surprise_me_ai_model_preset_subtitle",
+                                        fallback: "Pick a model, or type another one below"
+                                    ),
+                                    selection: Binding(
+                                        get: {
+                                            let current = model.isEmpty ? selectedProvider.defaultModel : model
+                                            return selectedProvider.suggestedModels.first { $0.id == current }?.id
+                                                ?? L10n.string("surprise_me_ai_model_custom", fallback: "Custom")
+                                        },
+                                        set: { newValue in
+                                            if selectedProvider.suggestedModels.contains(where: { $0.id == newValue }) {
+                                                model = newValue
+                                            }
+                                        }
+                                    ),
+                                    options: selectedProvider.suggestedModels.map(\.id),
+                                    accentColor: accentColor,
+                                    optionLabel: { id in
+                                        selectedProvider.suggestedModels.first { $0.id == id }?.name ?? id
+                                    }
+                                )
+                            }
                             SettingsNativeTextFieldRow(
                                 title: L10n.string("surprise_me_ai_model", fallback: "Model"),
                                 subtitle: L10n.format("surprise_me_ai_model_subtitle", fallback: "Leave empty for %@", selectedProvider.defaultModel),

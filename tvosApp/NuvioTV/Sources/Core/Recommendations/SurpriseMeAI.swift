@@ -19,8 +19,18 @@ enum SurpriseMeAIProvider: String, CaseIterable, Identifiable {
         switch self {
         case .off: return ""
         case .gemini: return "gemini-3.6-flash"
-        case .deepSeek: return "deepseek-chat"
+        // DeepSeek-V4.1-Flash. The older names are being retired.
+        case .deepSeek: return "deepseek-flash"
         case .openRouter: return "google/gemini-2.5-flash"
+        }
+    }
+
+    /// Models offered in Settings: (API model id, name shown). Any other model
+    /// can still be typed in the Model field.
+    var suggestedModels: [(id: String, name: String)] {
+        switch self {
+        case .deepSeek: return [("deepseek-flash", "DeepSeek-V4.1-Flash")]
+        case .off, .gemini, .openRouter: return []
         }
     }
 
