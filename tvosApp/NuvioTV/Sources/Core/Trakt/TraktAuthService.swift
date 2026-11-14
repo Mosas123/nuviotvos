@@ -2194,22 +2194,20 @@ struct TraktProgressService {
         from seeds: [Seed],
         batchSize: Int,
         displayPredicate: (ContinueWatchingItem) -> Bool,
+        projectItems: ([ContinueWatchingItem]) -> [ContinueWatchingItem] = { $0 },
         resolve: @escaping (Seed) async -> ContinueWatchingItem?
     ) async -> [ContinueWatchingItem]? {
         guard !Task.isCancelled else { return nil }
         guard batchSize > 0 else { return [] }
         var items: [ContinueWatchingItem] = []
-        var eligibleIDs = Set<String>()
         for start in stride(from: 0, to: seeds.count, by: batchSize) {
             let batch = seeds[start...].prefix(batchSize)
             guard let resolved = await resolveContinueWatchingBatch(batch, resolve: resolve) else {
                 return nil
             }
             items.append(contentsOf: resolved)
-            for item in resolved where displayPredicate(item) {
-                eligibleIDs.insert(item.meta.id)
-            }
-            if eligibleIDs.count >= maxItems { break }
+            let visible = selectContinueWatchingItemsForDisplay(projectItems(items), predicate: displayPredicate)
+            if visible.count == maxItems { break }
         }
         return Task.isCancelled ? nil : items
     }
@@ -2433,6 +2431,16 @@ struct TraktProgressService {
                 from: uniqueSeeds,
                 batchSize: homeContinueWatchingBatchSize,
                 displayPredicate: displayPredicate,
+                projectItems: { items in
+                    guard context.updateDisplayedSnapshot else { return items }
+                    return mergingLocalPlaybackCheckpoints(
+                        into: items,
+                        source: context.source,
+                        profileId: context.profileId,
+                        limit: nil,
+                        reconcile: false
+                    )
+                },
                 resolve: { seed in
                     let item = await makeItem(from: seed, repository: repository)
                     #if DEBUG
@@ -2519,11 +2527,14 @@ struct TraktProgressService {
         into remoteItems: [ContinueWatchingItem],
         source: TraktWatchProgressSource,
         profileId: String? = ContinueWatchingStore.activeProfileId,
-        limit: Int? = maxItems
+        limit: Int? = maxItems,
+        reconcile: Bool = true
     ) -> [ContinueWatchingItem] {
-        pruneExpiredLocalCheckpoints()
+        if reconcile { pruneExpiredLocalCheckpoints() }
+        let now = Date()
         let checkpoints = localPlaybackCheckpoints.filter {
             $0.profileId == profileId && $0.source == source
+                && now.timeIntervalSince($0.item.lastWatchedAt) <= localCheckpointLifetime
         }
         var merged = remoteItems
         var confirmedItems: [ContinueWatchingItem] = []
@@ -2590,7 +2601,7 @@ struct TraktProgressService {
             }
         }
 
-        if !confirmedItems.isEmpty {
+        if reconcile && !confirmedItems.isEmpty {
             localPlaybackCheckpoints.removeAll { checkpoint in
                 checkpoint.profileId == profileId
                     && checkpoint.source == source

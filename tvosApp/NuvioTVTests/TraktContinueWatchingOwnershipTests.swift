@@ -193,6 +193,20 @@ final class TraktContinueWatchingOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testHomeMetadataResolutionCountsProjectedVisibleItems() async {
+        let resolved = await TraktProgressService.resolveContinueWatchingMetadata(
+            from: Array(0..<40),
+            batchSize: 20,
+            displayPredicate: { _ in true },
+            projectItems: { $0.filter { $0.meta.id != "0" } }
+        ) { seed in
+            self.item(meta: NuvioMeta(id: String(seed), name: "Seed", type: "movie"))
+        }
+
+        XCTAssertEqual(resolved?.map(\.meta.id), (0..<40).map(String.init))
+    }
+
+    @MainActor
     func testBackfilledHomeItemsRemainAvailableForDetailsResumeLookup() {
         let now = Date()
         let items = (0..<36).map { seed in
