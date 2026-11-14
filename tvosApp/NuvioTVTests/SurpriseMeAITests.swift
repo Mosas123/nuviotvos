@@ -68,6 +68,18 @@ final class SurpriseMeAITests: XCTestCase {
         XCTAssertFalse(history.contains(NuvioMeta(id: "tmdb:2", name: "Inception", type: "movie", year: 1990)))
     }
 
+    func testLibrariesFromSeveralServicesCountEachTitleOnce() {
+        let trakt = NuvioMeta(id: "tt1375666", name: "Inception", imdbId: "tt1375666", type: "movie", year: 2010)
+        let simkl = NuvioMeta(id: "tmdb:27205", name: "Inception", imdbId: "tt1375666", tmdbId: 27205, type: "movie", year: 2010)
+        let mdblist = NuvioMeta(id: "tmdb:27205", name: "Inception", tmdbId: 27205, type: "movie")
+        let other = NuvioMeta(id: "tt0816692", name: "Interstellar", type: "movie", year: 2014)
+        let unique = SurpriseMeHistory.unique([trakt, simkl, mdblist, other])
+        XCTAssertEqual(unique.map(\.id), ["tt1375666", "tt0816692"])
+
+        let history = SurpriseMeHistory(watched: [], library: [trakt, simkl, mdblist, other], continueWatching: [])
+        XCTAssertEqual(history.titleCount, 2)
+    }
+
     func testScienceFictionAndSciFiAreTheSameGenre() {
         XCTAssertEqual(TasteProfile.normalized("Science Fiction"), TasteProfile.normalized("Sci-Fi"))
         XCTAssertEqual(TmdbDetailsService.surpriseMeGenreID(for: "Science Fiction"), 878)
