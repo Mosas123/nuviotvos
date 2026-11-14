@@ -12,6 +12,10 @@ struct TasteProfile: Equatable {
     let weights: [String: Double]
     /// Display names of the genres, heaviest first.
     let topGenres: [String]
+    /// Display name for each normalized genre key.
+    var displayNames: [String: String] = [:]
+
+    func displayName(for key: String) -> String { displayNames[key] ?? key }
 
     static let empty = TasteProfile(weights: [:], topGenres: [])
 
@@ -56,7 +60,8 @@ struct TasteProfile: Equatable {
         let ordered = totals.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
         return TasteProfile(
             weights: totals.mapValues { $0 / sum },
-            topGenres: ordered.prefix(3).compactMap { names[$0.key] }
+            topGenres: ordered.prefix(3).compactMap { names[$0.key] },
+            displayNames: names
         )
     }
 
