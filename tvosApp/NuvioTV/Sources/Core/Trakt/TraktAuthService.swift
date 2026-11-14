@@ -1771,7 +1771,7 @@ struct TraktProgressService {
 
     private static let completionPercent = 90.0
     nonisolated private static let maxItems = 20
-    static let maxHomeContinueWatchingSeeds = 36
+    static let homeContinueWatchingBatchSize = 36
     /// Long enough to outlive an app relaunch plus Simkl's 20-second per-user
     /// scrobble lock. Kept to an hour so a checkpoint the server never confirms
     /// (for example the title was marked watched on another device) cannot linger
@@ -2188,15 +2188,36 @@ struct TraktProgressService {
         return displayedItems
     }
 
-    /// Resolve a bounded seed pool concurrently. Each result is restored to
-    /// candidate order before returning, regardless of completion order.
+    /// Backfill Home in bounded batches when metadata or display filters
+    /// leave gaps. Keep resolved items for the existing checkpoint merge.
     static func resolveContinueWatchingMetadata<Seed>(
         from seeds: [Seed],
-        candidateLimit: Int,
+        batchSize: Int,
+        displayPredicate: (ContinueWatchingItem) -> Bool,
         resolve: @escaping (Seed) async -> ContinueWatchingItem?
     ) async -> [ContinueWatchingItem]? {
-        guard candidateLimit > 0 else { return [] }
-        let candidates = Array(seeds.prefix(candidateLimit))
+        guard !Task.isCancelled else { return nil }
+        guard batchSize > 0 else { return [] }
+        var items: [ContinueWatchingItem] = []
+        var eligibleIDs = Set<String>()
+        for start in stride(from: 0, to: seeds.count, by: batchSize) {
+            let batch = seeds[start...].prefix(batchSize)
+            guard let resolved = await resolveContinueWatchingBatch(batch, resolve: resolve) else {
+                return nil
+            }
+            items.append(contentsOf: resolved)
+            for item in resolved where displayPredicate(item) {
+                eligibleIDs.insert(item.meta.id)
+            }
+            if eligibleIDs.count >= maxItems { break }
+        }
+        return Task.isCancelled ? nil : items
+    }
+
+    private static func resolveContinueWatchingBatch<Seed>(
+        _ candidates: ArraySlice<Seed>,
+        resolve: @escaping (Seed) async -> ContinueWatchingItem?
+    ) async -> [ContinueWatchingItem]? {
         guard !Task.isCancelled else { return nil }
         let tasks = candidates.enumerated().map { index, seed in
             Task { @MainActor in
@@ -2407,10 +2428,11 @@ struct TraktProgressService {
             usedContentIDs.insert($0.contentID).inserted
         }
         let items: [ContinueWatchingItem]
-        if displayPredicate != nil {
+        if let displayPredicate {
             guard let resolvedItems = await resolveContinueWatchingMetadata(
                 from: uniqueSeeds,
-                candidateLimit: maxHomeContinueWatchingSeeds,
+                batchSize: homeContinueWatchingBatchSize,
+                displayPredicate: displayPredicate,
                 resolve: { seed in
                     let item = await makeItem(from: seed, repository: repository)
                     #if DEBUG

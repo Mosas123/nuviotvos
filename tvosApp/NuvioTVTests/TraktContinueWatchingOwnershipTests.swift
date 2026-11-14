@@ -155,48 +155,41 @@ final class TraktContinueWatchingOwnershipTests: XCTestCase {
     }
 
     @MainActor
-    func testHomeMetadataResolutionBackfillsBeyondTheFirstTwentyCandidates() async {
-        let seeds = Array(0..<TraktProgressService.maxHomeContinueWatchingSeeds)
+    func testHomeMetadataResolutionBackfillsPastTheFirstBatch() async {
+        let batchSize = TraktProgressService.homeContinueWatchingBatchSize
+        let isVisible: (ContinueWatchingItem) -> Bool = { $0.meta.id != "hidden" }
         let resolved = await TraktProgressService.resolveContinueWatchingMetadata(
-            from: seeds,
-            candidateLimit: TraktProgressService.maxHomeContinueWatchingSeeds
+            from: Array(0..<(batchSize * 3)),
+            batchSize: batchSize,
+            displayPredicate: isVisible
         ) { seed in
-            self.item(
-                meta: NuvioMeta(id: "home-seed-\(seed)", name: "Seed \(seed)", type: "movie"),
-                date: Date().addingTimeInterval(Double(-seed))
-            )
+            if seed < batchSize - 2 { return nil }
+            let id = seed < batchSize ? "hidden" : "home-seed-\(seed / 2)"
+            return self.item(meta: NuvioMeta(id: id, name: "Seed", type: "movie"))
         }
 
         let selected = TraktProgressService.selectContinueWatchingItemsForDisplay(
             resolved ?? [],
-            predicate: { item in
-                guard let seed = Int(item.meta.id.replacingOccurrences(of: "home-seed-", with: "")) else {
-                    return false
-                }
-                return seed >= 16
-            }
+            predicate: isVisible
         )
-
-        XCTAssertEqual(selected.count, 20)
-        XCTAssertEqual(selected.map(\.meta.id), (16..<36).map { "home-seed-\($0)" })
+        XCTAssertEqual(selected.map(\.meta.id), (18..<38).map { "home-seed-\($0)" })
     }
 
     @MainActor
-    func testHomeMetadataResolutionNeverExceedsThirtySixCandidates() async {
+    func testHomeMetadataResolutionStopsAfterAFilledBatch() async {
         var resolvedSeeds: [Int] = []
+        let batchSize = TraktProgressService.homeContinueWatchingBatchSize
         let resolved = await TraktProgressService.resolveContinueWatchingMetadata(
             from: Array(0..<100),
-            candidateLimit: TraktProgressService.maxHomeContinueWatchingSeeds
+            batchSize: batchSize,
+            displayPredicate: { _ in true }
         ) { seed in
             resolvedSeeds.append(seed)
-            return self.item(
-                meta: NuvioMeta(id: "bounded-seed-\(seed)", name: "Seed \(seed)", type: "movie"),
-                date: Date().addingTimeInterval(Double(-seed))
-            )
+            return self.item(meta: NuvioMeta(id: "bounded-seed-\(seed)", name: "Seed", type: "movie"))
         }
 
-        XCTAssertEqual(resolved?.count, 36)
-        XCTAssertEqual(resolvedSeeds.sorted(), Array(0..<36))
+        XCTAssertEqual(resolved?.count, batchSize)
+        XCTAssertEqual(resolvedSeeds.sorted(), Array(0..<batchSize))
     }
 
     @MainActor
