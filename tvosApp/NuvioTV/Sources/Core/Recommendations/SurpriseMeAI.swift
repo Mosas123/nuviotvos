@@ -21,7 +21,8 @@ enum SurpriseMeAIProvider: String, CaseIterable, Identifiable {
         case .gemini: return "gemini-3.6-flash"
         // DeepSeek-V4.1-Flash. The older names are being retired.
         case .deepSeek: return "deepseek-flash"
-        case .openRouter: return "google/gemini-2.5-flash"
+        // OpenRouter's id for Gemini 3.6 Flash; 2.5 Flash is being retired.
+        case .openRouter: return "google/gemini-3.6-flash"
         }
     }
 
@@ -37,7 +38,8 @@ enum SurpriseMeAIProvider: String, CaseIterable, Identifiable {
             ("gemini-3.8-flash", "Gemini 3.8 Flash"),
             ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
         ]
-        case .off, .openRouter: return []
+        case .openRouter: return [("google/gemini-3.6-flash", "Gemini 3.6 Flash")]
+        case .off: return []
         }
     }
 
