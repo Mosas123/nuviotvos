@@ -344,7 +344,7 @@ actor TorrentStreamServer {
                 }
             }
 
-            await waiters.wait(pieceIndex) { [engine] piece in engine.hasPiece(piece) }
+            await waiters.wait(pieceIndex) { piece in watchedEngine.value.hasPiece(piece) }
             stallWatchdog.cancel()
             guard engine.hasPiece(pieceIndex) else { throw CancellationError() }
 
