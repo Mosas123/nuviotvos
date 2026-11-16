@@ -4448,7 +4448,7 @@ private struct CrossfadingBackdrop: View {
 }
 
 extension CrossfadingBackdrop: Equatable {
-    static func == (lhs: CrossfadingBackdrop, rhs: CrossfadingBackdrop) -> Bool {
+    nonisolated static func == (lhs: CrossfadingBackdrop rhs: CrossfadingBackdrop) -> Bool {
         lhs.url == rhs.url
             && lhs.placeholder == rhs.placeholder
             && lhs.alignment == rhs.alignment
@@ -13030,7 +13030,7 @@ private struct TVCollectionFolderHeroView: View, Equatable {
     let folder: TVCollectionFolderItem
     @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
 
-    static func == (lhs: TVCollectionFolderHeroView, rhs: TVCollectionFolderHeroView) -> Bool {
+    nonisolated static func == (lhs: TVCollectionFolderHeroView rhs: TVCollectionFolderHeroView) -> Bool {
         lhs.folder.id == rhs.folder.id &&
         lhs.folder.title == rhs.folder.title &&
         lhs.folder.coverEmoji == rhs.folder.coverEmoji &&
@@ -13215,7 +13215,7 @@ private struct TVHeroView: View {
 }
 
 extension TVHeroView: Equatable {
-    static func == (lhs: TVHeroView, rhs: TVHeroView) -> Bool {
+    nonisolated static func == (lhs: TVHeroView rhs: TVHeroView) -> Bool {
         lhs.meta.id == rhs.meta.id
             && lhs.meta.name == rhs.meta.name
             && lhs.meta.logoUrl == rhs.meta.logoUrl

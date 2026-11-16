@@ -1159,7 +1159,7 @@ struct PosterCard: View {
 // focus bindings inside the retained subtree while invalidating it only when a
 // value that affects the card's rendering or focus eligibility changes.
 extension PosterCard: Equatable {
-    static func == (lhs: PosterCard, rhs: PosterCard) -> Bool {
+    nonisolated static func == (lhs: PosterCard rhs: PosterCard) -> Bool {
         lhs.meta.id == rhs.meta.id
             && lhs.customPosterScreen == rhs.customPosterScreen
             && lhs.meta.name == rhs.meta.name

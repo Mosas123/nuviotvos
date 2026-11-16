@@ -353,7 +353,7 @@ struct NetworkBrowseRail: View, Equatable {
 
     /// What the rail shows; `onSelect` is left out (closures can't be compared), so the page
     /// redrawing (loading, its scroll shadow) no longer rebuilds every card of every rail.
-    static func == (lhs: NetworkBrowseRail, rhs: NetworkBrowseRail) -> Bool {
+    nonisolated static func == (lhs: NetworkBrowseRail rhs: NetworkBrowseRail) -> Bool {
         lhs.rail == rhs.rail && (lhs.externalFocus == nil) == (rhs.externalFocus == nil)
     }
 

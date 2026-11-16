@@ -7928,7 +7928,7 @@ private struct TrailerSubtitleMenuButton: View, Equatable {
     let isFocused: Bool
     let onSelect: (TrailerMediaOption) -> Void
 
-    static func == (lhs: TrailerSubtitleMenuButton, rhs: TrailerSubtitleMenuButton) -> Bool {
+    nonisolated static func == (lhs: TrailerSubtitleMenuButton rhs: TrailerSubtitleMenuButton) -> Bool {
         lhs.isFocused == rhs.isFocused
             && lhs.noneOption == rhs.noneOption
             && lhs.options == rhs.options
@@ -7984,7 +7984,7 @@ private struct TrailerAudioMenuButton: View, Equatable {
     let isFocused: Bool
     let onSelect: (TrailerMediaOption) -> Void
 
-    static func == (lhs: TrailerAudioMenuButton, rhs: TrailerAudioMenuButton) -> Bool {
+    nonisolated static func == (lhs: TrailerAudioMenuButton rhs: TrailerAudioMenuButton) -> Bool {
         lhs.isFocused == rhs.isFocused
             && lhs.options == rhs.options
     }
@@ -10411,7 +10411,7 @@ private struct TvEpisodeCard: View {
 }
 
 extension TvEpisodeCard: Equatable {
-    static func == (lhs: TvEpisodeCard, rhs: TvEpisodeCard) -> Bool {
+    nonisolated static func == (lhs: TvEpisodeCard rhs: TvEpisodeCard) -> Bool {
         lhs.video == rhs.video
             && lhs.fallbackArtworkURL == rhs.fallbackArtworkURL
             && lhs.continueProgress == rhs.continueProgress
