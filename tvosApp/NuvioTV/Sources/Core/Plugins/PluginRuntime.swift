@@ -250,11 +250,22 @@ final class PluginInstance: @unchecked Sendable {
     private let tmdbApiKey: String
     private let queue: DispatchQueue
 
+    /// A plugin's return value on its way to the caller. The runtime keeps the
+    /// JavaScript object confined to its own queue; the box only carries the
+    /// result across the await boundary.
+    private final class JSResult: @unchecked Sendable {
+        let value: Result<Any, Error>
+
+        init(_ value: Result<Any, Error>) {
+            self.value = value
+        }
+    }
+
     private final class Call {
         let id: Int
         let function: String
         let onEmit: (@Sendable (String) -> Void)?
-        var continuation: CheckedContinuation<Any, Error>?
+        var continuation: CheckedContinuation<JSResult, Error>?
         var earlyResult: Result<Any, Error>?
         var timeout: DispatchWorkItem?
 
@@ -351,12 +362,12 @@ final class PluginInstance: @unchecked Sendable {
             return (id, call)
         }
 
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Any, Error>) in
+        let boxed = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<JSResult, Error>) in
                 lock.lock()
                 if let early = call.earlyResult {
                     lock.unlock()
-                    continuation.resume(with: early)
+                    continuation.resume(returning: JSResult(early))
                     return
                 }
                 call.continuation = continuation
@@ -373,6 +384,7 @@ final class PluginInstance: @unchecked Sendable {
         } onCancel: {
             self.finish(id, .failure(CancellationError()))
         }
+        return try boxed.value.get()
     }
 
     // MARK: - Lifecycle
@@ -468,7 +480,7 @@ final class PluginInstance: @unchecked Sendable {
         let idle = calls.isEmpty && retired
         lock.unlock()
 
-        continuation.resume(with: result)
+        continuation.resume(returning: JSResult(result))
         queue.async {
             self.saveStorageIfNeeded()
             if idle { self.teardown() }
