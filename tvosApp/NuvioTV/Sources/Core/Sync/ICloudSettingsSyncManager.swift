@@ -23,7 +23,8 @@ final class ICloudSettingsSyncManager: ObservableObject {
     @Published private(set) var isSyncing = false
     @Published private(set) var lastSyncDate: Date?
 
-    private var observers: [NSObjectProtocol] = []
+    // Mutated on the main actor; read from `deinit`, which runs nonisolated.
+    nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
     private var pushDebounceTask: Task<Void, Never>?
     private var isApplyingRemote = false
     private var didStart = false
