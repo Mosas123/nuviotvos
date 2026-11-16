@@ -862,7 +862,7 @@ enum AISubtitleBatchRecovery {
 
     static func translate(
         _ items: [AISubtitleTranslationItem],
-        operation: @escaping ([AISubtitleTranslationItem]) async throws -> [Int: String]
+        operation: @escaping @Sendable ([AISubtitleTranslationItem]) async throws -> [Int: String]
     ) async throws -> [Int: String] {
         try await translate(
             items,
@@ -874,7 +874,7 @@ enum AISubtitleBatchRecovery {
     private static func translate(
         _ items: [AISubtitleTranslationItem],
         invalidResponseSplitDepth: Int,
-        operation: @escaping ([AISubtitleTranslationItem]) async throws -> [Int: String]
+        operation: @escaping @Sendable ([AISubtitleTranslationItem]) async throws -> [Int: String]
     ) async throws -> [Int: String] {
         do {
             let translations = try await operation(items)
