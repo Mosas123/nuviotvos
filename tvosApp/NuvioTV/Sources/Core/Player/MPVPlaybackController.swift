@@ -621,13 +621,13 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private let seekPreviewLaneHost = SeekPreviewLaneHost()
     private var externalTrickplayProvider: (any TrickplayProviding)?
     private var loadGeneration: UInt64 = 0
-    private let firstFrameReadiness = MPVFirstFrameReadiness()
+    nonisolated(unsafe) private let firstFrameReadiness = MPVFirstFrameReadiness()
     // Accessed only on eventQueue; copy the ID before hopping to the UI queue.
-    private var eventPlaylistEntryID: Int64?
+    nonisolated(unsafe) private var eventPlaylistEntryID: Int64?
     // These two fences are owned by eventQueue so an internal startup seek is
     // ordered before the SEEK / PLAYBACK_RESTART events that confirm it.
-    private var eventStartupResyncAwaitingSeek: StartupResyncFence?
-    private var eventStartupResyncAwaitingRestart: StartupResyncFence?
+    nonisolated(unsafe) private var eventStartupResyncAwaitingSeek: StartupResyncFence?
+    nonisolated(unsafe) private var eventStartupResyncAwaitingRestart: StartupResyncFence?
     private var contentCanonicalKey: String?
     private var currentStreamKey: String = ""
     private var thumbnailSourceContext: PlaybackThumbnailSourceContext?
@@ -980,7 +980,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     private static let defaultAudioOutput = "avfoundation"
 
-    private let errorStateLock = NSLock()
+    nonisolated(unsafe) private let errorStateLock = NSLock()
     private var metalLayer = MPVMetalLayer()
     private(set) var currentAspectMode: PlayerAspectMode = .fit
     private var lastAppliedDrawableSize: CGSize = .zero
@@ -1035,8 +1035,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var startupDeferredFirstFrameFence: StartupResyncFence?
     // Written on the main actor only; read from `deinit`, which runs nonisolated.
     nonisolated(unsafe) private var mpv: OpaquePointer?
-    private lazy var eventQueue = DispatchQueue(label: "mpv-events", qos: .userInitiated)
-    private var recentPlaybackLogs: [String] = []
+    nonisolated private let eventQueue = DispatchQueue(label: "mpv-events", qos: .userInitiated)
+    nonisolated(unsafe) private var recentPlaybackLogs: [String] = []
     private enum DesiredTrackSelection {
         case trackID(Int)
         case externalURL(String)
@@ -1048,8 +1048,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         let selectionGeneration: UInt64
         let selectsWhenReady: Bool
     }
-    private let pendingTrackCommandsLock = NSLock()
-    private var pendingTrackCommands: [UInt64: PendingTrackCommand] = [:]
+    nonisolated(unsafe) private let pendingTrackCommandsLock = NSLock()
+    nonisolated(unsafe) private var pendingTrackCommands: [UInt64: PendingTrackCommand] = [:]
     private var nextTrackCommandReplyID: UInt64 = 1
     private var subtitleSelectionGeneration: UInt64 = 0
     private var desiredSubtitleSelection: DesiredTrackSelection?
@@ -1079,7 +1079,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var mpvPacketCacheDirectory: URL?
     private var mpvPacketDiskCacheAvailable = false
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
-    private let memoryWatchdog = MPVMemoryWatchdog()
+    nonisolated private let memoryWatchdog = MPVMemoryWatchdog()
     private var memoryDiagnosticSessionID = UUID().uuidString
     private var memoryDiagnosticCacheMode = "setup"
     private var lastMemoryEngineSampleTime: CFAbsoluteTime = 0
@@ -1125,8 +1125,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         errorStateLock.lock(); defer { errorStateLock.unlock() }
         return _currentErrorMessage ?? ""
     }
-    private var _currentErrorMessage: String?
-    private var _didReachCleanEndOfFile = false
+    nonisolated(unsafe) private var _currentErrorMessage: String?
+    nonisolated(unsafe) private var _didReachCleanEndOfFile = false
     private var didReachCleanEndOfFile: Bool {
         errorStateLock.lock(); defer { errorStateLock.unlock() }
         return _didReachCleanEndOfFile
@@ -1338,7 +1338,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             mpv = nil
             if let failedContext {
                 // No observers or wakeup callback have been registered yet.
-                eventQueue.async { mpv_destroy(failedContext) }
+                let handle = SendableBox(failedContext)
+                eventQueue.async { mpv_destroy(handle.value) }
             }
             isPlayerLoading = false
             setPlaybackError("MPV could not start: \(message)")
@@ -3367,7 +3368,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         }
     }
 
-    private func matchesDisplayModeSwitchNotification(_ notification: Notification, manager: AVDisplayManager) -> Bool {
+    @MainActor private func matchesDisplayModeSwitchNotification(_ notification: Notification, manager: AVDisplayManager) -> Bool {
         guard let notificationManager = notification.object as? AVDisplayManager else { return true }
         return notificationManager === manager
     }
@@ -3531,7 +3532,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
 
     // MARK: - Error tracking
 
-    private func clearPlaybackError() {
+    nonisolated private func clearPlaybackError() {
         errorStateLock.lock()
         recentPlaybackLogs.removeAll(keepingCapacity: true)
         _currentErrorMessage = nil
@@ -3551,13 +3552,13 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         errorStateLock.unlock()
     }
 
-    private func setCleanEndState(_ reachedEOF: Bool) {
+    nonisolated private func setCleanEndState(_ reachedEOF: Bool) {
         errorStateLock.lock()
         _didReachCleanEndOfFile = reachedEOF
         errorStateLock.unlock()
     }
 
-    private func appendPlaybackLog(prefix: String, level: String, text: String) {
+    nonisolated private func appendPlaybackLog(prefix: String, level: String, text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         guard level == "warn" || level == "error" || level == "fatal" else { return }
@@ -3580,7 +3581,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         errorStateLock.unlock()
     }
 
-    private func recordPlaybackSystemDiagnostic(
+    nonisolated private func recordPlaybackSystemDiagnostic(
         _ message: String,
         source: String = "MPVRender",
         level: PlaybackDiagnosticSystemLogLevel = .notice
@@ -3642,8 +3643,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private func readEvents() {
         eventQueue.async { [weak self] in
             guard let self, let mpv = self.mpv else { return }
+            let mpvHandle = SendableBox(mpv)
             while true {
-                let event = mpv_wait_event(mpv, 0)
+                let event = mpv_wait_event(mpvHandle.value, 0)
                 guard let eventPtr = event else { break }
                 if eventPtr.pointee.event_id == MPV_EVENT_NONE { break }
 
@@ -3662,7 +3664,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                     let frameToken = self.firstFrameReadiness.token
                     let entryID = self.eventPlaylistEntryID
                     DispatchQueue.main.async {
-                        guard self.mpv == mpv,
+                        guard self.mpv == mpvHandle.value,
                               self.watchPartyRemoteIntent == nil
                                 || self.firstFrameReadiness.matches(token: frameToken, playlistEntryID: entryID) else { return }
 #if NUVIO_MPV_MEMORY_WATCHDOG && os(tvOS)
@@ -3702,10 +3704,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
                     let resyncFence = self.eventStartupResyncAwaitingRestart
                     let resyncSeekStillPending = self.eventStartupResyncAwaitingSeek != nil
                     DispatchQueue.main.async {
-                        guard self.mpv == mpv, !self.isApplicationBackgrounded,
+                        guard self.mpv == mpvHandle.value, !self.isApplicationBackgrounded,
                               self.firstFrameReadiness.matches(token: frameToken, playlistEntryID: entryID) else { return }
                         if let resyncFence {
-                            self.receiveStartupResyncPlaybackRestart(resyncFence, mpvContext: mpv)
+                            self.receiveStartupResyncPlaybackRestart(resyncFence, mpvContext: mpvHandle.value)
                             return
                         }
                         if resyncSeekStillPending
@@ -3851,7 +3853,7 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         }
     }
 
-    private func handleTrackCommandReply(_ event: UnsafeMutablePointer<mpv_event>) {
+    nonisolated private func handleTrackCommandReply(_ event: UnsafeMutablePointer<mpv_event>) {
         let replyID = event.pointee.reply_userdata
         pendingTrackCommandsLock.lock()
         let pending = pendingTrackCommands.removeValue(forKey: replyID)
