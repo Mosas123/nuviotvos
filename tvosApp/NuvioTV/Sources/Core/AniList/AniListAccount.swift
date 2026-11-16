@@ -700,14 +700,13 @@ enum AniListAccount {
 
     static func forgetLists() {
         guard let login else { return }
-        let variants: [[String: Any?]] = [
-            listVariables(login),
-            ["userId": login.viewerID, "statuses": ["CURRENT", "REPEATING", "PLANNING", "PAUSED"]],
-            ["userId": login.viewerID, "statuses": allStatuses],
-        ]
-        let sharedVariants = SendableBox(variants)
         Task {
-            for variables in sharedVariants.value {
+            let variants: [[String: Any?]] = [
+                listVariables(login),
+                ["userId": login.viewerID, "statuses": ["CURRENT", "REPEATING", "PLANNING", "PAUSED"]],
+                ["userId": login.viewerID, "statuses": allStatuses],
+            ]
+            for variables in variants {
                 await AniListClient.shared.forget(AniListQueries.lists, variables: variables, token: login.token)
             }
             await AniListClient.shared.forget(AniListQueries.favourites, variables: ["userId": login.viewerID, "page": 1], token: login.token)
