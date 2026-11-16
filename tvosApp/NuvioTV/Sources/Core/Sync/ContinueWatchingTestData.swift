@@ -350,6 +350,7 @@ enum ContinueWatchingTestData {
         guard !ids.isEmpty else { return [:] }
         var resolved: [String: NuvioMeta] = [:]
         var completed = 0
+        let sharedRepository = SendableBox(repository)
 
         await withTaskGroup(of: (String, NuvioMeta?).self) { group in
             var index = 0
@@ -361,7 +362,7 @@ enum ContinueWatchingTestData {
                 index += 1
                 inFlight += 1
                 group.addTask {
-                    (id, try? await repository.refreshMetadata(id: id, type: "series"))
+                    (id, try? await sharedRepository.value.refreshMetadata(id: id, type: "series"))
                 }
             }
 
