@@ -546,13 +546,16 @@ public enum TopShelfFeedStore {
     }
     /// Set by the app: the ratings the carousel shows for a title, in Nuvio's
     /// own sources and order. Nil in the extension, which only reads them.
-    public static var ratingsProvider: (@Sendable (TopShelfEntry) async -> [TopShelfRatingBadge])?
+    /// Written once at launch by the app, before any reader can run.
+    public nonisolated(unsafe) static var ratingsProvider: (@Sendable (TopShelfEntry) async -> [TopShelfRatingBadge])?
     /// Set by the app so cached ratings refresh when providers, order or visibility change.
     /// Nil in the extension, which only reads the stamped records.
-    public static var ratingsConfigurationIdentityProvider: (@Sendable () -> String)?
+    /// Written once at launch by the app, before any reader can run.
+    public nonisolated(unsafe) static var ratingsConfigurationIdentityProvider: (@Sendable () -> String)?
     /// Set by the app: better artwork and ids for an entry before it is written (an AniList
     /// title's backdrop, logo and IMDb id). Nil in the extension.
-    public static var entryEnricher: (@Sendable (TopShelfEntry) async -> TopShelfEntry)?
+    /// Written once at launch by the app, before any reader can run.
+    public nonisolated(unsafe) static var entryEnricher: (@Sendable (TopShelfEntry) async -> TopShelfEntry)?
     static let enrichmentConcurrency = 4
     private static let writeCoordinators: [TopShelfSection: TopShelfWriteCoordinator] =
         Dictionary(uniqueKeysWithValues: TopShelfSection.allCases.map { ($0, TopShelfWriteCoordinator()) })
