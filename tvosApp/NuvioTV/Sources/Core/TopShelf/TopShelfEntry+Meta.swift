@@ -376,7 +376,7 @@ enum TopShelfLibraryFeed {
 /// calendar's compact cards lack.
 enum TopShelfTodayFeed {
     private static let lock = NSLock()
-    private static var lastWritten: [String]?
+    nonisolated(unsafe) private static var lastWritten: [String]?
 
     static func write(_ row: CalendarHomeToday) {
         guard TopShelfFeedStore.isAvailable else { return }

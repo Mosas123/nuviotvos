@@ -332,13 +332,14 @@ actor TorrentStreamServer {
                 torrentLog.notice("[Watchdog:Stream:PieceWait] Waiting for piece #\(pieceIndex) (offset \(absolute))...")
             }
 
-            let stallWatchdog = Task { [engine] in
+            let watchedEngine = SendableBox(engine)
+            let stallWatchdog = Task {
                 var waitSec = 0
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     if Task.isCancelled { break }
                     waitSec += 2
-                    let stats = engine.stats()
+                    let stats = watchedEngine.value.stats()
                     torrentLog.warning("[Watchdog:Stream:Stall] Still waiting for piece #\(pieceIndex) (\(waitSec)s). Swarm: \(stats.numSeeds) seeds, \(stats.numPeers) peers, \(String(format: "%.1f", stats.downloadRate / 1024)) KB/s")
                 }
             }

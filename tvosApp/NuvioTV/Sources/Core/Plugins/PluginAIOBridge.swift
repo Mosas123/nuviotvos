@@ -116,11 +116,15 @@ enum PluginAIOBridge {
         }
         if parts == ["plugins.json"] {
             // Asked only by the "Nuvio plugins" card: these plugins are in AIOStreams now.
-            let plugins = await MainActor.run { list() }
-            for plugin in plugins {
-                if let key = plugin["key"] as? String { noteAsked(key) }
+            // The payload is serialized on the main actor so no `Any` crosses the boundary.
+            let body = await MainActor.run { () -> Data in
+                let plugins = list()
+                for plugin in plugins {
+                    if let key = plugin["key"] as? String { noteAsked(key) }
+                }
+                return (try? JSONSerialization.data(withJSONObject: ["plugins": plugins])) ?? Data("{}".utf8)
             }
-            return .json(["plugins": plugins])
+            return Response(status: 200, contentType: "application/json; charset=utf-8", body: body)
         }
         guard parts.count >= 3, parts[0] == "p" else { return notFound }
         let key = parts[1]

@@ -217,12 +217,12 @@ enum WatchProgressLedger {
     /// Minimum playback duration in seconds required before persisting progress or clearing dismissals.
     static let minimumTrackableSeconds: Double = 10.0
 
-    private(set) static var activeProfileId: String?
+    nonisolated(unsafe) private(set) static var activeProfileId: String?
 
     /// Decoded rows for `cachedKey`. Playback saves progress every few seconds,
     /// and each one would otherwise decode and re-encode the whole ledger.
-    private static var cachedRecords: [WatchProgressRecord]?
-    private static var cachedKey: String?
+    nonisolated(unsafe) private static var cachedRecords: [WatchProgressRecord]?
+    nonisolated(unsafe) private static var cachedKey: String?
     private static let cacheLock = NSRecursiveLock()
 
     static func setActiveProfile(_ profileId: String?) {

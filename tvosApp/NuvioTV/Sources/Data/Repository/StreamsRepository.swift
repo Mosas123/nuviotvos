@@ -1563,7 +1563,7 @@ struct StreamAddonStreamDTO: Decodable {
         return filename
     }
 
-    private static let sizeFormatter: ByteCountFormatter = {
+    nonisolated(unsafe) private static let sizeFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useGB, .useMB]
         formatter.countStyle = .file

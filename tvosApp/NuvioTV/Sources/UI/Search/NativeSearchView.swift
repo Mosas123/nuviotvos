@@ -310,6 +310,11 @@ struct NativeSearchView: View {
     }
 
     var body: some View {
+        bodyWithRestoreHandlers
+            .onExitCommand(perform: canHandleExitCommand ? handleExitCommand : nil)
+    }
+
+    private var bodyContent: some View {
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
 
@@ -326,6 +331,10 @@ struct NativeSearchView: View {
                 linearBody
             }
         }
+    }
+
+    private var bodyWithRestoreHandlers: some View {
+        bodyContent
         .background {
             #if os(tvOS)
             TVRemoteLeftPressMonitor(
@@ -400,7 +409,6 @@ struct NativeSearchView: View {
             guard !isFullScreenOverlayPresented else { return }
             retryOverlayRestoreAfterReturn()
         }
-        .onExitCommand(perform: canHandleExitCommand ? handleExitCommand : nil)
     }
 
     // MARK: - Linear Layout (Top Horizontal Keyboard, Results Below)

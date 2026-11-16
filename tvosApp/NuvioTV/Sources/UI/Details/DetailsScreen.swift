@@ -2590,7 +2590,7 @@ actor YouTubeTrailerResolver {
     private static let probeTimeout: TimeInterval = 3
     private static let attemptBudget: TimeInterval = 12
 
-    private static let clients: [Client] = [
+    nonisolated(unsafe) private static let clients: [Client] = [
         Client(
             key: "ios",
             id: "5",
@@ -6266,7 +6266,7 @@ private enum TvDetailsScrollID {
 }
 
 private struct TvDetailsScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    nonisolated(unsafe) static var defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
@@ -6455,7 +6455,7 @@ private struct TvDetailsBackdrop: View {
 enum TvDetailsBlurredBackdrop {
     static let radius: CGFloat = 22
     private static let pixelWidth: CGFloat = 640
-    private static let cache: NSCache<NSURL, UIImage> = {
+    nonisolated(unsafe) private static let cache: NSCache<NSURL, UIImage> = {
         let cache = NSCache<NSURL, UIImage>()
         cache.countLimit = 12
         return cache
@@ -12450,7 +12450,7 @@ private struct TvStreamCard: View {
 }
 
 private struct TvStreamBadgeRowWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    nonisolated(unsafe) static var defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())

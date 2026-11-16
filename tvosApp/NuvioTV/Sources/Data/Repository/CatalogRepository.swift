@@ -527,7 +527,7 @@ struct StreamAddonPreference: Codable, Equatable {
 
 /// Live Cinemeta-backed catalog and metadata repository for the tvOS app.
 final class CinemetaCatalogRepository: CatalogRepository {
-    static private(set) var homeAddonFetchDiagnostic = "not started"
+    nonisolated(unsafe) static private(set) var homeAddonFetchDiagnostic = "not started"
     private(set) var homeCatalogLoadWasPartial = false
     private(set) var homeCatalogFailureSignature: String?
 
@@ -577,9 +577,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
         return "cinemeta:\(cinemetaEnabled) simklPlan:\(simklPlanEnabled) urls:[\(urls)] disabled:[\(disabled)] disabledAddonIDs:[\(disabledAddonIDs)] disabledAddonNames:[\(disabledAddonNames)] deleted:[\(deleted)] order:[\(order)] customTitles:[\(customTitles)] folderSources:[\(folderSources)] explicitHome:[\(explicitHomeKeys)] showType:\(showType) metadata:[\(Self.metadataCacheContext)] homeTmdb:\(TmdbDetailsService.useHomeEnrichment) \(AniListSettings.sourceSignature)"
     }
     private let baseURL = URL(string: "https://v3-cinemeta.strem.io")!
-    private static var cachedMetaById: [String: NuvioMeta] = [:]
-    private static var cachedFullMetaIds: Set<String> = []
-    private static var cachedMetadataContext: String?
+    nonisolated(unsafe) private static var cachedMetaById: [String: NuvioMeta] = [:]
+    nonisolated(unsafe) private static var cachedFullMetaIds: Set<String> = []
+    nonisolated(unsafe) private static var cachedMetadataContext: String?
     // Read live settings, never the TaskLocal snapshot of an older request.
     static var metadataCacheContext: String {
         let store = ProfileSettings.current
@@ -672,7 +672,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         PluginAddonURLProtocol.install(in: config)
         return URLSession(configuration: config)
     }()
-    private static var networkSessionOverrideForTesting: URLSession?
+    nonisolated(unsafe) private static var networkSessionOverrideForTesting: URLSession?
 
     static func setNetworkSessionForTesting(_ session: URLSession?) {
         networkSessionOverrideForTesting = session
@@ -1527,7 +1527,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
     }
 
-    private static var tmdbToImdbCache: [String: String] = [:]
+    nonisolated(unsafe) private static var tmdbToImdbCache: [String: String] = [:]
     private static let tmdbToImdbLock = NSLock()
 
     private static func cachedImdb(forTmdbId tmdbId: Int, type: String) -> String? {

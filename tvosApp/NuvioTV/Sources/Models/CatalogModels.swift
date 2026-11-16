@@ -1290,12 +1290,12 @@ enum EpisodeReleasePolicy {
     // Cache sized for large-season series (1000+ episodes like One Piece).
     private static let releaseDateCacheLimit = 4096
     private static let releaseDateCacheLock = NSLock()
-    private static let fractionalISO8601Formatter: ISO8601DateFormatter = {
+    nonisolated(unsafe) private static let fractionalISO8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
-    private static let standardISO8601Formatter: ISO8601DateFormatter = {
+    nonisolated(unsafe) private static let standardISO8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter
@@ -1303,8 +1303,8 @@ enum EpisodeReleasePolicy {
     private struct CachedReleaseDate {
         let value: Date?
     }
-    private static var releaseDateCache: [String: CachedReleaseDate] = [:]
-    private static var releaseDateCacheOrder: [String] = []
+    nonisolated(unsafe) private static var releaseDateCache: [String: CachedReleaseDate] = [:]
+    nonisolated(unsafe) private static var releaseDateCacheOrder: [String] = []
 
     static var showUnairedNextUp: Bool {
         if ProfileSettings.current.object(forKey: showUnairedNextUpKey) == nil {
@@ -2914,7 +2914,7 @@ enum ContinueWatchingStore {
     }
 
     /// Last durable-storage result, suitable for the on-screen sync diagnostic.
-    static private(set) var persistenceDiagnostic = "not attempted"
+    nonisolated(unsafe) static private(set) var persistenceDiagnostic = "not attempted"
 
     /// Decoded rows for `cachedKey`, mirroring ``WatchProgressLedger``'s memo.
     ///
@@ -2925,13 +2925,13 @@ enum ContinueWatchingStore {
     /// `JSONDecoder` run on the main actor at exactly the moment the user was
     /// scrolling into the next page. Every write path below refreshes or clears
     /// this, because a stale row is worse than a slow one.
-    private static var cachedItems: [ContinueWatchingItem]?
-    private static var cachedKey: String?
+    nonisolated(unsafe) private static var cachedItems: [ContinueWatchingItem]?
+    nonisolated(unsafe) private static var cachedKey: String?
     /// Raw bytes last written for `cachedKey`, so a no-op persist can be
     /// detected exactly (same Encoding size, no `Equatable` conformance needed)
     /// without re-decoding or re-encoding the multi-megabyte payload.
-    private static var cachedData: Data?
-    private static var writeGeneration: UInt64 = 0
+    nonisolated(unsafe) private static var cachedData: Data?
+    nonisolated(unsafe) private static var writeGeneration: UInt64 = 0
     private static let cacheLock = NSLock()
     private static let topShelfSnapshotLock = NSLock()
 
@@ -2967,7 +2967,7 @@ enum ContinueWatchingStore {
     /// Identifier of the profile whose watch history is currently active.
     /// Set at launch and whenever the user switches profiles so each profile
     /// keeps its own Continue Watching list (app settings stay shared device-wide).
-    private(set) static var activeProfileId: String?
+    nonisolated(unsafe) private(set) static var activeProfileId: String?
 
     /// Point the store at a profile. Call on launch and on every profile switch
     /// so reads/writes land in that profile's bucket.
@@ -4203,12 +4203,12 @@ enum ContinueWatchingDismissStore {
     private static let legacySeparator = "\u{1f}"
 
     private static let cacheLock = NSRecursiveLock()
-    private static var cache: [String: Set<String>] = [:]
-    private static var pendingDismissedKeysCache: [String: Set<String>] = [:]
-    private static var resumedContentIDsCache: [String: Set<String>] = [:]
-    private static var _activeProfileId: String?
+    nonisolated(unsafe) private static var cache: [String: Set<String>] = [:]
+    nonisolated(unsafe) private static var pendingDismissedKeysCache: [String: Set<String>] = [:]
+    nonisolated(unsafe) private static var resumedContentIDsCache: [String: Set<String>] = [:]
+    nonisolated(unsafe) private static var _activeProfileId: String?
 
-    static var activeProfileId: String? {
+    nonisolated(unsafe) static var activeProfileId: String? {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         return _activeProfileId
@@ -4619,7 +4619,7 @@ enum LibraryStore {
 
     private static let baseKey = "nuvio.tv.library.items"
     private static let storageDirectoryName = "LibraryStore"
-    private(set) static var activeProfileId: String?
+    nonisolated(unsafe) private(set) static var activeProfileId: String?
 
     private struct Mutation: Codable, Equatable, Sendable {
         let token: UUID
@@ -4645,9 +4645,9 @@ enum LibraryStore {
     }
 
     private static let cacheLock = NSRecursiveLock()
-    private static var cachedEnvelope: Envelope?
-    private static var cachedKey: String?
-    private static var cachedItemKeys: Set<String>?
+    nonisolated(unsafe) private static var cachedEnvelope: Envelope?
+    nonisolated(unsafe) private static var cachedKey: String?
+    nonisolated(unsafe) private static var cachedItemKeys: Set<String>?
 
     static func setActiveProfile(_ profileId: String?) {
         cacheLock.lock()
@@ -5811,12 +5811,12 @@ enum CollectionsStore {
     private static let storageDirectoryName = "CollectionsStore"
 
     private static let cacheLock = NSRecursiveLock()
-    private static var cachedRaw: [String: [[String: Any]]] = [:]
-    private static var cachedCollections: [String: [NuvioCollection]] = [:]
-    private static var cachedLastPulledIds: [String: Set<String>] = [:]
-    private static var _activeProfileId: String?
+    nonisolated(unsafe) private static var cachedRaw: [String: [[String: Any]]] = [:]
+    nonisolated(unsafe) private static var cachedCollections: [String: [NuvioCollection]] = [:]
+    nonisolated(unsafe) private static var cachedLastPulledIds: [String: Set<String>] = [:]
+    nonisolated(unsafe) private static var _activeProfileId: String?
 
-    static var activeProfileId: String? {
+    nonisolated(unsafe) static var activeProfileId: String? {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         return _activeProfileId
@@ -7146,8 +7146,8 @@ enum HomeCatalogPayloadStore {
     }
 
     private static let lock = NSRecursiveLock()
-    private static var snapshots: [String: Snapshot] = [:]
-    private static var customTitlesByProfile: [String: [String: String]] = [:]
+    nonisolated(unsafe) private static var snapshots: [String: Snapshot] = [:]
+    nonisolated(unsafe) private static var customTitlesByProfile: [String: [String: String]] = [:]
 
     static func data(
         forKey key: String,
@@ -8028,7 +8028,7 @@ struct WatchedSnapshot {
 
 enum WatchedStore {
     static let changedNotification = Notification.Name("nuvio.tv.watched.changed")
-    private(set) static var nuvioSyncChangeGeneration: UInt = 0
+    nonisolated(unsafe) private(set) static var nuvioSyncChangeGeneration: UInt = 0
 
     private struct WatchedRowIdentity: Hashable {
         let season: Int?
@@ -8064,29 +8064,29 @@ enum WatchedStore {
 
     private static let baseKey = "nuvio.tv.watched.items"
     private static let storageDirectoryName = "WatchedStore"
-    private(set) static var activeProfileId: String?
+    nonisolated(unsafe) private(set) static var activeProfileId: String?
 
     /// Last durable-storage result, for diagnostics on physical devices where
     /// Application Support writes can fail while Simulator succeeds.
-    static private(set) var persistenceDiagnostic = "not attempted"
+    nonisolated(unsafe) static private(set) var persistenceDiagnostic = "not attempted"
     /// Deterministic storage-failure seam for atomic watched/outbox regression tests.
-    static var failNextPersistenceForTesting = false
+    nonisolated(unsafe) static var failNextPersistenceForTesting = false
 
     private static let cacheLock = NSRecursiveLock()
-    private static var cachedItems: [WatchedStoreItem]?
-    private static var cachedKey: String?
-    private static var cachedData: Data?
-    private static var cachedSnapshot: WatchedSnapshot?
+    nonisolated(unsafe) private static var cachedItems: [WatchedStoreItem]?
+    nonisolated(unsafe) private static var cachedKey: String?
+    nonisolated(unsafe) private static var cachedData: Data?
+    nonisolated(unsafe) private static var cachedSnapshot: WatchedSnapshot?
     private struct LibrarySnapshotCacheKey: Hashable {
         let storageKey: String
         let source: TraktWatchProgressSource
         let accountID: String?
     }
-    private static var cachedLibrarySnapshots: [LibrarySnapshotCacheKey: WatchedSnapshot] = [:]
-    private static var cachedSource: TraktWatchProgressSource?
-    private static var cachedTraktHistoryVisibility = false
-    private static var cachedAdditionalSources: Set<TraktWatchProgressSource> = []
-    private static var cacheGeneration = 0
+    nonisolated(unsafe) private static var cachedLibrarySnapshots: [LibrarySnapshotCacheKey: WatchedSnapshot] = [:]
+    nonisolated(unsafe) private static var cachedSource: TraktWatchProgressSource?
+    nonisolated(unsafe) private static var cachedTraktHistoryVisibility = false
+    nonisolated(unsafe) private static var cachedAdditionalSources: Set<TraktWatchProgressSource> = []
+    nonisolated(unsafe) private static var cacheGeneration = 0
     @MainActor private static var libraryHistorySyncTasks: [String: Task<Bool, Never>] = [:]
 
     private struct NuvioWatchedProjection: Equatable {
@@ -12657,8 +12657,8 @@ enum ProfileSettings {
 
     /// Settings store for the active profile. `.standard` until one is loaded
     /// (e.g. on the login / "Who's watching?" screens).
-    private(set) static var current: UserDefaults = .standard
-    private(set) static var activeProfileID: String?
+    nonisolated(unsafe) private(set) static var current: UserDefaults = .standard
+    nonisolated(unsafe) private(set) static var activeProfileID: String?
 
     /// Stable Keychain namespace for secrets belonging to the active profile.
     static var activeProfileScope: String { activeProfileID ?? "default" }

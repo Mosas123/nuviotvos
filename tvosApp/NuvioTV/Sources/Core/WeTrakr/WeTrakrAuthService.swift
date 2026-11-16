@@ -69,7 +69,7 @@ protocol WeTrakrTokenStorage: AnyObject {
 final class WeTrakrKeychainTokenStorage: WeTrakrTokenStorage {
     private let service = "com.nuvio.tv.wetrakr.auth"
     private static let lock = NSLock()
-    private static var tokenCache: [String: String] = [:]
+    nonisolated(unsafe) private static var tokenCache: [String: String] = [:]
 
     func accessToken(for profileScope: String) -> String? {
         readToken(accountType: "accessToken", profileScope: profileScope, fallbackKey: SettingsKey.wetrakrAccessToken)

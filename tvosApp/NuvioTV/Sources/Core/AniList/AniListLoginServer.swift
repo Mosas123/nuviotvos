@@ -81,7 +81,7 @@ final class AniListLoginServer: @unchecked Sendable {
     /// again twice, a second apart.
     private func listen(on port: NWEndpoint.Port, redirect: URL, current: UUID, changed: @escaping @Sendable (State) -> Void, attempt: Int) {
         guard generation == current else { return }
-        func failed() {
+        @Sendable func failed() {
             listener?.cancel()
             listener = nil
             if attempt < 3 {

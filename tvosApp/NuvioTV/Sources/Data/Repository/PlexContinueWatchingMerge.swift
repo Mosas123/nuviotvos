@@ -33,7 +33,7 @@ enum PlexContinueWatchingMerge {
 
     private static let lock = NSLock()
     /// Nil until Home has merged for the active profile.
-    private static var latest: Snapshot?
+    nonisolated(unsafe) private static var latest: Snapshot?
 
     /// Home's row with Plex's titles merged in.
     @MainActor

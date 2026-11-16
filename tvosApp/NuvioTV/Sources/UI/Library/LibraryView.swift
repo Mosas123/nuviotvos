@@ -475,9 +475,8 @@ public struct LibraryView: View {
                             }
                         }
 
-                        FilterMenu(
-                            label: "\(L10n.string("cloud_library_select_type", fallback: "Select type")): \(cloudSelectedTypeLabel)"
-                        ) {
+                        let selectTypeLabel = "\(L10n.string("cloud_library_select_type", fallback: "Select type")): \(cloudSelectedTypeLabel)"
+                        FilterMenu(label: selectTypeLabel) {
                             Button {
                                 cloudViewModel.selectedType = nil
                             } label: {

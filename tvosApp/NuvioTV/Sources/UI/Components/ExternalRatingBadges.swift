@@ -77,7 +77,7 @@ struct TvRatingVisual {
         self.format = format
     }
 
-    static let all: [TvRatingVisual] = [
+    nonisolated(unsafe) static let all: [TvRatingVisual] = [
         TvRatingVisual(
             source: MdbListDetailsService.providerIMDb,
             displayName: "IMDb",

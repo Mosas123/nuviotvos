@@ -3081,7 +3081,7 @@ enum ThemeSettingsSyncMapper {
     }
 }
 
-final class NuvioAPIClient {
+final class NuvioAPIClient: @unchecked Sendable {
     private static let pullPageSize = 500
     private static let settingsPlatform = "tv"
     private static let mobileSettingsPlatform = "mobile"

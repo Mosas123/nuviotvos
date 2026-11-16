@@ -17,18 +17,18 @@ struct TraktStoredSession: Codable, Equatable {
 
 /// Durable Keychain storage for Trakt tokens and credentials.
 /// Survived sideload and in-place updates when container UserDefaults suites are lost.
-final class TraktKeychainStorage {
-    static let shared = TraktKeychainStorage()
+final class TraktKeychainStorage: @unchecked Sendable {
+    nonisolated(unsafe) static let shared = TraktKeychainStorage()
     private let service = "com.nuvio.tv.trakt.auth"
     private static let lock = NSLock()
-    private static var stringCache: [String: String] = [:]
+    nonisolated(unsafe) private static var stringCache: [String: String] = [:]
     /// Strings the Keychain doesn't have, so they aren't looked for again until one is written.
     /// With Trakt not set up, its client ID was looked for in the Keychain (for each profile
     /// scope) every time something asked whether Trakt is signed in, which views do as they are
     /// drawn, on the main thread; a Keychain query is a call into another process.
-    private static var missingStrings: Set<String> = []
-    private static var sessionCache: [String: TraktStoredSession] = [:]
-    private static var negativeCache: Set<String> = []
+    nonisolated(unsafe) private static var missingStrings: Set<String> = []
+    nonisolated(unsafe) private static var sessionCache: [String: TraktStoredSession] = [:]
+    nonisolated(unsafe) private static var negativeCache: Set<String> = []
 
     /// How a string is looked up in the Keychain. Tests count the lookups with their own (test
     /// runs are unsigned and have no Keychain).
@@ -1320,7 +1320,7 @@ enum TraktPollResult {
 /// in parallel with the same refresh token, and a late rejection of a used token could clear the
 /// session that the first refresh just renewed.
 private actor TraktRefreshCoordinator {
-    static let shared = TraktRefreshCoordinator()
+    nonisolated(unsafe) static let shared = TraktRefreshCoordinator()
 
     private struct Entry {
         let generation: Int
@@ -2125,7 +2125,7 @@ struct TraktProgressService {
 
     /// Ownership captured before provider I/O. A source override used for a
     /// transfer may differ from Home's selected source when no snapshot is written.
-    struct ContinueWatchingFetchContext {
+    struct ContinueWatchingFetchContext: @unchecked Sendable {
         let profileId: String?
         let settingsProfileId: String?
         let store: UserDefaults
@@ -5066,7 +5066,7 @@ private struct TraktWatchlistIDs: Encodable {
 
 /// Identifies the profile and Trakt account that started a watchlist write.
 /// Refresh rotation preserves accountBindingID; a new login replaces it.
-struct TraktLibraryMutationContext {
+struct TraktLibraryMutationContext: @unchecked Sendable {
     let store: UserDefaults
     private let profileID: String?
     private let settingsProfileID: String?

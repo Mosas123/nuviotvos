@@ -113,7 +113,7 @@ enum WeTrakrServiceError: LocalizedError, Equatable {
     }
 }
 
-final class WeTrakrAPIClient {
+final class WeTrakrAPIClient: @unchecked Sendable {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder

@@ -52,7 +52,7 @@ private struct NetflixSearchCellFrames: Equatable {
 }
 
 private enum NetflixSearchCellFramesPreferenceKey: PreferenceKey {
-    static var defaultValue = NetflixSearchCellFrames()
+    nonisolated(unsafe) static var defaultValue = NetflixSearchCellFrames()
 
     static func reduce(value: inout NetflixSearchCellFrames, nextValue: () -> NetflixSearchCellFrames) {
         let next = nextValue()
@@ -133,6 +133,15 @@ struct NetflixSearchView: View {
         self.onLongPress = onLongPress
     }
 
+    /// Filter focus changed: reopen the keyboard once focus settles on the filter bar.
+    private var shouldShowKeyboardAfterFilterChange: Bool {
+        focusedTypeFilterID != nil
+            && focusedItemID == nil
+            && isEnabled
+            && overlayRestoreItemID == nil
+            && !overlayFocusRestorationActive
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
@@ -184,12 +193,7 @@ struct NetflixSearchView: View {
         }
         .onChange(of: focusedTypeFilterID) { _, newValue in
             if newValue != nil { clearOverlayRestoreLeftPressState() }
-            guard newValue != nil,
-                  focusedItemID == nil,
-                  isEnabled,
-                  overlayRestoreItemID == nil,
-                  !overlayFocusRestorationActive else { return }
-            showKeyboard()
+            if shouldShowKeyboardAfterFilterChange { showKeyboard() }
         }
         .onChange(of: isEnabled) { _, enabled in
             if !enabled {

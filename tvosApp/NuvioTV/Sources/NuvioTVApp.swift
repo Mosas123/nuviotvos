@@ -71,7 +71,7 @@ struct NuvioTVApp: App {
 /// Temporary Home performance tracing. Enabled by default in DEBUG so console
 /// output shows main-thread stalls, or via `-TVHomeDebugTrace` argument.
 enum TVHomeDebugTrace {
-    static var enabled = false
+    nonisolated(unsafe) static var enabled = false
     private static let logger = Logger(
         subsystem: "com.pyksel.nuviotvos",
         category: "TVTrace"
@@ -83,8 +83,8 @@ enum TVHomeDebugTrace {
         let isMainThread: Bool
     }
 
-    private static var breadcrumbLock = os_unfair_lock_s()
-    private static var breadcrumbs: [Breadcrumb] = []
+    nonisolated(unsafe) private static var breadcrumbLock = os_unfair_lock_s()
+    nonisolated(unsafe) private static var breadcrumbs: [Breadcrumb] = []
     private static let maxBreadcrumbs = 40
 
     static func now() -> UInt64 {
@@ -161,14 +161,14 @@ enum TVHomeDebugTrace {
     }
 
     // MARK: - Main Thread Stall Watchdog
-    private static var isWatchdogRunning = false
+    nonisolated(unsafe) private static var isWatchdogRunning = false
     private static let watchdogQueue = DispatchQueue(label: "com.nuvio.stallWatchdog", qos: .userInteractive)
-    private static var watchdogTimer: DispatchSourceTimer?
-    private static var pingDispatchedTime: UInt64 = 0
-    private static var isPingInFlight = false
-    private static var isStallActive = false
-    private static var stallStartTime: UInt64 = 0
-    private static var heartbeatTicks: UInt64 = 0
+    nonisolated(unsafe) private static var watchdogTimer: DispatchSourceTimer?
+    nonisolated(unsafe) private static var pingDispatchedTime: UInt64 = 0
+    nonisolated(unsafe) private static var isPingInFlight = false
+    nonisolated(unsafe) private static var isStallActive = false
+    nonisolated(unsafe) private static var stallStartTime: UInt64 = 0
+    nonisolated(unsafe) private static var heartbeatTicks: UInt64 = 0
 
     static func startWatchdogIfNeeded() {
         guard enabled else { return }
@@ -11352,8 +11352,8 @@ enum TVHomeCatalogOrder {
     private static let snapshotWriter = TVHomeCatalogSnapshotWriter()
     private static let snapshotPersistenceQueue = DispatchQueue(label: "nuvio.tv.catalogSnapshot.persistence", qos: .utility)
     private static let snapshotCacheLock = NSLock()
-    private static var snapshotCacheData: [String: Data] = [:]
-    private static var snapshotCacheRows: [String: [SnapshotRow]] = [:]
+    nonisolated(unsafe) private static var snapshotCacheData: [String: Data] = [:]
+    nonisolated(unsafe) private static var snapshotCacheRows: [String: [SnapshotRow]] = [:]
 
     static func waitForSnapshotPersistenceForTesting() {
         snapshotPersistenceQueue.sync {}
