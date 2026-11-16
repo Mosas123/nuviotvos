@@ -343,7 +343,7 @@ final class PlexSessionManager: ObservableObject {
                     let foundBefore = found
                     let libraryName = library.name
                     let serverID = server.id
-                    let progress: (Int, Int?) -> Void = { count, _ in
+                    let progress: @Sendable (Int, Int?) -> Void = { count, _ in
                         Task { @MainActor [weak self] in
                             guard let self, case .syncing = self.syncStates[serverID] else { return }
                             self.syncStates[serverID] = .syncing(found: foundBefore + count, library: libraryName)
