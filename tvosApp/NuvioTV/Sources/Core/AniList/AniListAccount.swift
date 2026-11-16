@@ -705,8 +705,9 @@ enum AniListAccount {
             ["userId": login.viewerID, "statuses": ["CURRENT", "REPEATING", "PLANNING", "PAUSED"]],
             ["userId": login.viewerID, "statuses": allStatuses],
         ]
+        let sharedVariants = SendableBox(variants)
         Task {
-            for variables in variants {
+            for variables in sharedVariants.value {
                 await AniListClient.shared.forget(AniListQueries.lists, variables: variables, token: login.token)
             }
             await AniListClient.shared.forget(AniListQueries.favourites, variables: ["userId": login.viewerID, "page": 1], token: login.token)
