@@ -103,7 +103,7 @@ private func logCatalogSearchOutcome(
 }
 
 /// Repository protocol for catalog operations
-protocol CatalogRepository {
+protocol CatalogRepository: Sendable {
     /// Get catalogs for home screen
     func getHomeCatalogs() async throws -> [NuvioCatalog]
 
@@ -526,7 +526,7 @@ struct StreamAddonPreference: Codable, Equatable {
 }
 
 /// Live Cinemeta-backed catalog and metadata repository for the tvOS app.
-final class CinemetaCatalogRepository: CatalogRepository {
+final class CinemetaCatalogRepository: CatalogRepository, @unchecked Sendable {
     nonisolated(unsafe) static private(set) var homeAddonFetchDiagnostic = "not started"
     private(set) var homeCatalogLoadWasPartial = false
     private(set) var homeCatalogFailureSignature: String?
@@ -3703,7 +3703,7 @@ struct FlexibleString: Decodable {
 }
 
 /// In-memory mock catalog for unit tests and SwiftUI previews
-class MockCatalogRepository: CatalogRepository {
+class MockCatalogRepository: CatalogRepository, @unchecked Sendable {
     private var mockCachedMetadata: [String: NuvioMeta] = [:]
 
     func cacheCatalogMetadata(_ meta: NuvioMeta) {
