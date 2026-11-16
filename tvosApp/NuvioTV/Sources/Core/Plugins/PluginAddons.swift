@@ -530,9 +530,10 @@ final class PluginAddonURLProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
-        work = Task { [weak self] in
+        let target = SendableBox(self)
+        work = Task {
             let reply = await PluginAddonService.reply(for: url)
-            self?.deliver(reply)
+            target.value.deliver(reply)
         }
     }
 
