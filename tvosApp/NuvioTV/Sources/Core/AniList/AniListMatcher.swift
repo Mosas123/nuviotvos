@@ -36,7 +36,7 @@ enum AniListMatcher {
     static let seriesFormats: Set<String> = ["TV", "TV_SHORT", "ONA"]
 
     private static let lock = NSLock()
-    private static var matches: [String: Match] = [:]
+    private nonisolated(unsafe) static var matches: [String: Match] = [:]
 
     static func match(meta: NuvioMeta, season: Int?, episode: Int?, released: String?, videoID: String? = nil) async -> Match? {
         let key = "\(meta.id)|\(season ?? -1)|\(episode ?? -1)"

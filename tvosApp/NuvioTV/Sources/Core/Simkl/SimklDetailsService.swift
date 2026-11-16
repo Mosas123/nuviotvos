@@ -26,7 +26,7 @@ struct SimklTitleDetails: Equatable {
 /// Client ID — no linked account, no bearer token — and is Cloudflare-cached by
 /// Simkl id on their side.
 enum SimklDetailsService {
-    private static let client = SimklAPIClient()
+    private nonisolated(unsafe) static let client = SimklAPIClient()
 
     static var isConfigured: Bool { SimklConfig.isConfigured }
 

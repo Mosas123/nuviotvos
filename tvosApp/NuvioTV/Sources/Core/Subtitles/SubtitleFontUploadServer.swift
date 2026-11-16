@@ -101,7 +101,7 @@ final class SubtitleFontUploadServer: @unchecked Sendable {
         generation = current
         // The usual port can still be held by the page that just closed: tried again a few
         // times before any free port is taken (the QR code carries it, a bookmark wouldn't).
-        let retry: () -> Void = { [weak self] in
+        let retry: @Sendable () -> Void = { [weak self] in
             guard let self, self.generation == current else { return }
             self.listener?.cancel()
             self.listener = nil

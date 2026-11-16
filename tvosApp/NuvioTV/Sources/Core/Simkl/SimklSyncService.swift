@@ -2793,7 +2793,7 @@ struct SimklProgressService {
     /// Outcome of the most recent scrobble attempt, for the Settings diagnostics
     /// row. Every failure path here returns `false` to a caller that ignores it,
     /// so without this a rejected scrobble is indistinguishable from a sent one.
-    static private(set) var scrobbleDiagnostic = "not attempted"
+    nonisolated(unsafe) static private(set) var scrobbleDiagnostic = "not attempted"
 
     /// Bounded metadata fetch concurrency. Matches the Continue Watching
     /// builder's limit so a large paused list fans out without flooding the

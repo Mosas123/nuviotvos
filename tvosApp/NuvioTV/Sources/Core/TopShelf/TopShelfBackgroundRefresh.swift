@@ -24,7 +24,7 @@ enum TopShelfBackgroundRefresh {
     }
 
     private static let statusKey = "topShelf.backgroundRefresh.last"
-    private static var isRegistered = false
+    private nonisolated(unsafe) static var isRegistered = false
 
     static var lastStatus: Status? {
         guard let data = UserDefaults.standard.data(forKey: statusKey) else { return nil }

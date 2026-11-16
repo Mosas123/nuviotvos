@@ -16,9 +16,9 @@ enum AniListDiagnostics {
     }
 
     private static let lock = NSLock()
-    private static var entries: [Area: Entry] = [:]
+    private nonisolated(unsafe) static var entries: [Area: Entry] = [:]
     /// AniList rows Home had on screen when its last load finished.
-    private static var homeOnScreen: (date: Date, rows: Int)?
+    private nonisolated(unsafe) static var homeOnScreen: (date: Date, rows: Int)?
 
     static func note(_ area: Area, _ text: String, at date: Date = Date()) {
         lock.lock()

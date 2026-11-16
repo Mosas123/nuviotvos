@@ -16,7 +16,7 @@ enum PlexWatched {
     }
 
     private static let lock = NSLock()
-    private static var snapshot = Snapshot()
+    private nonisolated(unsafe) static var snapshot = Snapshot()
 
     /// Keys a Plex title answers to: its own content id and any IMDb or TMDB id.
     private static func keys(for title: PlexIndexedTitle) -> [String] {

@@ -392,7 +392,7 @@ protocol MALLoginStorage: AnyObject {
 
 /// The MAL login, one per profile, never synced.
 enum MALKeychain {
-    static var storage: MALLoginStorage = MALKeychainLoginStorage()
+    nonisolated(unsafe) static var storage: MALLoginStorage = MALKeychainLoginStorage()
 
     static func login(for profileScope: String) -> MALAccount.Login? { storage.login(for: profileScope) }
     static func save(_ login: MALAccount.Login, for profileScope: String) { storage.save(login, for: profileScope) }

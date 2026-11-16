@@ -51,7 +51,7 @@ struct IPTVSourceStore {
     let storage: any IPTVSourceStorage
 
     /// Where sources are kept unless a store is given another storage (tests swap it).
-    static var defaultStorage: any IPTVSourceStorage = IPTVKeychainStorage()
+    nonisolated(unsafe) static var defaultStorage: any IPTVSourceStorage = IPTVKeychainStorage()
 
     /// Moved on whenever a profile's sources are removed with the profile, so an
     /// earlier pending save for that profile can't bring them back.
@@ -64,7 +64,7 @@ struct IPTVSourceStore {
     /// Profiles whose sources are still waiting to be deleted (see `removeProfile`).
     /// Kept in preferences for subsequent launches; tests swap it. Preferences
     /// are written asynchronously and do not guarantee crash durability.
-    static var pendingRemovals = IPTVPendingSourceRemovals(defaults: .standard)
+    nonisolated(unsafe) static var pendingRemovals = IPTVPendingSourceRemovals(defaults: .standard)
 
     func load(profileID: String) throws -> [IPTVSource] {
         guard !profileID.isEmpty else { throw IPTVSourceStoreError.invalidProfile }

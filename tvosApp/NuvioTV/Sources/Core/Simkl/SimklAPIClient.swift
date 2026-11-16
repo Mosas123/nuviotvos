@@ -71,7 +71,7 @@ enum SimklServiceError: LocalizedError {
 
 /// Shared HTTP transport for Simkl. Every request carries the required
 /// `client_id`, `app-name`, `app-version` query params and `User-Agent` header.
-final class SimklAPIClient {
+final class SimklAPIClient: @unchecked Sendable {
     private let session: URLSession
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()

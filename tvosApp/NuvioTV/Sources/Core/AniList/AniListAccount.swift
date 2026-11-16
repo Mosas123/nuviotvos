@@ -153,7 +153,7 @@ enum AniListAccount {
         let savedAt: Date
     }
 
-    static var storage: AniListTokenStorage = AniListKeychainTokenStorage()
+    nonisolated(unsafe) static var storage: AniListTokenStorage = AniListKeychainTokenStorage()
 
     static var login: Login? { storage.login(for: ProfileSettings.activeProfileScope) }
 
@@ -277,10 +277,10 @@ enum AniListAccount {
     }
 
     private static let lock = NSLock()
-    private static var entries: [Int: AniListListEntry] = [:]
-    private static var mediaStates: [Int: MediaState] = [:]
+    private nonisolated(unsafe) static var entries: [Int: AniListListEntry] = [:]
+    private nonisolated(unsafe) static var mediaStates: [Int: MediaState] = [:]
     /// Anime whose entry AniList was asked for (an anime missing from `entries` is not on a list).
-    private static var asked: Set<Int> = []
+    private nonisolated(unsafe) static var asked: Set<Int> = []
 
     static func entry(for mediaID: Int) -> AniListListEntry? {
         lock.lock()
@@ -726,8 +726,8 @@ protocol AniListTokenStorage: AnyObject {
 final class AniListKeychainTokenStorage: AniListTokenStorage {
     private static let service = "com.nuvio.tv.anilist.auth"
     private static let lock = NSLock()
-    private static var cache: [String: AniListAccount.Login] = [:]
-    private static var missing: Set<String> = []
+    private nonisolated(unsafe) static var cache: [String: AniListAccount.Login] = [:]
+    private nonisolated(unsafe) static var missing: Set<String> = []
 
     func login(for profileScope: String) -> AniListAccount.Login? {
         let (cached, isMissing) = Self.lock.withLock { (Self.cache[profileScope], Self.missing.contains(profileScope)) }

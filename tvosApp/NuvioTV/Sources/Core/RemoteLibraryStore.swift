@@ -18,8 +18,8 @@ enum RemoteLibraryStore {
         let profileId: String
         let accountBindingId: String
     }
-    private static var revisions: [RevisionKey: UInt64] = [:]
-    private static var memoryCache: [RevisionKey: [LibraryStoreItem]] = [:]
+    private nonisolated(unsafe) static var revisions: [RevisionKey: UInt64] = [:]
+    private nonisolated(unsafe) static var memoryCache: [RevisionKey: [LibraryStoreItem]] = [:]
 
     static func storageKey(
         source: TraktLibrarySourceMode,

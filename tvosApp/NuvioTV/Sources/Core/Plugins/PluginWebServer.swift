@@ -458,7 +458,7 @@ final class PluginHTTPServerCore: @unchecked Sendable {
 /// The saved token for "Keep the Same Address", in Keychain on this Apple TV
 /// only (not synced, not per profile).
 enum PluginWebAddressStore {
-    private static let query: [String: Any] = [
+    private nonisolated(unsafe) static let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: "com.nuvio.tv.plugins.web",
         kSecAttrAccount as String: "address-token"

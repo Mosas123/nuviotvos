@@ -83,7 +83,7 @@ extension SimklTokenStorage {
 final class SimklKeychainTokenStorage: SimklTokenStorage {
     private let service = "com.nuvio.tv.simkl.auth"
     private static let lock = NSLock()
-    private static var tokenCache: [String: String] = [:]
+    private nonisolated(unsafe) static var tokenCache: [String: String] = [:]
 
     func accessToken(for profileScope: String) -> String? {
         readToken(accountType: "accessToken", profileScope: profileScope, fallbackKey: SettingsKey.simklAccessToken)
@@ -664,7 +664,7 @@ private actor SimklRefreshCoordinator {
     }
 }
 
-final class SimklAuthService {
+final class SimklAuthService: @unchecked Sendable {
     private let client: SimklAPIClient
     private let store: UserDefaults
     private let profileScope: String

@@ -762,7 +762,7 @@ enum AniListTitleIndex {
     }
 
     private static let lock = NSLock()
-    private static var entries: [String: Entry] = [:]
+    private nonisolated(unsafe) static var entries: [String: Entry] = [:]
 
     static func store(metaID: String, tabTitles: [Int: String], seasonByEntry: [Int: Int], related: [RelatedTitle]) {
         lock.lock()

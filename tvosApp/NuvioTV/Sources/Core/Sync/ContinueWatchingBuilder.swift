@@ -26,7 +26,7 @@ enum ContinueWatchingBuilder {
     static let itemsChangedNotification = Notification.Name("nuvio.tv.continueWatchingBuilder.items.changed")
 
     /// Long-lived so its in-memory metadata cache survives across rebuilds.
-    private static let repository = CinemetaCatalogRepository()
+    private nonisolated(unsafe) static let repository = CinemetaCatalogRepository()
 
     /// Matches the persisted row cap, so the first page is exactly what a cold
     /// start shows before any scrolling.
@@ -37,8 +37,8 @@ enum ContinueWatchingBuilder {
     private static let metadataConcurrency = 4
 
     private static let lock = NSLock()
-    private static var rebuildTask: Task<Void, Never>?
-    private static var generation: UInt = 0
+    private nonisolated(unsafe) static var rebuildTask: Task<Void, Never>?
+    private nonisolated(unsafe) static var generation: UInt = 0
 
     private static func nextGeneration() -> UInt {
         lock.lock()

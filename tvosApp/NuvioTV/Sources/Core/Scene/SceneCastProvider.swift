@@ -244,8 +244,8 @@ final class TmdbSceneCastProvider: SceneCastProviding {
         return candidates
     }
     
-    private static let idCache = NSCache<NSNumber, ScenePersonDetailCacheBox>()
-    private static let nameCache = NSCache<NSString, ScenePersonDetailCacheBox>()
+    private nonisolated(unsafe) static let idCache = NSCache<NSNumber, ScenePersonDetailCacheBox>()
+    private nonisolated(unsafe) static let nameCache = NSCache<NSString, ScenePersonDetailCacheBox>()
     
     func fetchPersonDetail(personId: Int) async -> ScenePersonDetail? {
         if let cached = Self.idCache.object(forKey: NSNumber(value: personId)) {

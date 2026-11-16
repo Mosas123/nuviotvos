@@ -11,7 +11,7 @@ enum NuvioDateDisplay {
     /// Formatted dates by input. Cards and episode rows format their dates every time they
     /// redraw, and each formatting goes through ICU (seen in main-thread samples on an Apple
     /// TV); the same few dates come back again and again.
-    private static let formatted = NSCache<NSString, NSString>()
+    private nonisolated(unsafe) static let formatted = NSCache<NSString, NSString>()
 
     static func formattedDate(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }

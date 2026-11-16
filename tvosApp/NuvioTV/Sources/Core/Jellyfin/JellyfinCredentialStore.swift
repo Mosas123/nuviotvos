@@ -9,7 +9,7 @@ import Security
 /// in Keychain and is never included in a profile copy, a sync payload, or a
 /// bug-report export.
 enum JellyfinCredentialStore {
-    static var storage: JellyfinCredentialStorage = JellyfinKeychainCredentialStorage()
+    nonisolated(unsafe) static var storage: JellyfinCredentialStorage = JellyfinKeychainCredentialStorage()
 
     static func token(
         forServerID serverID: String,

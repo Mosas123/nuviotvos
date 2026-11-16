@@ -85,9 +85,9 @@ enum TopShelfLibraryFeed {
         case revisionConflict
         case failed
     }
-    private static var inFlightPrefetchTasks: [String: Task<PrefetchOutcome, Never>] = [:]
-    private static var pendingPrefetchKeys = Set<String>()
-    private static var pendingForcedPrefetchKeys = Set<String>()
+    private nonisolated(unsafe) static var inFlightPrefetchTasks: [String: Task<PrefetchOutcome, Never>] = [:]
+    private nonisolated(unsafe) static var pendingPrefetchKeys = Set<String>()
+    private nonisolated(unsafe) static var pendingForcedPrefetchKeys = Set<String>()
 
     /// Resolves the effective library mode based on user configuration and authentication.
     static func effectiveSourceMode(

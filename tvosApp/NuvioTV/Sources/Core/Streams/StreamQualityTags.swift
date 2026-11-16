@@ -107,7 +107,7 @@ struct StreamQualityTags: Equatable, Codable, Sendable {
         init(_ tags: StreamQualityTags) { self.tags = tags }
     }
 
-    private static let streamTagsCache: NSCache<NSString, BoxedStreamQualityTags> = {
+    private nonisolated(unsafe) static let streamTagsCache: NSCache<NSString, BoxedStreamQualityTags> = {
         let cache = NSCache<NSString, BoxedStreamQualityTags>()
         cache.countLimit = 1000
         return cache
@@ -1217,9 +1217,9 @@ enum StreamBadgeSettingsStore {
     static let goldBadgePackURL = "https://raw.githubusercontent.com/djgenesis/badges/refs/heads/main/gold_badges_complete.json"
 
     private static let storageDirectoryName = "StreamBadges"
-    private static var cachedSnapshot: StreamBadgeSettingsSnapshot?
-    private static var cachedProfileScope: String?
-    private static var cachedRulesValue: String?
+    private nonisolated(unsafe) static var cachedSnapshot: StreamBadgeSettingsSnapshot?
+    private nonisolated(unsafe) static var cachedProfileScope: String?
+    private nonisolated(unsafe) static var cachedRulesValue: String?
 
     private static func storageKey(for profileScope: String) -> String {
         "rules.\(profileScope)"
@@ -1399,8 +1399,8 @@ enum StreamBadgeMatcher {
         let requiresIndividualCandidates: Bool
     }
 
-    private static var regexCache: [String: CachedRegex] = [:]
-    private static var invalidPatterns: Set<String> = []
+    private nonisolated(unsafe) static var regexCache: [String: CachedRegex] = [:]
+    private nonisolated(unsafe) static var invalidPatterns: Set<String> = []
     private static let regexCacheLimit = 512
 
     static func matchedBadges(for stream: NuvioStream, rules: StreamBadgeRules) -> [StreamBadgeFilter] {

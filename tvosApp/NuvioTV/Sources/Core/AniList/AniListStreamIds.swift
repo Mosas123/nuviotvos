@@ -20,7 +20,7 @@ import Foundation
 /// asked by IMDb: no streams beat another episode's.
 enum AniListStreamIds {
     private static let lock = NSLock()
-    private static var known: [String: [String]] = [:]
+    private nonisolated(unsafe) static var known: [String: [String]] = [:]
 
     /// The ids to try, best first, for an add-on that doesn't take `videoId`. [] for ids that
     /// aren't AniList's, or with the setting off.
@@ -181,8 +181,8 @@ enum AniListStreamIds {
         let episodesBefore: Int
     }
 
-    private static var inheritedKnown: [Int: Inherited] = [:]
-    private static var tmdbKnown: [Int: String] = [:]
+    private nonisolated(unsafe) static var inheritedKnown: [Int: Inherited] = [:]
+    private nonisolated(unsafe) static var tmdbKnown: [Int: String] = [:]
 
     /// - The IMDb id: the nearest earlier season's (TV, TV_SHORT or ONA, up to five steps back)
     ///   that the tables or ani.zip know, unless the tables put this entry on another TheTVDB show

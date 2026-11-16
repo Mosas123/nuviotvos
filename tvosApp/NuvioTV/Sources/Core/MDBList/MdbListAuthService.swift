@@ -139,8 +139,8 @@ protocol MdbListTokenStorage: AnyObject {
 final class MdbListKeychainTokenStorage: MdbListTokenStorage {
     private static let service = "com.nuvio.tv.mdblist.auth"
     private static let lock = NSLock()
-    private static var tokenCache: [String: MdbListStoredTokens] = [:]
-    private static var negativeCache: Set<String> = []
+    private nonisolated(unsafe) static var tokenCache: [String: MdbListStoredTokens] = [:]
+    private nonisolated(unsafe) static var negativeCache: Set<String> = []
 
     func tokens(for profileScope: String) -> MdbListStoredTokens? {
         let (cached, isNegative) = Self.lock.withLock {

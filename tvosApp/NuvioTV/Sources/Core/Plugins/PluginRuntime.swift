@@ -47,7 +47,7 @@ enum PluginRuntime {
     /// Network for plugin `fetch`. No cookies and no cache, like Android's
     /// plain OkHttp client, so one plugin never sees another plugin's cookies.
     /// Tests replace it with a session whose protocol classes stub responses.
-    static var session: URLSession = makeSession(configuration: .ephemeral)
+    nonisolated(unsafe) static var session: URLSession = makeSession(configuration: .ephemeral)
 
     static func makeSession(configuration: URLSessionConfiguration) -> URLSession {
         configuration.timeoutIntervalForRequest = 20

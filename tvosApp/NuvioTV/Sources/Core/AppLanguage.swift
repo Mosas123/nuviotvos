@@ -208,7 +208,7 @@ enum AppLanguage: String, CaseIterable, Identifiable, Hashable {
 // MARK: - Locale manager
 
 /// Loads, persists, and applies the selected app language.
-final class AppLocaleManager: ObservableObject {
+final class AppLocaleManager: ObservableObject, @unchecked Sendable {
     static let shared = AppLocaleManager()
 
     static let storageKey = SettingsKey.language
@@ -279,9 +279,9 @@ final class AppLocaleManager: ObservableObject {
 
 /// Lightweight string table backed by `AppLanguageCatalog.json` (ported from Android).
 enum L10n {
-    private static var catalog: [String: [String: String]] = loadCatalog()
-    private static var activeTag: String?
-    private static var activeTable: [String: String] = [:]
+    private nonisolated(unsafe) static var catalog: [String: [String: String]] = loadCatalog()
+    private nonisolated(unsafe) static var activeTag: String?
+    private nonisolated(unsafe) static var activeTable: [String: String] = [:]
 
     static func reload(languageTag: String?) {
         formatTemplates.removeAllObjects()
@@ -327,7 +327,7 @@ enum L10n {
     /// Converted templates by key, for the active table. Cards format their labels ("12m left")
     /// every time they redraw; the nine replacements per call showed up in main-thread samples
     /// on an Apple TV.
-    private static let formatTemplates = NSCache<NSString, NSString>()
+    private nonisolated(unsafe) static let formatTemplates = NSCache<NSString, NSString>()
 
     private static func formatTemplate(_ key: String, fallback: String) -> String {
         let cacheKey = (key + "\u{1}" + fallback) as NSString
@@ -604,7 +604,7 @@ enum AppFont: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
-final class AppFontManager: ObservableObject {
+final class AppFontManager: ObservableObject, @unchecked Sendable {
     static let shared = AppFontManager()
     static let storageKey = SettingsKey.font
 
