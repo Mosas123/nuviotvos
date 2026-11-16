@@ -58,6 +58,7 @@ enum SearchResultEnrichment {
             .filter { deduplicatedResults[$0].needsSearchMetadataEnrichment }
         guard !candidateIndices.isEmpty else { return aniListCards + deduplicatedResults }
 
+        let sharedRepository = SendableBox(repository)
         var enriched = deduplicatedResults
         var cursor = 0
         while cursor < candidateIndices.count {
@@ -73,7 +74,7 @@ enum SearchResultEnrichment {
                 for index in slice {
                     group.addTask {
                         let meta = deduplicatedResults[index]
-                        let full = try? await repository.refreshMetadata(
+                        let full = try? await sharedRepository.value.refreshMetadata(
                             id: meta.id,
                             type: meta.type
                         )

@@ -43,8 +43,9 @@ actor SceneCoreMLFacePipeline: FaceEmbeddingModelProtocol {
     nonisolated let acceptanceDistance: Float = 0.64
     nonisolated let marginDistance: Float = 0.12
 
-    private let yuNetModel: MLModel
-    private let sFaceModel: MLModel
+    // Core ML models are immutable after loading and support concurrent predictions.
+    private let yuNetModel: SendableBox<MLModel>
+    private let sFaceModel: SendableBox<MLModel>
 
     private static let inputSize = 640
     private static let confidenceThreshold: Float = 0.6
@@ -74,8 +75,8 @@ actor SceneCoreMLFacePipeline: FaceEmbeddingModelProtocol {
         let sFace = try Self.loadModel(named: "SFace", from: bundle, configuration: configuration)
         try Self.validateYuNet(yuNet)
         try Self.validateSFace(sFace)
-        self.yuNetModel = yuNet
-        self.sFaceModel = sFace
+        self.yuNetModel = SendableBox(yuNet)
+        self.sFaceModel = SendableBox(sFace)
     }
 
     /// Detects faces and returns Vision-style boxes with top-left pixel landmarks.
@@ -115,7 +116,7 @@ actor SceneCoreMLFacePipeline: FaceEmbeddingModelProtocol {
         }
 
         let provider = try MLDictionaryFeatureProvider(dictionary: ["frame_input": input])
-        let prediction = try await yuNetModel.prediction(from: provider)
+        let prediction = try await yuNetModel.value.prediction(from: provider)
         var proposals: [FaceProposal] = []
 
         for head in Self.yuNetHeads {
@@ -236,7 +237,7 @@ actor SceneCoreMLFacePipeline: FaceEmbeddingModelProtocol {
         }
 
         let provider = try MLDictionaryFeatureProvider(dictionary: ["face_input": input])
-        let prediction = try await sFaceModel.prediction(from: provider)
+        let prediction = try await sFaceModel.value.prediction(from: provider)
         let output = try Self.outputArray("var_811", from: prediction)
         guard output.count == 128 else {
             throw SceneCoreMLFacePipelineError.invalidModelFeature(
