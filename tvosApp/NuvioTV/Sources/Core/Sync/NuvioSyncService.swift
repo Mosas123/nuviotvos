@@ -170,7 +170,8 @@ final class NuvioSyncManager: ObservableObject {
 
     var pendingPushScopes: SyncPushScope = []
     var isPushExecuting = false
-    private var observers: [NSObjectProtocol] = []
+    // Mutated on the main actor; read from `deinit`, which runs nonisolated.
+    nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
     private var pullTask: Task<Void, Never>?
     private var pushTask: Task<Void, Never>?
     private var pushTaskDeadline: Date?
@@ -381,8 +382,9 @@ final class NuvioSyncManager: ObservableObject {
         ) { [weak self] notification in
             let raw = notification.object as? [[String: Any]] ?? []
             guard let profileId = notification.userInfo?[CollectionsStore.editedProfileIdUserInfoKey] as? String else { return }
+            let payload = SendableBox(raw)
             Task { @MainActor in
-                self?.pushCollectionsEdit(raw, originatingProfileId: profileId)
+                self?.pushCollectionsEdit(payload.value, originatingProfileId: profileId)
             }
         })
 
@@ -3523,7 +3525,7 @@ final class NuvioAPIClient: @unchecked Sendable {
     }
 
     /// Replaces the profile's collections blob (`sync_push_collections`).
-    func pushCollections(session: AuthSession, remoteProfileId: Int, rawCollections: [[String: Any]]) async throws {
+    func pushCollections(session: AuthSession, remoteProfileId: Int, rawCollections: sending [[String: Any]]) async throws {
         try await rpcVoid(
             "sync_push_collections",
             session: session,
@@ -3558,7 +3560,7 @@ final class NuvioAPIClient: @unchecked Sendable {
     }
 
     /// Replaces the profile's plugin repositories (Android's `sync_push_plugins`).
-    func pushPlugins(session: AuthSession, remoteProfileId: Int, rows: [[String: Any]]) async throws {
+    func pushPlugins(session: AuthSession, remoteProfileId: Int, rows: sending [[String: Any]]) async throws {
         try await rpcVoid(
             "sync_push_plugins",
             session: session,
