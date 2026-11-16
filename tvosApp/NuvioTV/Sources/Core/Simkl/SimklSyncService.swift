@@ -822,14 +822,14 @@ final class SimklAuthorizationOwner: @unchecked Sendable {
         return true
     }
 
-    func refresh(using operation: @escaping () async -> String?) async -> String? {
+    func refresh(using operation: @escaping @Sendable () async -> String?) async -> String? {
         let (id, task) = refreshTask(using: operation)
         let value = await task.value
         finishRefresh(id)
         return value
     }
 
-    private func refreshTask(using operation: @escaping () async -> String?) -> (UUID, Task<String?, Never>) {
+    private func refreshTask(using operation: @escaping @Sendable () async -> String?) -> (UUID, Task<String?, Never>) {
         lock.lock()
         defer { lock.unlock() }
         if let pendingRefresh, pendingRefresh.token == accessToken {
