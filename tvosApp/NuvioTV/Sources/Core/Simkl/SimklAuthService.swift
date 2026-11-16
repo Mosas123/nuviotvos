@@ -66,7 +66,7 @@ struct SimklCachedStats: Codable, Equatable {
 
 // MARK: - Token storage
 
-protocol SimklTokenStorage: AnyObject {
+protocol SimklTokenStorage: AnyObject, Sendable {
     func accessToken(for profileScope: String) -> String?
     func setAccessToken(_ token: String?, for profileScope: String)
     func refreshToken(for profileScope: String) -> String?
@@ -80,7 +80,7 @@ extension SimklTokenStorage {
 
 /// Long-lived Simkl access and refresh tokens live in the Keychain, namespaced by profile,
 /// with ProfileSettings mirroring for iCloud sync across Apple TVs.
-final class SimklKeychainTokenStorage: SimklTokenStorage {
+final class SimklKeychainTokenStorage: SimklTokenStorage, @unchecked Sendable {
     private let service = "com.nuvio.tv.simkl.auth"
     private static let lock = NSLock()
     private nonisolated(unsafe) static var tokenCache: [String: String] = [:]
@@ -162,7 +162,7 @@ final class SimklKeychainTokenStorage: SimklTokenStorage {
 }
 
 /// In-memory token storage for unit tests.
-final class SimklMemoryTokenStorage: SimklTokenStorage {
+final class SimklMemoryTokenStorage: SimklTokenStorage, @unchecked Sendable {
     private var accessTokens: [String: String] = [:]
     private var refreshTokens: [String: String] = [:]
 

@@ -2188,6 +2188,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
 
         // 3. Query all targets concurrently with bounded timeout per target (5s)
+        let sharedRepository = SendableBox(self)
         typealias TargetResult = (index: Int, items: [NuvioMeta], succeeded: Bool)
         let targetResults = await withTaskGroup(of: TargetResult.self, returning: [TargetResult].self) { group in
             for (index, target) in targets.enumerated() {
@@ -2196,7 +2197,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     do {
                         let items: [NuvioMeta] = try await withThrowingTaskGroup(of: [NuvioMeta].self) { fetchGroup in
                             fetchGroup.addTask {
-                                try await self.fetchCatalog(
+                                try await sharedRepository.value.fetchCatalog(
                                     sourceBaseURL: target.baseURL,
                                     type: target.type,
                                     catalogId: target.catalogId,

@@ -2111,6 +2111,7 @@ struct WeTrakrProgressService {
         let sortedPlans = plans.sorted { $0.lastWatchedAt > $1.lastWatchedAt }
         let plansToResolve = Array(sortedPlans.prefix(25))
 
+        let sharedRepository = SendableBox(repository)
         let resolvedItems = await withTaskGroup(of: (Int, ContinueWatchingItem?).self) { group in
             for (orderIndex, plan) in plansToResolve.enumerated() {
                 group.addTask { @MainActor in
@@ -2131,7 +2132,7 @@ struct WeTrakrProgressService {
                     if targetId.hasPrefix("wetrakr:") {
                         loaded = nil
                     } else {
-                        loaded = try? await repository.getMetadata(
+                        loaded = try? await sharedRepository.value.getMetadata(
                             id: targetId,
                             type: plan.isSeries ? "series" : "movie"
                         )
