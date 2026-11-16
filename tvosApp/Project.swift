@@ -80,7 +80,6 @@ let projectBaseSettings: SettingsDictionary = [
     "TVOS_DEPLOYMENT_TARGET": .string(tvOSDeployment),
     // Swift 6 language mode: strict concurrency is enforced at compile time.
     "SWIFT_VERSION": "6.0",
-    "SWIFT_APPROACHABLE_CONCURRENCY": "YES",
     "SWIFT_DEFAULT_ACTOR_ISOLATION": "nonisolated",
     "MARKETING_VERSION": .string(marketingVersion),
     "CURRENT_PROJECT_VERSION": .string(projectVersion),
