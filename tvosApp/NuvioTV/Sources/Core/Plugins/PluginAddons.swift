@@ -491,7 +491,7 @@ actor PluginAddonResponseCache {
 /// Serves `https://plugins.nuvio.invalid/…` from ``PluginAddonService``.
 /// Registered for `URLSession.shared` and installed into the add-on sessions
 /// (``install(in:)``).
-final class PluginAddonURLProtocol: URLProtocol {
+final class PluginAddonURLProtocol: URLProtocol, @unchecked Sendable {
     private static let registration = NSLock()
     nonisolated(unsafe) private static var registered = false
 
