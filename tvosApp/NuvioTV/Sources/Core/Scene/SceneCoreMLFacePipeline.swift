@@ -1,5 +1,5 @@
 import CoreGraphics
-import CoreML
+@preconcurrency import CoreML
 import Foundation
 
 struct SceneCoreMLDetectedFace: Sendable {
