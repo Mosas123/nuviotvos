@@ -363,7 +363,7 @@ enum PluginSettingsService {
     /// Apple TV extension: a plugin may export `onVerify(settings)` that
     /// returns `{ ok, message }` (or a string) to check keys before saving.
     /// nil when the plugin has no such function.
-    static func verify(scraper: PluginScraperRecord, settings: [String: Any]) async -> (ok: Bool, message: String)? {
+    static func verify(scraper: PluginScraperRecord, settings: sending [String: Any]) async -> (ok: Bool, message: String)? {
         guard let code = await PluginStore.shared.code(for: scraper) else {
             return (false, "The provider's code is not available.")
         }
@@ -373,7 +373,7 @@ enum PluginSettingsService {
                 scraperId: scraper.id,
                 settings: settings,
                 function: "onVerify",
-                arguments: [settings],
+                arguments: [settings as Any],
                 timeout: 30
             )
             if let object = value as? [String: Any] {
