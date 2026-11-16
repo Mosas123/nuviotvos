@@ -183,7 +183,7 @@ private struct DiscoveryDocument: Decodable {
     enum CodingKeys: String, CodingKey { case version, service, selfHosted = "self_hosted", backendURL = "backend_url", publishableKey = "publishable_key", capabilities }
 }
 
-final class ServerDiscoveryService {
+final class ServerDiscoveryService: @unchecked Sendable {
     private let session: URLSession
     init(session: URLSession = .shared) { self.session = session }
 
