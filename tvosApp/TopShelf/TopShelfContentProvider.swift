@@ -40,10 +40,11 @@ final class TopShelfContentProvider: TVTopShelfContentProvider {
             // The system plays the trailers itself and says nothing when an
             // item gains focus, so their links are looked up now, as the shelf
             // loads, rather than taken from days ago.
+            let reply = UncheckedSendableBox(completionHandler)
             Task {
                 let trailers = await TopShelfTrailerResolver.trailers(
                     for: slots.map(\.entry), in: TopShelfFeedStore.containerURL)
-                completionHandler(Self.carousel(slots, configuration: configuration, ratings: ratings, trailers: trailers))
+                reply.value(Self.carousel(slots, configuration: configuration, ratings: ratings, trailers: trailers))
             }
         case .featuredCards:
             let sections = TopShelfComposer.featuredSections(from: rows)
@@ -170,5 +171,16 @@ final class TopShelfContentProvider: TVTopShelfContentProvider {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "UTC") ?? .current
         return calendar.date(from: DateComponents(year: year, month: 1, day: 1, hour: 12))
+    }
+}
+
+/// tvOS hands `loadTopShelfContent` its completion handler across an isolation
+/// boundary. The system calls the provider once, so the single call below is
+/// the only access.
+private struct UncheckedSendableBox<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
     }
 }
