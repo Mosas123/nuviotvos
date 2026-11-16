@@ -98,12 +98,13 @@ enum PlexWatched {
 
     private static func mark(meta: NuvioMeta, watched: Bool, where matches: @escaping (PlexIndexedItem) -> Bool) {
         let metaKeys = keys(for: meta)
+        let sharedMatches = SendableBox(matches)
         Task { @MainActor in
             let index = PlexLibraryIndex.shared
             let titles = index.titles().filter { title in keys(for: title).contains(where: metaKeys.contains) }
             for title in titles {
                 guard let client = PlexSessionManager.shared.client(forServerID: title.serverID) else { continue }
-                let items = title.items.filter(matches)
+                let items = title.items.filter(sharedMatches.value)
                 guard !items.isEmpty else { continue }
                 // A whole show or movie is one request on its own rating key.
                 let ratingKeys = items.count == title.items.count ? [title.ratingKey] : items.map(\.ratingKey)
