@@ -1751,7 +1751,7 @@ struct SimklHistoryTransferService {
         client: SimklAPIClient = SimklAPIClient(),
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil,
-        progress: @escaping (Int) async -> Void
+        progress: @escaping @Sendable (Int) async -> Void
     ) async -> SimklHistoryTransferResult {
         await progress(1)
 
@@ -2032,7 +2032,7 @@ struct SimklLibraryTransferService {
         client: SimklAPIClient = SimklAPIClient(),
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil,
-        progress: @escaping (Int) async -> Void
+        progress: @escaping @Sendable (Int) async -> Void
     ) async -> SimklLibraryTransferResult {
         await progress(1)
 
@@ -2617,7 +2617,7 @@ struct SimklProgressTransferService {
         client: SimklAPIClient = SimklAPIClient(),
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil,
-        progress: @escaping (Int) async -> Void
+        progress: @escaping @Sendable (Int) async -> Void
     ) async -> SimklProgressTransferResult {
         await progress(1)
 

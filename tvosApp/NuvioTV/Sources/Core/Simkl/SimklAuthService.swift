@@ -647,7 +647,7 @@ private actor SimklRefreshCoordinator {
     private var entries: [String: Entry] = [:]
 
     /// `joined` is true when the caller waited for a refresh another caller started.
-    func refresh(key: String, operation: @escaping () async -> Bool) async -> (succeeded: Bool, joined: Bool) {
+    func refresh(key: String, operation: @escaping @Sendable () async -> Bool) async -> (succeeded: Bool, joined: Bool) {
         if let existing = entries[key] {
             return (await existing.task.value, true)
         }
@@ -1001,8 +1001,8 @@ final class SimklAuthService: @unchecked Sendable {
     /// AUTH V1 legacy tokens (which have no refresh grant) return `true` immediately.
     func refreshTokenIfNeeded(
         force: Bool = false,
-        shouldCommit: @escaping () -> Bool = { true },
-        didRefreshToken: @escaping (String) -> Void = { _ in }
+        shouldCommit: @escaping @MainActor @Sendable () -> Bool = { true },
+        didRefreshToken: @escaping @MainActor @Sendable (String) -> Void = { _ in }
     ) async -> Bool {
         let outcome = await SimklRefreshCoordinator.shared.refresh(key: "\(clientID):\(profileScope)") { [weak self] in
             guard let self else { return false }
@@ -1013,19 +1013,19 @@ final class SimklAuthService: @unchecked Sendable {
             )
         }
         // Another caller's refresh saved the new token: hand it on as if this caller had refreshed.
-        if outcome.joined, outcome.succeeded, shouldCommit(),
+        if outcome.joined, outcome.succeeded, await shouldCommit(),
            let token = currentState().accessToken, !token.isEmpty {
-            didRefreshToken(token)
+            await didRefreshToken(token)
         }
         return outcome.succeeded
     }
 
     private func refreshTokenIfNeededUncoordinated(
         force: Bool,
-        shouldCommit: () -> Bool,
-        didRefreshToken: (String) -> Void
+        shouldCommit: @MainActor @Sendable () -> Bool,
+        didRefreshToken: @MainActor @Sendable (String) -> Void
     ) async -> Bool {
-        guard shouldCommit(), ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
+        guard await shouldCommit(), ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
         let state = currentState()
         guard state.isAuthenticated(in: store) else { return false }
         let requestedClientID = clientID
@@ -1049,7 +1049,7 @@ final class SimklAuthService: @unchecked Sendable {
             )
 
             let latestState = currentState()
-            guard !Task.isCancelled, shouldCommit(), ProfileSettings.isActiveStore(store),
+            guard !Task.isCancelled, await shouldCommit(), ProfileSettings.isActiveStore(store),
                   clientID == requestedClientID,
                   latestState.accessToken == state.accessToken,
                   latestState.refreshToken == refreshToken else { return false }
@@ -1075,7 +1075,7 @@ final class SimklAuthService: @unchecked Sendable {
                 tokenStorage: tokenStorage,
                 isNewLogin: false
             )
-            didRefreshToken(token.accessToken)
+            await didRefreshToken(token.accessToken)
             return true
         } catch {
             return false
