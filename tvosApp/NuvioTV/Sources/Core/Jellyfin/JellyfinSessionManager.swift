@@ -635,6 +635,7 @@ final class JellyfinSessionManager: ObservableObject {
                             for _ in 0..<concurrencyLimit {
                                 let series = pendingSeries[nextSeriesIndex]
                                 nextSeriesIndex += 1
+                                let seenForSeries = savedEpisodeIDsBySeries[series.id] ?? []
                                 group.addTask { [weak self] in
                                     let manager = self
                                     try await Self.fetchEpisodes(
@@ -642,7 +643,7 @@ final class JellyfinSessionManager: ObservableObject {
                                         client: client,
                                         userID: server.userId,
                                         checkpoint: checkpoint,
-                                        seenItemIDs: savedEpisodeIDsBySeries[series.id] ?? [],
+                                        seenItemIDs: seenForSeries,
                                         onProgress: { progress in
                                             Task { @MainActor in
                                                 manager?.publishSyncProgress(
@@ -661,6 +662,7 @@ final class JellyfinSessionManager: ObservableObject {
                                 if nextSeriesIndex < pendingSeries.count {
                                     let series = pendingSeries[nextSeriesIndex]
                                     nextSeriesIndex += 1
+                                    let seenForSeries = savedEpisodeIDsBySeries[series.id] ?? []
                                     group.addTask { [weak self] in
                                         let manager = self
                                         try await Self.fetchEpisodes(
@@ -668,7 +670,7 @@ final class JellyfinSessionManager: ObservableObject {
                                             client: client,
                                             userID: server.userId,
                                             checkpoint: checkpoint,
-                                            seenItemIDs: savedEpisodeIDsBySeries[series.id] ?? [],
+                                            seenItemIDs: seenForSeries,
                                             onProgress: { progress in
                                                 Task { @MainActor in
                                                     manager?.publishSyncProgress(
