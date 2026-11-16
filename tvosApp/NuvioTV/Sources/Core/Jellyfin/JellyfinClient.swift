@@ -302,7 +302,7 @@ struct JellyfinClient {
     func items(
         userId: String,
         libraryId: String,
-        onPageFetched: ((Int) -> Void)? = nil
+        onPageFetched: (@Sendable (Int) -> Void)? = nil
     ) async throws -> [JellyfinMediaItem] {
         try await fetchItems(userId: userId, libraryId: libraryId, startingAt: 0, seenItemIDs: []) { page in
             onPageFetched?(page.nextStartIndex)
@@ -317,7 +317,7 @@ struct JellyfinClient {
         libraryId: String,
         startingAt: Int,
         seenItemIDs: Set<String> = [],
-        onPageFetched: ((JellyfinItemsPage) throws -> Void)? = nil
+        onPageFetched: (@Sendable (JellyfinItemsPage) throws -> Void)? = nil
     ) async throws -> [JellyfinMediaItem] {
         try await fetchItems(userId: userId, libraryId: libraryId, startingAt: startingAt, seenItemIDs: seenItemIDs, onPageFetched: onPageFetched)
     }
@@ -327,7 +327,7 @@ struct JellyfinClient {
         libraryId: String,
         startingAt initialStartIndex: Int,
         seenItemIDs initialSeenItemIDs: Set<String>,
-        onPageFetched: ((JellyfinItemsPage) throws -> Void)?
+        onPageFetched: (@Sendable (JellyfinItemsPage) throws -> Void)?
     ) async throws -> [JellyfinMediaItem] {
         var allItems: [JellyfinMediaItem] = []
         var seenIds = initialSeenItemIDs
@@ -390,7 +390,7 @@ struct JellyfinClient {
     func episodes(
         seriesId: String,
         userId: String? = nil,
-        onPageFetched: ((Int) -> Void)? = nil
+        onPageFetched: (@Sendable (Int) -> Void)? = nil
     ) async throws -> [JellyfinMediaItem] {
         try await fetchEpisodes(seriesId: seriesId, userId: userId, startingAt: 0, seenItemIDs: []) { page in
             onPageFetched?(page.nextStartIndex)
@@ -402,7 +402,7 @@ struct JellyfinClient {
         userId: String? = nil,
         startingAt: Int,
         seenItemIDs: Set<String> = [],
-        onPageFetched: ((JellyfinItemsPage) throws -> Void)? = nil
+        onPageFetched: (@Sendable (JellyfinItemsPage) throws -> Void)? = nil
     ) async throws -> [JellyfinMediaItem] {
         try await fetchEpisodes(seriesId: seriesId, userId: userId, startingAt: startingAt, seenItemIDs: seenItemIDs, onPageFetched: onPageFetched)
     }
@@ -412,7 +412,7 @@ struct JellyfinClient {
         userId: String?,
         startingAt initialStartIndex: Int,
         seenItemIDs initialSeenItemIDs: Set<String>,
-        onPageFetched: ((JellyfinItemsPage) throws -> Void)?
+        onPageFetched: (@Sendable (JellyfinItemsPage) throws -> Void)?
     ) async throws -> [JellyfinMediaItem] {
         var allEpisodes: [JellyfinMediaItem] = []
         var seenIds = initialSeenItemIDs

@@ -788,7 +788,7 @@ final class JellyfinSessionManager: ObservableObject {
         userID: String,
         checkpoint: JellyfinSyncCheckpointStore,
         seenItemIDs: Set<String>,
-        onProgress: @escaping (JellyfinSyncCheckpointStore.PageProgress) -> Void
+        onProgress: @escaping @Sendable (JellyfinSyncCheckpointStore.PageProgress) -> Void
     ) async throws {
         let entity = "episodes:\(series.id)"
         _ = try await client.episodes(
