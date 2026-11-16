@@ -35,7 +35,7 @@ enum SMBLibraryScanner {
     static func scan(
         server: SMBServerConfig,
         browser: SMBBrowser,
-        onProgress: @escaping (Int, String) -> Void
+        onProgress: @escaping @Sendable (Int, String) -> Void
     ) async throws -> SMBScanResult {
         var files: [SMBMediaFile] = []
         var skippedCount = 0
