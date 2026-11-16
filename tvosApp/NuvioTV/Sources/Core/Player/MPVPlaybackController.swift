@@ -1033,7 +1033,8 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var startupVideoWasDetached = false
     private var pendingStartupVideoResync: PendingStartupVideoResync?
     private var startupDeferredFirstFrameFence: StartupResyncFence?
-    private var mpv: OpaquePointer?
+    // Written on the main actor only; read from `deinit`, which runs nonisolated.
+    nonisolated(unsafe) private var mpv: OpaquePointer?
     private lazy var eventQueue = DispatchQueue(label: "mpv-events", qos: .userInitiated)
     private var recentPlaybackLogs: [String] = []
     private enum DesiredTrackSelection {
@@ -2409,8 +2410,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         if let ctx = mpv {
             mpv = nil
             mpv_set_wakeup_callback(ctx, nil, nil)
+            let handle = SendableBox(ctx)
             eventQueue.async {
-                mpv_terminate_destroy(ctx)
+                mpv_terminate_destroy(handle.value)
             }
         }
     }
@@ -3329,14 +3331,16 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             object: nil,
             queue: .main
         ) { [weak self, weak manager] notification in
-            guard let self, let manager,
-                  self.matchesDisplayModeSwitchNotification(notification, manager: manager),
-                  self.observedDisplayManager === manager,
-                  self.displaySwitchGeneration == generation,
-                  self.isDisplaySwitchInFlight else { return }
-            self.displayModeSwitchStartObserved = true
-            self.displayModeSwitchEndObservedGeneration = nil
-            self.recordPlaybackSystemDiagnostic("display_switch_notification=started")
+            MainActor.assumeIsolated {
+                guard let self, let manager,
+                      self.matchesDisplayModeSwitchNotification(notification, manager: manager),
+                      self.observedDisplayManager === manager,
+                      self.displaySwitchGeneration == generation,
+                      self.isDisplaySwitchInFlight else { return }
+                self.displayModeSwitchStartObserved = true
+                self.displayModeSwitchEndObservedGeneration = nil
+                self.recordPlaybackSystemDiagnostic("display_switch_notification=started")
+            }
         }
 
         displayModeSwitchEndObserver = NotificationCenter.default.addObserver(
@@ -3344,19 +3348,21 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
             object: nil,
             queue: .main
         ) { [weak self, weak manager] notification in
-            guard let self, let manager,
-                  self.matchesDisplayModeSwitchNotification(notification, manager: manager),
-                  self.observedDisplayManager === manager,
-                  self.displaySwitchGeneration == generation,
-                  self.isDisplaySwitchInFlight,
-                  self.displayModeSwitchStartObserved else { return }
-            self.displayModeSwitchEndObservedGeneration = generation
-            self.recordPlaybackSystemDiagnostic("display_switch_notification=ended")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak manager] in
+            MainActor.assumeIsolated {
                 guard let self, let manager,
+                      self.matchesDisplayModeSwitchNotification(notification, manager: manager),
+                      self.observedDisplayManager === manager,
                       self.displaySwitchGeneration == generation,
-                      self.displayModeSwitchEndObservedGeneration == generation else { return }
-                self.reattachVideoWhenDisplaySettled(manager, attemptsLeft: 0, generation: generation)
+                      self.isDisplaySwitchInFlight,
+                      self.displayModeSwitchStartObserved else { return }
+                self.displayModeSwitchEndObservedGeneration = generation
+                self.recordPlaybackSystemDiagnostic("display_switch_notification=ended")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak manager] in
+                    guard let self, let manager,
+                          self.displaySwitchGeneration == generation,
+                          self.displayModeSwitchEndObservedGeneration == generation else { return }
+                    self.reattachVideoWhenDisplaySettled(manager, attemptsLeft: 0, generation: generation)
+                }
             }
         }
     }
