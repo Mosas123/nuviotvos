@@ -636,6 +636,7 @@ final class JellyfinSessionManager: ObservableObject {
                                 let series = pendingSeries[nextSeriesIndex]
                                 nextSeriesIndex += 1
                                 group.addTask { [weak self] in
+                                    let manager = self
                                     try await Self.fetchEpisodes(
                                         for: series,
                                         client: client,
@@ -643,8 +644,8 @@ final class JellyfinSessionManager: ObservableObject {
                                         checkpoint: checkpoint,
                                         seenItemIDs: savedEpisodeIDsBySeries[series.id] ?? [],
                                         onProgress: { progress in
-                                            Task { @MainActor [weak self] in
-                                                self?.publishSyncProgress(
+                                            Task { @MainActor in
+                                                manager?.publishSyncProgress(
                                                     serverID: server.id,
                                                     server: server,
                                                     generation: generation,
@@ -661,6 +662,7 @@ final class JellyfinSessionManager: ObservableObject {
                                     let series = pendingSeries[nextSeriesIndex]
                                     nextSeriesIndex += 1
                                     group.addTask { [weak self] in
+                                        let manager = self
                                         try await Self.fetchEpisodes(
                                             for: series,
                                             client: client,
@@ -668,8 +670,8 @@ final class JellyfinSessionManager: ObservableObject {
                                             checkpoint: checkpoint,
                                             seenItemIDs: savedEpisodeIDsBySeries[series.id] ?? [],
                                             onProgress: { progress in
-                                                Task { @MainActor [weak self] in
-                                                    self?.publishSyncProgress(
+                                                Task { @MainActor in
+                                                    manager?.publishSyncProgress(
                                                         serverID: server.id,
                                                         server: server,
                                                         generation: generation,
