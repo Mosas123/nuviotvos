@@ -68,7 +68,7 @@ enum CloudPlaybackResult {
 }
 
 /// A cloud backend that can list a user's saved items and resolve one to a link.
-protocol CloudLibraryProvider {
+protocol CloudLibraryProvider: Sendable {
     var providerId: String { get }
     var displayName: String { get }
     func listItems(apiKey: String) async throws -> [CloudItem]
