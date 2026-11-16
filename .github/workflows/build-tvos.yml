@@ -1,0 +1,101 @@
+name: Build tvOS
+
+# Builds the tvOS app and, optionally, packages the unsigned IPA the same way
+# releases are cut locally (scripts/build-ipa.sh). Used to validate compiler
+# migrations: the build log is uploaded on success and failure alike.
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: "Build configuration"
+        type: choice
+        options: [Debug, Release]
+        default: Debug
+      package_ipa:
+        description: "Package the unsigned IPA after a successful build"
+        type: boolean
+        default: true
+  push:
+    branches: [swift6-migration]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check local package inputs
+        run: |
+          test -f Vendor/LibTorrent/Package.swift || { echo 'Missing Vendor/LibTorrent: include the local package and its binary inputs in the checkout.'; exit 1; }
+          test -f MPVKit/Package.swift
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun --sdk appletvos --show-sdk-version
+
+      - name: Install Tuist
+        run: brew install tuist
+
+      - name: Generate Xcode project
+        run: tuist generate --path tvosApp --no-open
+
+      - name: Build
+        id: build
+        env:
+          CONFIGURATION: ${{ inputs.configuration || 'Debug' }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/nuvio-build"
+          LOG="$RUNNER_TEMP/nuvio-build/build.log"
+          {
+            xcodebuild build \
+              -workspace tvosApp/NuvioTV.xcworkspace \
+              -scheme NuvioTV \
+              -configuration "$CONFIGURATION" \
+              -destination 'generic/platform=tvOS' \
+              -derivedDataPath "$RUNNER_TEMP/NuvioTVDerivedData" \
+              -skipMacroValidation \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGN_ENTITLEMENTS="" \
+              NSUnbufferedIO=YES
+          } 2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Package unsigned IPA
+        if: steps.build.outputs.status == '0' && inputs.package_ipa
+        env:
+          NUVIO_IPA_OUTPUT_DIR: ${{ runner.temp }}/nuvio-build/ipa
+        run: bash scripts/build-ipa.sh
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/nuvio-build/build.log
+          if-no-files-found: ignore
+
+      - name: Upload IPA
+        if: steps.build.outputs.status == '0' && inputs.package_ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: NuvioTV-unsigned-ipa
+          path: ${{ runner.temp }}/nuvio-build/ipa/*.ipa
+          if-no-files-found: error
+
+      - name: Fail if build failed
+        if: steps.build.outputs.status != '0'
+        run: exit 1
