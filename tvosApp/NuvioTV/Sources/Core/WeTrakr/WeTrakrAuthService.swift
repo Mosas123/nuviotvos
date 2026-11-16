@@ -479,7 +479,7 @@ struct WeTrakrUserImages: Codable {
 
 // MARK: - Service
 
-final class WeTrakrAuthService {
+final class WeTrakrAuthService: @unchecked Sendable {
     private let client: WeTrakrAPIClient
     private let store: UserDefaults
     private let tokenStorage: WeTrakrTokenStorage

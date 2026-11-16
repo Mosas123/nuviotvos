@@ -2114,7 +2114,7 @@ struct WeTrakrProgressService {
         let sharedRepository = SendableBox(repository)
         let resolvedItems = await withTaskGroup(of: (Int, ContinueWatchingItem?).self) { group in
             for (orderIndex, plan) in plansToResolve.enumerated() {
-                group.addTask { @MainActor in
+                group.addTask {
                     var targetId = plan.placeholder.id
                     if targetId.hasPrefix("wetrakr:") {
                         let rawNum = String(targetId.dropFirst("wetrakr:".count))
