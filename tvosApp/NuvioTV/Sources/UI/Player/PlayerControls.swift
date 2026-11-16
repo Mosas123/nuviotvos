@@ -1016,7 +1016,7 @@ private struct PlayerSubtitleMenuButton: View, Equatable {
     let onToggleAudioSyncTiming: () -> Void
     let onSelectPreset: (SubtitleStylePreset) -> Void
 
-    nonisolated static func == (lhs: PlayerSubtitleMenuButton rhs: PlayerSubtitleMenuButton) -> Bool {
+    nonisolated static func == (lhs: PlayerSubtitleMenuButton, rhs: PlayerSubtitleMenuButton) -> Bool {
         lhs.isFocused == rhs.isFocused
             && lhs.noneOption == rhs.noneOption
             && lhs.languageGroups == rhs.languageGroups
@@ -1272,7 +1272,7 @@ private struct PlayerAudioMenuButton: View, Equatable {
     @AppStorage(SettingsKey.loudnessNormalizer) private var loudnessNormalizer = false
     @AppStorage(SettingsKey.loudnessTargetPreset) private var loudnessTargetPreset = "standard"
 
-    nonisolated static func == (lhs: PlayerAudioMenuButton rhs: PlayerAudioMenuButton) -> Bool {
+    nonisolated static func == (lhs: PlayerAudioMenuButton, rhs: PlayerAudioMenuButton) -> Bool {
         lhs.isFocused == rhs.isFocused
             && lhs.supportsAudioProcessing == rhs.supportsAudioProcessing
             && lhs.enhanceDialogueMode == rhs.enhanceDialogueMode
@@ -1466,7 +1466,7 @@ private struct PlayerSpeedMenuButton: View, Equatable {
     let isFocused: Bool
     let onSelectSpeed: (PlaybackSpeed) -> Void
 
-    nonisolated static func == (lhs: PlayerSpeedMenuButton rhs: PlayerSpeedMenuButton) -> Bool {
+    nonisolated static func == (lhs: PlayerSpeedMenuButton, rhs: PlayerSpeedMenuButton) -> Bool {
         lhs.isFocused == rhs.isFocused
             && lhs.currentSpeed == rhs.currentSpeed
     }

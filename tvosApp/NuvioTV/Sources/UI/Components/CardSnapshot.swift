@@ -10,7 +10,7 @@ struct CardSnapshot<Key: Equatable, Content: View>: View, Equatable {
 
     var body: some View { content }
 
-    nonisolated static func == (lhs: CardSnapshot rhs: CardSnapshot) -> Bool {
+    nonisolated static func == (lhs: CardSnapshot, rhs: CardSnapshot) -> Bool {
         lhs.key == rhs.key
     }
 }

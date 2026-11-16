@@ -392,7 +392,7 @@ struct TVLoadingCatalogRow: View {
 }
 
 extension TVLoadingCatalogRow: Equatable {
-    nonisolated static func == (lhs: TVLoadingCatalogRow rhs: TVLoadingCatalogRow) -> Bool {
+    nonisolated static func == (lhs: TVLoadingCatalogRow, rhs: TVLoadingCatalogRow) -> Bool {
         lhs.id == rhs.id
             && lhs.title == rhs.title
             && lhs.tileShape == rhs.tileShape
@@ -910,7 +910,7 @@ enum TVContinueWatchingCardLabels {
 }
 
 extension TVCatalogRow: Equatable {
-    nonisolated static func == (lhs: TVCatalogRow rhs: TVCatalogRow) -> Bool {
+    nonisolated static func == (lhs: TVCatalogRow, rhs: TVCatalogRow) -> Bool {
         guard lhs.id == rhs.id,
               lhs.initialScrollIndex == rhs.initialScrollIndex,
               lhs.customPosterScreen == rhs.customPosterScreen,
@@ -1813,7 +1813,7 @@ struct TVCollectionFolderRow: View {
 }
 
 extension TVCollectionFolderRow: Equatable {
-    nonisolated static func == (lhs: TVCollectionFolderRow rhs: TVCollectionFolderRow) -> Bool {
+    nonisolated static func == (lhs: TVCollectionFolderRow, rhs: TVCollectionFolderRow) -> Bool {
         guard lhs.id == rhs.id,
               lhs.initialScrollIndex == rhs.initialScrollIndex,
               lhs.suppressFocusAnimations == rhs.suppressFocusAnimations,
@@ -2133,7 +2133,7 @@ struct TVCollectionFolderCard: View {
 }
 
 extension TVCollectionFolderCard: Equatable {
-    nonisolated static func == (lhs: TVCollectionFolderCard rhs: TVCollectionFolderCard) -> Bool {
+    nonisolated static func == (lhs: TVCollectionFolderCard, rhs: TVCollectionFolderCard) -> Bool {
         lhs.folder == rhs.folder &&
         lhs.cardIndex == rhs.cardIndex &&
         lhs.shouldRequestInitialFocus == rhs.shouldRequestInitialFocus &&

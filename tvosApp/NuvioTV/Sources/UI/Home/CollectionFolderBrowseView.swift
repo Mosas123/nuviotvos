@@ -1043,7 +1043,7 @@ private struct CollectionFolderHomeStyleRow: View {
 }
 
 extension CollectionFolderHomeStyleRow: Equatable {
-    nonisolated static func == (lhs: CollectionFolderHomeStyleRow rhs: CollectionFolderHomeStyleRow) -> Bool {
+    nonisolated static func == (lhs: CollectionFolderHomeStyleRow, rhs: CollectionFolderHomeStyleRow) -> Bool {
         lhs.id == rhs.id
             && lhs.title == rhs.title
             && lhs.items == rhs.items
