@@ -537,7 +537,7 @@ private actor MdbListRefreshCoordinator {
     private var nextGeneration = 0
     private var entries: [String: Entry] = [:]
 
-    func refresh(key: String, operation: @escaping () async -> Bool) async -> Bool {
+    func refresh(key: String, operation: @escaping @Sendable () async -> Bool) async -> Bool {
         if let existing = entries[key] {
             return await existing.task.value
         }
@@ -554,7 +554,7 @@ private actor MdbListRefreshCoordinator {
     }
 }
 
-final class MdbListAuthService {
+final class MdbListAuthService: @unchecked Sendable {
     private let client: MdbListAPIClient
     private let store: UserDefaults
     private let profileScope: String
@@ -581,7 +581,7 @@ final class MdbListAuthService {
     }
 
     func startDeviceAuthorization(
-        shouldCommit: () -> Bool = { true }
+        shouldCommit: @MainActor @Sendable () -> Bool = { true }
     ) async throws -> MdbListDeviceAuthorizationResponse {
         let response = try await client.request(
             path: MdbListConfig.deviceAuthorizationPath,
@@ -605,7 +605,7 @@ final class MdbListAuthService {
         ) ?? verificationURL
         let expiresAt = Date().timeIntervalSince1970 * 1_000 + Double(expires * 1_000)
         try Task.checkCancellation()
-        guard shouldCommit() else { throw CancellationError() }
+        guard await shouldCommit() else { throw CancellationError() }
         MdbListAuthStore.saveDeviceFlow(
             deviceCode: deviceCode,
             userCode: userCode,
@@ -625,7 +625,7 @@ final class MdbListAuthService {
     }
 
     func pollDeviceAuthorization(
-        shouldCommit: () -> Bool = { true }
+        shouldCommit: @MainActor @Sendable () -> Bool = { true }
     ) async -> MdbListDevicePollResult {
         guard let code = MdbListAuthStore.deviceCode(in: store), !code.isEmpty else {
             return .failed("No active MDBList login code.")
@@ -649,7 +649,7 @@ final class MdbListAuthService {
                 ]
             )
             try Task.checkCancellation()
-            guard shouldCommit() else { return .pending }
+            guard await shouldCommit() else { return .pending }
             guard let object = try? jsonObject(response.data) else {
                 return .failed(response.errorMessage ?? "MDBList returned invalid login data.")
             }
@@ -659,7 +659,7 @@ final class MdbListAuthService {
                     return .failed(MdbListAuthError.insufficientScope.localizedDescription)
                 }
                 let user = await fetchUser(tokens: tokens.value, saveIfCurrent: false)
-                guard !Task.isCancelled, shouldCommit() else { return .pending }
+                guard !Task.isCancelled, await shouldCommit() else { return .pending }
                 guard MdbListAuthStore.saveTokens(
                     tokens.value,
                     user: user,
@@ -670,7 +670,7 @@ final class MdbListAuthService {
                     return .failed("Unable to securely save the MDBList login. Try connecting again.")
                 }
                 await MdbListRatingsService.invalidate(store: store, profileScope: profileScope)
-                guard !Task.isCancelled, shouldCommit() else { return .pending }
+                guard !Task.isCancelled, await shouldCommit() else { return .pending }
                 TraktSettingsStore.selectWatchProgressSourceOnConnect(.mdblist, in: store)
                 return .approved
             }
@@ -881,8 +881,9 @@ final class MdbListAuthService {
             store: store,
             tokenStorage: tokenStorage
         )
+        let sharedStore = SendableBox(store)
         Task { @MainActor in
-            MdbListRatingsService.invalidate(store: store, profileScope: profileScope)
+            MdbListRatingsService.invalidate(store: sharedStore.value, profileScope: profileScope)
         }
         if TraktSettingsStore.watchProgressSource(in: store) == .mdblist {
             store.set(TraktWatchProgressSource.nuvioSync.rawValue, forKey: SettingsKey.traktWatchProgressSource)
